@@ -1,0 +1,32 @@
+{
+  "snapshot_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/SnapShotsData/LHC23_PbPb_pass5_CustomV0s_HadronPID",
+  "analysis_results_file": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/apass5/AnalysisResults_CustomV0s_HadronPID.root",
+  "mc_file_for_acceptance": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/AO2D_CustomV0s.root",
+  "mc_file_for_absorption": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/AbsorptionTrees/absorption_tree_x1.5.root",
+  "working_point_file": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/WorkingPoint/WorkingPoint_SpectrumTest.txt",
+  "reweight_pt_file": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/H3l_2body_spectrum/utils/H3L_BWFit.root",
+  "tree_name": "O2hypcands",
+  "tree_name_mc": "O2mchypcands",
+  "tree_name_absorption": "he3candidates",
+  "output_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/BdtSpectrum",
+  "cen_bins": [0, 10, 30, 50, 80],
+  "pt_bins_by_centrality": [
+    [2, 3, 3.5, 4, 4.5, 5, 6, 8],
+    [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
+    [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
+    [2, 2.5, 3, 3.5, 4, 4.5, 5, 8]
+  ],
+  "is_matter": "both",
+  "bkg_fit_func": "pol2",
+  "signal_fit_func": "dscb",
+  "sigma_range_mc_to_data": [1.0, 1.5],
+  "branching_ratio": 0.25,
+  "delta_rap": 2.0,
+  "mass_min": 2.96,
+  "mass_max": 3.04,
+  "n_events_hist": "hyper-reco-task/hCentFT0C",
+  "enable_implicit_mt": true,
+  "do_systematics": false,
+  "syst_bdt_score_rel_shifts": [-0.10, 0.0, 0.10],
+  "syst_bkg_funcs": ["pol2", "pol1", "expo"]
+}

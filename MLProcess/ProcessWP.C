@@ -21,6 +21,7 @@
 #include <memory>
 #include <algorithm>
 #include <unordered_map>
+#include <cmath>
 
 #include <nlohmann/json.hpp>
 
@@ -34,8 +35,10 @@
 #include "RooCrystalBall.h"
 #include "RooPlot.h"
 #include "RooMsgService.h"
+#include "../Tools/GeneralHelper.hpp"
 
 using json = nlohmann::json;
+using namespace GeneralHelper;
 
 // tiny helper
 static std::string read_file_to_string(const std::string &path) {
@@ -65,6 +68,30 @@ static std::string fmt_edge(double x){
   return std::string(buf);
 }
 
+static std::string make_label(bool hasCen, bool hasPt, bool hasCt,
+                              double cenmin, double cenmax, double ptmin, double ptmax, double ctmin, double ctmax){
+  std::vector<std::string> parts;
+  if(hasCen) parts.push_back(std::string("cen_") + fmt_edge(cenmin) + "_" + fmt_edge(cenmax));
+  if(hasPt)  parts.push_back(std::string("pt_")  + fmt_edge(ptmin)  + "_" + fmt_edge(ptmax));
+  if(hasCt)  parts.push_back(std::string("ct_")  + fmt_edge(ctmin)  + "_" + fmt_edge(ctmax));
+  if(parts.empty()) return std::string("all");
+  std::string out = parts[0];
+  for(size_t i=1;i<parts.size();++i){ out += "_" + parts[i]; }
+  return out;
+}
+
+static std::string make_desc(bool hasCen, bool hasPt, bool hasCt,
+                             double cenmin, double cenmax, double ptmin, double ptmax, double ctmin, double ctmax){
+  std::vector<std::string> parts;
+  if(hasCen) parts.push_back(Form("centrality %.0f-%.0f", cenmin, cenmax));
+  if(hasPt)  parts.push_back(Form("pT %.2f-%.2f GeV/c", ptmin, ptmax));
+  if(hasCt)  parts.push_back(Form("ct %.2f-%.2f cm", ctmin, ctmax));
+  if(parts.empty()) return std::string("full phase space");
+  std::string out = parts[0];
+  for(size_t i=1;i<parts.size();++i){ out += std::string(", ") + parts[i]; }
+  return out;
+}
+
 void ProcessWP(const char *config_path = "../configs/config_WP.json"){
   RooMsgService::instance().setGlobalKillBelow(RooFit::FATAL); // suppress RooFit messages
   // read and parse config
@@ -78,9 +105,18 @@ void ProcessWP(const char *config_path = "../configs/config_WP.json"){
   std::string score_eff_dir   = cfg.value("score_eff_dir", std::string(""));
   std::string out_dir         = cfg.value("out_dir", std::string("WP_output"));
   std::string name_suffix         = cfg.value("name_suffix", std::string("Crosssection_Customvertex"));
-  bool MIXMode                    = cfg.value("MIXMode", true); // true: use pt+ct combined files; false: separate pt-only or ct-only files
+  std::string mix_mode_cfg        = cfg.value("Mix_mode", cfg.value("Mix_Mode", std::string("pt-ct")));
+  // compatibility with legacy boolean MIXMode
+  if(cfg.contains("MIXMode")){
+    bool legacy = cfg.value("MIXMode", true);
+    mix_mode_cfg = legacy ? std::string("pt-ct") : std::string("cen-pt");
+  }
+  std::string mix_mode = mix_mode_cfg;
+  std::transform(mix_mode.begin(), mix_mode.end(), mix_mode.begin(), ::tolower);
   std::vector<double> pt_bins = cfg.value("pt_bins", std::vector<double>{});
   std::vector<std::vector<double>> ct_bins = cfg.value("ct_bins", std::vector<std::vector<double>>{});
+  std::vector<double> cen_bins = cfg.value("cen_bins", std::vector<double>{});
+  std::vector<std::vector<double>> pt_bins_by_centrality = cfg.value("pt_bins_by_centrality", std::vector<std::vector<double>>{});
   std::vector<double> mass_range = cfg.value("mass_range", std::vector<double>{2.96, 3.04});
   int mass_nbins = cfg.value("mass_nbins", 50);
   std::vector<double> side_low  = cfg.value("sideband_low", std::vector<double>{2.96, 2.98});
@@ -95,9 +131,14 @@ void ProcessWP(const char *config_path = "../configs/config_WP.json"){
   std::string additional_text = cfg.value("additional_pave_text", std::string(""));
   std::vector<double> target_pt_range = cfg.value("target_pt_range", std::vector<double>{});
   std::vector<double> target_ct_range = cfg.value("target_ct_range", std::vector<double>{});
+  std::vector<double> target_cen_range = cfg.value("target_cen_range", std::vector<double>{});
+  bool enable_mt = cfg.value("enable_implicit_mt", false);
+
+  if(enable_mt) EnableImplicitMTWithPreferredThreads();
+
 
   gSystem->mkdir(out_dir.c_str(), true);
-
+  
   // prepare working point summary file (read existing to preserve other bins)
   std::string wp_txt = out_dir + "/WorkingPoint_" + name_suffix + ".txt";
   std::vector<std::string> wp_lines;
@@ -108,58 +149,125 @@ void ProcessWP(const char *config_path = "../configs/config_WP.json"){
       while(std::getline(ifs_wp_in, line)) wp_lines.push_back(line);
     }
   }
-  auto upsert_wp_line = [&](double ptmin, double ptmax, double ctmin, double ctmax, double bestScore, double bestEff, double bestSig){
-    char keybuf[256]; snprintf(keybuf, sizeof(keybuf), "%g %g %g %g", ptmin, ptmax, ctmin, ctmax);
-    std::string key(keybuf);
-    std::string newline = Form("%s %g %g %g", key.c_str(), bestScore, bestEff, bestSig);
+
+  enum class WPFormat { Full, CenPt, PtCt };
+  auto format_from_mix = [](const std::string &mode){
+    if(mode == "cen-pt") return WPFormat::CenPt;
+    if(mode == "pt-ct" || mode == "pt-ct-single") return WPFormat::PtCt;
+    return WPFormat::Full; // fallback keeps legacy 6-column boundaries
+  };
+  WPFormat wp_format = format_from_mix(mix_mode);
+
+  auto header_for_format = [](WPFormat fmt){
+    switch(fmt){
+      case WPFormat::CenPt: return std::string("# format: cenmin cenmax ptmin ptmax best_score best_eff max_significance");
+      case WPFormat::PtCt:  return std::string("# format: ptmin ptmax ctmin ctmax best_score best_eff max_significance");
+      default:              return std::string("# cenmin cenmax ptmin ptmax ctmin ctmax best_score best_eff max_significance");
+    }
+  };
+
+  auto detect_format_from_lines = [&](WPFormat current){
+    for(const auto &ln : wp_lines){
+      if(ln.rfind("#",0)!=0) continue;
+      if(ln.find("ptmin ptmax ctmin ctmax") != std::string::npos) return WPFormat::PtCt;
+      if(ln.find("cenmin cenmax ptmin ptmax") != std::string::npos) return WPFormat::CenPt;
+      if(ln.find("ctmin ctmax") != std::string::npos) return WPFormat::Full;
+    }
+    return current;
+  };
+
+  auto make_key_string = [&](double cenmin, double cenmax, double ptmin, double ptmax, double ctmin, double ctmax){
+    switch(wp_format){
+      case WPFormat::CenPt: return std::string(Form("%g %g %g %g", cenmin, cenmax, ptmin, ptmax));
+      case WPFormat::PtCt:  return std::string(Form("%g %g %g %g", ptmin, ptmax, ctmin, ctmax));
+      default:              return std::string(Form("%g %g %g %g %g %g", cenmin, cenmax, ptmin, ptmax, ctmin, ctmax));
+    }
+  };
+
+  auto parse_line_key = [&](const std::string &line){
+    if(line.empty() || line[0]=='#') return std::string();
+    std::stringstream ss(line);
+    std::vector<double> vals; double v;
+    while(ss>>v) vals.push_back(v);
+    if(wp_format == WPFormat::Full && vals.size() >= 6){
+      return make_key_string(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]);
+    }
+    if(wp_format == WPFormat::CenPt && vals.size() >= 4){
+      return make_key_string(vals[0], vals[1], vals[2], vals[3], -1.0, -1.0);
+    }
+    if(wp_format == WPFormat::PtCt && vals.size() >= 4){
+      return make_key_string(-1.0, -1.0, vals[0], vals[1], vals[2], vals[3]);
+    }
+    return std::string();
+  };
+
+  wp_format = detect_format_from_lines(wp_format);
+  auto upsert_wp_line = [&](bool hasCen, bool hasPt, bool hasCt,
+                            double cenmin, double cenmax, double ptmin, double ptmax, double ctmin, double ctmax,
+                            double bestScore, double bestEff, double bestSig){
+    double cenmin_w = hasCen ? cenmin : -1.0;
+    double cenmax_w = hasCen ? cenmax : -1.0;
+    double ptmin_w  = hasPt  ? ptmin  : -1.0;
+    double ptmax_w  = hasPt  ? ptmax  : -1.0;
+    double ctmin_w  = hasCt  ? ctmin  : -1.0;
+    double ctmax_w  = hasCt  ? ctmax  : -1.0;
+    std::string key = make_key_string(cenmin_w, cenmax_w, ptmin_w, ptmax_w, ctmin_w, ctmax_w);
+    std::string newline;
+    if(wp_format == WPFormat::CenPt){
+      newline = Form("%s %g %g %g", key.c_str(), bestScore, bestEff, bestSig);
+    } else if(wp_format == WPFormat::PtCt){
+      newline = Form("%s %g %g %g", key.c_str(), bestScore, bestEff, bestSig);
+    } else {
+      newline = Form("%s %g %g %g", key.c_str(), bestScore, bestEff, bestSig);
+    }
     bool replaced=false;
     for(size_t i=0;i<wp_lines.size();++i){
-      if(wp_lines[i].size()==0 || wp_lines[i][0]=='#') continue;
-      // compare first four columns
-      std::stringstream ss(wp_lines[i]);
-      double a,b,c,d; ss>>a>>b>>c>>d; if(ss.fail()) continue;
-      char oldkey[256]; snprintf(oldkey, sizeof(oldkey), "%g %g %g %g", a,b,c,d);
-      if(key == std::string(oldkey)) { wp_lines[i] = newline; replaced=true; break; }
+      std::string existing_key = parse_line_key(wp_lines[i]);
+      if(existing_key.empty()) continue;
+      if(key == existing_key) { wp_lines[i] = newline; replaced=true; break; }
     }
     if(!replaced){
       // ensure header exists once
       if(wp_lines.empty() || wp_lines[0].rfind("#",0)!=0){
-        wp_lines.insert(wp_lines.begin(), std::string("# ptmin ptmax ctmin ctmax best_score best_eff max_significance"));
+        wp_lines.insert(wp_lines.begin(), header_for_format(wp_format));
       }
       wp_lines.push_back(newline);
     }
   };
 
-  // helper: 处理一个 bin，mode: 0=combined, 1=pt-only, 2=ct-only
-  auto process_one_bin = [&](double ptmin, double ptmax, double ctmin, double ctmax, int mode){
-      printf("[WP] mode %d | pt %g-%g, ct %g-%g\n", mode, ptmin, ptmax, ctmin, ctmax);
+  struct BinContext {
+    bool hasCen{false};
+    bool hasPt{true};
+    bool hasCt{true};
+    double cenmin{0}, cenmax{0};
+    double ptmin{0}, ptmax{0};
+    double ctmin{0}, ctmax{0};
+    int mode{0}; // optional log code
+    std::string label;
+    std::string desc;
+  };
 
-      // snapshot and score-eff file paths depending on mode
-      std::string snap_path, score_path;
-      if(mode == 0){ // combined
-        snap_path = trained_data_dir + "/data_pt_" + fmt_edge(ptmin) + "_" + fmt_edge(ptmax)
-                  + "_ct_" + fmt_edge(ctmin) + "_" + fmt_edge(ctmax) + ".root";
-        score_path = score_eff_dir + "/score_efficiency_array_pt_" + fmt_edge(ptmin) + "_" + fmt_edge(ptmax)
-                  + "_ct_" + fmt_edge(ctmin) + "_" + fmt_edge(ctmax) + ".txt";
-      } else if(mode == 1){ // pt-only
-        snap_path = trained_data_dir + "/data_pt_" + fmt_edge(ptmin) + "_" + fmt_edge(ptmax) + ".root";
-        score_path = score_eff_dir + "/score_efficiency_array_pt_" + fmt_edge(ptmin) + "_" + fmt_edge(ptmax) + ".txt";
-      } else { // ct-only
-        snap_path = trained_data_dir + "/data_ct_" + fmt_edge(ctmin) + "_" + fmt_edge(ctmax) + ".root";
-        score_path = score_eff_dir + "/score_efficiency_array_ct_" + fmt_edge(ctmin) + "_" + fmt_edge(ctmax) + ".txt";
-      }
+  auto process_one_bin = [&](const BinContext &ctx){
+      printf("[WP] mode %d | %s\n", ctx.mode, ctx.desc.c_str());
+
+      std::string label = ctx.label.empty() ? make_label(ctx.hasCen, ctx.hasPt, ctx.hasCt,
+                                                         ctx.cenmin, ctx.cenmax, ctx.ptmin, ctx.ptmax, ctx.ctmin, ctx.ctmax)
+                                            : ctx.label;
+      // snapshot and score-eff file paths aligned with BDTPreProcess labels
+      std::string snap_path   = trained_data_dir + "/data_" + label + ".root";
+      std::string score_path  = score_eff_dir   + "/score_efficiency_array_" + label + ".txt";
 
       // open data
       if (gSystem->AccessPathName(snap_path.c_str())){ printf("  missing snapshot: %s\n", snap_path.c_str()); return -1; }
-      ROOT::RDataFrame df(tree_name.c_str(), snap_path.c_str());
+      // read only required columns to reduce IO on large snapshots
+      ROOT::RDataFrame df(tree_name.c_str(), snap_path.c_str(), {"fMassH3L", "model_output"});
 
       // read score-eff
       std::vector<double> scores, effs; read_score_eff_file(score_path, scores, effs);
       if(scores.empty()) { printf("  missing score-eff: %s\n", score_path.c_str()); return -1; }
 
       // output ROOT file per-bin
-      std::string out_root = out_dir + "/WP_pt_" + fmt_edge(ptmin) + "_" + fmt_edge(ptmax)
-           + "_ct_" + fmt_edge(ctmin) + "_" + fmt_edge(ctmax) + ".root";
+      std::string out_root = out_dir + "/WP_" + label + ".root";
       TFile fout(out_root.c_str(), "RECREATE");
       if(fout.IsZombie()){ printf("  cannot create %s\n", out_root.c_str()); return -1; }
       TDirectory *dFits = fout.mkdir("Fits");
@@ -177,24 +285,29 @@ void ProcessWP(const char *config_path = "../configs/config_WP.json"){
       std::vector<double> sideband_diff_vals(scores.size(), 999.0); // fitted signal yield
 
       // 预取该 bin 全部事件的质量与分数，避免每个 score 阈值重复扫描树
-      // 使用 RDataFrame 一次性过滤 pt/ct（当前 df 已按 bin 过滤），直接读取列
-      auto mass_col_vec_ptr = df.Take<double>("fMassH3L");
-      auto score_col_vec_ptr = df.Take<float>("model_output");
-      const std::vector<double> &mass_all = *mass_col_vec_ptr;
-      const std::vector<float> &score_all = *score_col_vec_ptr;
-      size_t nEventsAll = mass_all.size();
-      // 为增量构建按分数降序排序的索引
-      std::vector<size_t> idx_desc(nEventsAll);
-      for(size_t i=0;i<nEventsAll;++i) idx_desc[i]=i;
-      std::sort(idx_desc.begin(), idx_desc.end(), [&](size_t a, size_t b){ return score_all[a] > score_all[b]; });
-      // 为真正增量：单一 RooDataSet，按降序遍历 score 阈值时只追加新事件
+      // 使用 ForeachSlot 收集每个 slot 的局部向量，减少锁开销，再合并并按分数降序一次排序
+      const auto nSlots = df.GetNSlots();
+      std::vector<std::vector<std::pair<float,double>>> slotPairs(nSlots);
+      df.ForeachSlot([&](unsigned int slot, double mass, float score){
+        slotPairs[slot].emplace_back(score, mass);
+      }, {"fMassH3L", "model_output"});
+
+      std::vector<std::pair<float,double>> events;
+      size_t totalEv = 0; for (const auto &v : slotPairs) totalEv += v.size();
+      events.reserve(totalEv);
+      for (auto &v : slotPairs) {
+        events.insert(events.end(), v.begin(), v.end());
+      }
+      std::sort(events.begin(), events.end(), [](const auto &a, const auto &b){ return a.first > b.first; });
+      size_t nEventsAll = events.size();
+      // 为真正增量：单一 RooDataSet，按降序遍历 score 阈值时只追加新事件（events 已降序）
       // 创建 mass 变量与数据集（初始为空）
       RooRealVar m_global("m","mass", mmin, mmax);
       RooArgSet global_vars(m_global);
       RooDataSet dataSetIncremental("dataSetIncremental","dataSetIncremental", global_vars);
       // 累积直方图（用于侧带逐点残差评估）
       TH1D hCum("hCum","hCum", mass_nbins, mmin, mmax);
-      // 记录当前已添加到数据集的事件数（指向 idx_desc 前缀）
+      // 记录当前已添加到数据集的事件数（指向 events 前缀）
       size_t ptr_added = 0;
       // 为输出保持原始顺序，需要一个按分数降序的 index 数组
       std::vector<int> idx_scores(scores.size());
@@ -211,9 +324,8 @@ void ProcessWP(const char *config_path = "../configs/config_WP.json"){
         int original_index = idx_scores[ord];
         double sc = scores[original_index];
         // 追加新事件（score >= sc 且尚未添加）
-        while(ptr_added < idx_desc.size() && score_all[idx_desc[ptr_added]] >= sc){
-          size_t evIdx = idx_desc[ptr_added];
-          double mv = mass_all[evIdx];
+        while(ptr_added < events.size() && events[ptr_added].first >= sc){
+          double mv = events[ptr_added].second;
           if(mv >= mmin && mv <= mmax){
             m_global.setVal(mv);
             dataSetIncremental.add(global_vars);
@@ -373,7 +485,7 @@ void ProcessWP(const char *config_path = "../configs/config_WP.json"){
         TGraph grPass((int)passScores.size());
         for(int i=0;i<(int)passScores.size();++i) grPass.SetPoint(i, passScores[i], passSig3[i]);
         grPass.SetName("gr_significance_vs_score_3sigma");
-        grPass.SetTitle(Form("pt %g-%g ct %g-%g;BDT score;Expected significance (3#sigma) #times eff", ptmin, ptmax, ctmin, ctmax));
+        grPass.SetTitle((ctx.desc + ";BDT score;Expected significance (3#sigma) #times eff").c_str());
         grPass.SetLineWidth(2);
         grPass.SetLineColor(kBlack);
         grPass.Write();
@@ -403,7 +515,7 @@ void ProcessWP(const char *config_path = "../configs/config_WP.json"){
         TCanvas c("c_sig","c_sig",900,650);
         c.SetLeftMargin(0.12); c.SetRightMargin(0.04); c.SetBottomMargin(0.12); c.SetTopMargin(0.08);
         c.SetGridx(); c.SetGridy();
-        band.SetTitle(Form("pt %g-%g  ct %g-%g;BDT score;Expected significance (3#sigma) #times eff", ptmin, ptmax, ctmin, ctmax));
+        band.SetTitle((ctx.desc + ";BDT score;Expected significance (3#sigma) #times eff").c_str());
         band.Draw("AF");
         grPass.Draw("L");
         TGraph grBestDraw(1); grBestDraw.SetPoint(0, bestScore, bestSig);
@@ -427,11 +539,11 @@ void ProcessWP(const char *config_path = "../configs/config_WP.json"){
         ptWP->AddText(Form("N_{s}/#sqrt{(N_{s}+N_{B})} #times #epsilon(#it{BDT}) = %.2f", bestSig));
         ptWP->Draw();
         c.Update();
-        c.SaveAs((out_dir+Form("/sig_vs_score_pt_%g_%g_ct_%g_%g.pdf", ptmin, ptmax, ctmin, ctmax)).c_str());
+        c.SaveAs((out_dir+"/sig_vs_score_"+label+".pdf").c_str());
       }
 
       // upsert working point line to summary vector (preserve other bins)
-      upsert_wp_line(ptmin, ptmax, ctmin, ctmax, bestScore, bestEff, bestSig);
+      upsert_wp_line(ctx.hasCen, ctx.hasPt, ctx.hasCt, ctx.cenmin, ctx.cenmax, ctx.ptmin, ctx.ptmax, ctx.ctmin, ctx.ctmax, bestScore, bestEff, bestSig);
 
       // 保存最佳工作点对应的拟合图
       if(bestIdx >= 0){
@@ -444,7 +556,7 @@ void ProcessWP(const char *config_path = "../configs/config_WP.json"){
             TCanvas cbest("c_bestfit","c_bestfit",900,650);
             cbest.SetLeftMargin(0.12); cbest.SetRightMargin(0.04); cbest.SetBottomMargin(0.12); cbest.SetTopMargin(0.08);
             frBest->Draw();
-            cbest.SaveAs((out_dir+Form("/best_fit_pt_%g_%g_ct_%g_%g.pdf", ptmin, ptmax, ctmin, ctmax)).c_str());
+            cbest.SaveAs((out_dir+"/best_fit_"+label+".pdf").c_str());
           }
         }
       }
@@ -452,9 +564,9 @@ void ProcessWP(const char *config_path = "../configs/config_WP.json"){
       return 1;
   };
 
-  // iterate bins per MIXMode 语义
-  if(MIXMode){
-    // 组合模式：pt 外层，ct 内层（ctbins 为二维）
+  // iterate bins per mix_mode 语义
+  bool did_any = false;
+  if(mix_mode == "pt-ct"){
     for(size_t i_pt=0; i_pt+1<pt_bins.size(); ++i_pt){
       double ptmin = pt_bins[i_pt];
       double ptmax = pt_bins[i_pt+1];
@@ -469,51 +581,93 @@ void ProcessWP(const char *config_path = "../configs/config_WP.json"){
         if(target_ct_range.size()==2){
           if( !(fabs(ctmin - target_ct_range[0])<1e-6 && fabs(ctmax - target_ct_range[1])<1e-6) ) continue;
         }
-        int status = process_one_bin(ptmin, ptmax, ctmin, ctmax, 0);
+        BinContext ctx; ctx.hasPt=true; ctx.hasCt=true; ctx.mode=0;
+        ctx.ptmin=ptmin; ctx.ptmax=ptmax; ctx.ctmin=ctmin; ctx.ctmax=ctmax;
+        ctx.label = make_label(false,true,true,0,0,ptmin,ptmax,ctmin,ctmax);
+        ctx.desc  = make_desc(false,true,true,0,0,ptmin,ptmax,ctmin,ctmax);
+        int status = process_one_bin(ctx); did_any = true;
         if (status < 1){
           printf("  failed processing pt %g-%g ct %g-%g with error type: %d \n", ptmin, ptmax, ctmin, ctmax, status);}
       }
     }
-  } else {
-    // 非组合：分别遍历 pt-only 与 ct-only（若提供 target 则仅处理目标）
-    bool did_any = false;
-    // pt-only pass
-    if(target_pt_range.size()==2){
-      int status = process_one_bin(target_pt_range[0], target_pt_range[1], 0.0, 0.0, 1); did_any = true;
-      if (status < 1){
-        printf("  failed processing pt %g-%g (pt-only) with error type: %d \n", target_pt_range[0], target_pt_range[1], status);
+  } else if(mix_mode == "cen-pt"){
+    if(cen_bins.size()<2){ printf("cen-pt mode requires cen_bins.\n"); }
+    const auto &pt_by_cen = (!pt_bins_by_centrality.empty()) ? pt_bins_by_centrality : std::vector<std::vector<double>>{};
+    for(size_t i_c=0; i_c+1<cen_bins.size(); ++i_c){
+      double cenmin = cen_bins[i_c];
+      double cenmax = cen_bins[i_c+1];
+      if(target_cen_range.size()==2){
+        if( !(fabs(cenmin - target_cen_range[0])<1e-6 && fabs(cenmax - target_cen_range[1])<1e-6) ) continue;
       }
-    } else if(!pt_bins.empty()){
+      std::vector<double> pt_edges;
+      if(!pt_by_cen.empty()){
+        if(i_c >= pt_by_cen.size()) { printf("pt_bins_by_centrality missing for cen index %zu\n", i_c); break; }
+        pt_edges = pt_by_cen[i_c];
+      } else {
+        pt_edges = pt_bins;
+      }
+      if(pt_edges.size()<2){ printf("pt bins missing for cen index %zu\n", i_c); continue; }
+      for(size_t i_pt=0; i_pt+1<pt_edges.size(); ++i_pt){
+        double ptmin = pt_edges[i_pt];
+        double ptmax = pt_edges[i_pt+1];
+        BinContext ctx; ctx.hasCen=true; ctx.hasPt=true; ctx.hasCt=false; ctx.mode=3;
+        ctx.cenmin=cenmin; ctx.cenmax=cenmax; ctx.ptmin=ptmin; ctx.ptmax=ptmax; ctx.ctmin=0; ctx.ctmax=0;
+        ctx.label = make_label(true,true,false,cenmin,cenmax,ptmin,ptmax,0,0);
+        ctx.desc  = make_desc(true,true,false,cenmin,cenmax,ptmin,ptmax,0,0);
+        int status = process_one_bin(ctx); did_any = true;
+        if (status < 1){
+          printf("  failed processing cen %g-%g pt %g-%g with error type: %d \n", cenmin, cenmax, ptmin, ptmax, status);
+        }
+      }
+    }
+  } else if(mix_mode == "pt-ct-single"){
+    if(target_pt_range.size()!=2 || target_ct_range.size()!=2){
+      printf("pt-ct-single mode requires target_pt_range and target_ct_range (len=2).\n");
+    } else {
+      BinContext ctx; ctx.hasPt=true; ctx.hasCt=true; ctx.mode=4;
+      ctx.ptmin=target_pt_range[0]; ctx.ptmax=target_pt_range[1];
+      ctx.ctmin=target_ct_range[0]; ctx.ctmax=target_ct_range[1];
+      ctx.label = make_label(false,true,true,0,0,ctx.ptmin,ctx.ptmax,ctx.ctmin,ctx.ctmax);
+      ctx.desc  = make_desc(false,true,true,0,0,ctx.ptmin,ctx.ptmax,ctx.ctmin,ctx.ctmax);
+      int status = process_one_bin(ctx); did_any = true;
+      if (status < 1){ printf("  failed processing single pt-ct bin with error type: %d \n", status); }
+    }
+  } else if(mix_mode == "pt-single"){
+    if(target_pt_range.size()==2){
+      BinContext ctx; ctx.hasPt=true; ctx.hasCt=false; ctx.mode=1; ctx.ptmin=target_pt_range[0]; ctx.ptmax=target_pt_range[1];
+      ctx.label = make_label(false,true,false,0,0,ctx.ptmin,ctx.ptmax,0,0);
+      ctx.desc  = make_desc(false,true,false,0,0,ctx.ptmin,ctx.ptmax,0,0);
+      int status = process_one_bin(ctx); did_any = true;
+      if (status < 1){ printf("  failed processing pt %g-%g (pt-only) with error type: %d \n", ctx.ptmin, ctx.ptmax, status); }
+    } else {
       for(size_t i_pt=0; i_pt+1<pt_bins.size(); ++i_pt){
         double ptmin = pt_bins[i_pt];
         double ptmax = pt_bins[i_pt+1];
-        int status = process_one_bin(ptmin, ptmax, 0.0, 0.0, 1); did_any = true;
-        if (status < 1){
-          printf("  failed processing pt %g-%g (pt-only) with error type: %d \n", ptmin, ptmax, status);
-        }
+        BinContext ctx; ctx.hasPt=true; ctx.hasCt=false; ctx.mode=1; ctx.ptmin=ptmin; ctx.ptmax=ptmax;
+        ctx.label = make_label(false,true,false,0,0,ptmin,ptmax,0,0);
+        ctx.desc  = make_desc(false,true,false,0,0,ptmin,ptmax,0,0);
+        int status = process_one_bin(ctx); did_any = true;
+        if (status < 1){ printf("  failed processing pt %g-%g (pt-only) with error type: %d \n", ptmin, ptmax, status); }
       }
     }
-    // ct-only pass
-    if(target_ct_range.size()==2){
-      int status = process_one_bin(0.0, 0.0, target_ct_range[0], target_ct_range[1], 2); did_any = true;
-      if (status < 1){
-        printf("  failed processing ct %g-%g (ct-only) with error type: %d \n", target_ct_range[0], target_ct_range[1], status);
-      }
-    } else if(!ct_bins.empty()){
-      if (!ct_bins.empty()) {
-        std::vector<double> ct_edges_global = ct_bins[0];
-        for(size_t i_ct=0; i_ct+1<ct_edges_global.size(); ++i_ct){
-          double ctmin = ct_edges_global[i_ct];
-          double ctmax = ct_edges_global[i_ct+1];
-          int status = process_one_bin(0.0, 0.0, ctmin, ctmax, 2); did_any = true;
-          if (status < 1){
-            printf("  failed processing ct %g-%g (ct-only) with error type: %d \n", ctmin, ctmax, status);}
-          }
-        }
-      }
-    if(!did_any){
-      printf("No bins to process in non-MIX mode. Provide pt_bins or ct_bins or target ranges.\n");
+  } else if(mix_mode == "ct-single"){
+    // pt filter optional via target_pt_range (keeps label consistent if provided)
+    if(target_ct_range.size()!=2){ printf("ct-single mode requires target_ct_range (len=2).\n"); }
+    else {
+      BinContext ctx; ctx.hasCt=true; ctx.hasPt = (target_pt_range.size()==2); ctx.mode=2;
+      ctx.ctmin=target_ct_range[0]; ctx.ctmax=target_ct_range[1];
+      if(ctx.hasPt){ ctx.ptmin=target_pt_range[0]; ctx.ptmax=target_pt_range[1]; }
+      ctx.label = make_label(false, ctx.hasPt, true, 0,0, ctx.ptmin, ctx.ptmax, ctx.ctmin, ctx.ctmax);
+      ctx.desc  = make_desc(false, ctx.hasPt, true, 0,0, ctx.ptmin, ctx.ptmax, ctx.ctmin, ctx.ctmax);
+      int status = process_one_bin(ctx); did_any = true;
+      if (status < 1){ printf("  failed processing ct %g-%g (ct-only) with error type: %d \n", ctx.ctmin, ctx.ctmax, status); }
     }
+  } else {
+    printf("Unsupported Mix_mode: %s\n", mix_mode.c_str());
+  }
+
+  if(!did_any){
+    printf("No bins to process for current mix_mode.\n");
   }
 
   // write back summary file

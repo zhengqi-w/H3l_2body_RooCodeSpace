@@ -11,6 +11,7 @@
 //   calc.Calculate();
 //   auto [counts, errs] = calc.GetCountsList("both");
 
+#include <ROOT/RDataFrame.hxx>
 #include <TTree.h>
 #include <TTreeReader.h>
 #include <TTreeReaderValue.h>
@@ -23,6 +24,8 @@
 #include <map>
 #include <memory>
 #include <iostream>
+#include <random>
+#include <chrono>
 
 namespace Absorption {
 
@@ -225,6 +228,129 @@ private:
     std::string keyBoth = "both";
     std::string keyMat = "matter";
     std::string keyAnti = "antimatter";
+};
+
+// SpectrumAbsorptionCalculator: fills pt-binned absorption efficiencies (both/matter/antimatter)
+// using a simple survival test per candidate. Histograms are 1D in pt with the provided binning.
+class SpectrumAbsorptionCalculator {
+public:
+    SpectrumAbsorptionCalculator(ROOT::RDF::RNode rdf, const std::vector<double> &ptBins, double org_ctao = 7.6)
+        : fRdf(std::move(rdf)), fPtBins(ptBins), fOrgCtao(org_ctao) {
+        initHistos();
+    }
+
+    void Calculate() {
+        resetHistos();
+        // slot-local histograms to keep thread safety
+        std::vector<SlotHists> slotHists(1);
+        slotHists.front().init(fPtBins);
+
+        // RNG per slot
+        std::vector<std::mt19937> rngs(1);
+        auto seed = static_cast<unsigned>(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        for (unsigned int i = 0; i < rngs.size(); ++i) rngs[i].seed(seed + i * 101);
+        std::exponential_distribution<float> expo(1.0f / static_cast<float>(fOrgCtao));
+
+        fRdf.ForeachSlot([&](unsigned int slot, float pt, float eta, float phi, float ax, float ay, float az, int pdg) {
+            if (slot >= slotHists.size()) {
+                slotHists.resize(slot + 1);
+                slotHists[slot].init(fPtBins);
+                rngs.resize(slot + 1);
+                rngs[slot].seed(seed + slot * 101);
+            }
+            auto &sh = slotHists[slot];
+            std::string key = (pdg > 0) ? keyMat : keyAnti;
+            TLorentzVector lv; lv.SetPtEtaPhiM(pt, eta, phi, HE3_MASS);
+            float he3p = lv.P();
+            float absoL = std::sqrt(ax * ax + ay * ay + az * az);
+            float absoCt = (he3p != 0) ? absoL * HE3_MASS / he3p : 1e9;
+            float decCt = expo(rngs[slot]);
+            sh.hCounts[keyBoth]->Fill(pt);
+            sh.hCounts[key]->Fill(pt);
+            if (absoCt > decCt) {
+                sh.hCountsAbsorb[keyBoth]->Fill(pt);
+                sh.hCountsAbsorb[key]->Fill(pt);
+            }
+        }, {"pt", "eta", "phi", "absoX", "absoY", "absoZ", "pdg"});
+
+        // merge slot histograms
+        for (const auto &sh : slotHists) {
+            mergeInto(fHCounts, sh.hCounts);
+            mergeInto(fHCountsAbsorb, sh.hCountsAbsorb);
+        }
+
+        // compute ratios
+        for (const auto &key : {keyBoth, keyMat, keyAnti}) {
+            fHRatio[key].Divide(&fHCountsAbsorb[key], &fHCounts[key], 1.0, 1.0, "B");
+        }
+    }
+
+    const std::map<std::string, TH1F> &Counts() const { return fHCounts; }
+    const std::map<std::string, TH1F> &CountsAbsorb() const { return fHCountsAbsorb; }
+    const std::map<std::string, TH1F> &Ratio() const { return fHRatio; }
+
+private:
+    struct SlotHists {
+        std::map<std::string, std::unique_ptr<TH1F>> hCounts;
+        std::map<std::string, std::unique_ptr<TH1F>> hCountsAbsorb;
+
+        void init(const std::vector<double> &edges) {
+            if (!hCounts.empty()) return;
+            auto make = [&](const std::string &name) {
+                auto h = std::make_unique<TH1F>(name.c_str(), "" , static_cast<int>(edges.size()) - 1, edges.data());
+                h->SetDirectory(nullptr);
+                h->Sumw2();
+                return h;
+            };
+            hCounts[keyBoth] = make("slot_counts_both");
+            hCounts[keyMat] = make("slot_counts_matter");
+            hCounts[keyAnti] = make("slot_counts_antimatter");
+            hCountsAbsorb[keyBoth] = make("slot_abs_both");
+            hCountsAbsorb[keyMat] = make("slot_abs_matter");
+            hCountsAbsorb[keyAnti] = make("slot_abs_antimatter");
+        }
+    };
+
+    void initHistos() {
+        auto make = [&](const std::string &name) {
+            TH1F h(name.c_str(), "" , static_cast<int>(fPtBins.size()) - 1, fPtBins.data());
+            h.SetDirectory(nullptr);
+            h.Sumw2();
+            return h;
+        };
+        fHCounts[keyBoth] = make("counts_both");
+        fHCounts[keyMat] = make("counts_matter");
+        fHCounts[keyAnti] = make("counts_antimatter");
+        fHCountsAbsorb[keyBoth] = make("counts_abs_both");
+        fHCountsAbsorb[keyMat] = make("counts_abs_matter");
+        fHCountsAbsorb[keyAnti] = make("counts_abs_antimatter");
+        fHRatio[keyBoth] = make("ratio_both");
+        fHRatio[keyMat] = make("ratio_matter");
+        fHRatio[keyAnti] = make("ratio_antimatter");
+    }
+
+    void resetHistos() {
+        for (auto &kv : fHCounts) kv.second.Reset();
+        for (auto &kv : fHCountsAbsorb) kv.second.Reset();
+        for (auto &kv : fHRatio) kv.second.Reset();
+    }
+
+    void mergeInto(std::map<std::string, TH1F> &dest,
+                   const std::map<std::string, std::unique_ptr<TH1F>> &src) {
+        for (const auto &kv : src) {
+            if (kv.second) dest[kv.first].Add(kv.second.get());
+        }
+    }
+
+    ROOT::RDF::RNode fRdf;
+    std::vector<double> fPtBins;
+    double fOrgCtao{7.6};
+    std::map<std::string, TH1F> fHCounts;
+    std::map<std::string, TH1F> fHCountsAbsorb;
+    std::map<std::string, TH1F> fHRatio;
+    inline static const std::string keyBoth = "both";
+    inline static const std::string keyMat = "matter";
+    inline static const std::string keyAnti = "antimatter";
 };
 
 } // namespace Absorption
