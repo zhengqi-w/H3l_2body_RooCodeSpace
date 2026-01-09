@@ -10,6 +10,7 @@
 #include <TF1.h>
 #include <TString.h>
 #include <TSystem.h>
+#include <TLatex.h>
 
 #include <ROOT/RDataFrame.hxx>
 
@@ -23,6 +24,55 @@
 #include <string>
 #include <vector>
 namespace {
+
+std::string MakeDecayString(const std::string &mode) {
+    if (mode == "matter") {
+        return "{}^{3}_{#Lambda}H #rightarrow ^{3}He+#pi^{-}";
+    }
+    if (mode == "antimatter") {
+        return "{}^{3}_{#bar{#Lambda}}#bar{H} #rightarrow ^{3}#bar{He}+#pi^{+}";
+    }
+    if (mode == "both") {
+        return "{}^{3}_{#Lambda}H #rightarrow ^{3}He+#pi";
+    }
+    return std::string();
+}
+
+void AddLatexLine(RooPlot *frame, double x, double y, const std::string &text) {
+    if (!frame) return;
+    auto latex = std::make_unique<TLatex>(x, y, text.c_str());
+    latex->SetNDC();
+    latex->SetTextFont(42);
+    latex->SetTextSize(0.035);
+    latex->SetTextAlign(11);
+    latex->SetTextColor(kBlack);
+    frame->addObject(latex.release());
+    y -= 0.04;
+}
+
+void AnnotateSpectrumFrames(SpectrumResult &res, const Config &cfg, double nEvents) {
+    if (res.frames.empty()) return;
+    const std::string experimentLine = "LHC23_PbPb_pass5 (#sqrt{#it{s_{NN}}} = 5.36TeV)";
+    const std::string decayLine = MakeDecayString(cfg.isMatter);
+    std::string eventsLine = Form("N_{ev} = %.0f", nEvents);
+    for (const auto &frame : res.frames) {
+        if (!frame) continue;
+        AddLatexLine(frame.get(), 0.15, 0.85, experimentLine);
+        if (!decayLine.empty()) {
+            AddLatexLine(frame.get(), 0.15, 0.8, decayLine);
+        }
+        AddLatexLine(frame.get(), 0.15, 0.75, eventsLine);
+    }
+}
+
+void RefreshCanvases(SpectrumResult &res, const SpectrumCalculator &calc) {
+    for (size_t i = 0; i < res.canvases.size() && i < res.frames.size(); ++i) {
+        calc.RedrawFrameCanvas(res.canvases[i].get(), res.frames[i].get(), false);
+    }
+    for (size_t i = 0; i < res.canvasesMc.size() && i < res.framesMc.size(); ++i) {
+        calc.RedrawFrameCanvas(res.canvasesMc[i].get(), res.framesMc[i].get(), true);
+    }
+}
 
 double GetNEvents(const Config &cfg, const std::pair<double, double> &cenRange) {
     if (cfg.nEventsFile.empty() || cfg.nEventsHist.empty()) {
@@ -252,9 +302,7 @@ void WriteSpectrum(const SpectrumResult &res, TDirectory *dir, bool writeFrames)
         h->Write();
         h->SetDirectory(nullptr);
     };
-    cout << "Writing spectrum histograms to directory: " << dir->GetName() << endl; // DEBUG
     writeHist(res.hRaw);
-    cout << "  Wrote hRaw" << endl; // DEBUG
     writeHist(res.hCorr);
     writeHist(res.hAcc);
     writeHist(res.hAbso);
@@ -265,6 +313,12 @@ void WriteSpectrum(const SpectrumResult &res, TDirectory *dir, bool writeFrames)
         }
         for (const auto &f : res.framesMc) {
             if (f) dir->WriteObject(f.get(), f->GetName());
+        }
+        for (const auto &c : res.canvases) {
+            if (c) dir->WriteObject(c.get(), c->GetName());
+        }
+        for (const auto &c : res.canvasesMc) {
+            if (c) dir->WriteObject(c.get(), c->GetName());
         }
     }
 }
@@ -305,13 +359,7 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
         cout << std::endl;
 
         auto hAcc = BuildAcceptance(cfg, cenRange, ptEdges);
-        TCanvas cAcc("cAcc", "Acceptance", 800, 600);
-        hAcc->Draw("E");
-        cAcc.SaveAs("./hAcc.png");
         auto hAbso = BuildAbsorption(cfg, cenRange, ptEdges);
-        TCanvas cAbso("cAbso", "Absorption", 800, 600);
-        hAbso->Draw("E");
-        cAbso.SaveAs("./hAbso.png");
         double nEvents = GetNEvents(cfg, cenRange);
         auto bins = BuildBins(cfg, wpReader, cenRange, ptEdges, hAcc.get(), hAbso.get());
         if (bins.empty()) {
@@ -325,7 +373,9 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
 
         TFile fout(outPath.c_str(), "RECREATE");
         TDirectory *stdDir = fout.mkdir("std");
-        SpectrumResult resStd = calculator.Calculate(bins, nEvents, cfg.bkgFunc, cfg.sigFunc, true, cenDirName + "_std");
+        SpectrumResult resStd = calculator.Calculate(bins, nEvents, cfg.bkgFunc, cfg.sigFunc, true, "_std");
+        AnnotateSpectrumFrames(resStd, cfg, nEvents);
+        RefreshCanvases(resStd, calculator);
         WriteSpectrum(resStd, stdDir, true);
 
         std::vector<std::vector<double>> trailValues(ptEdges.size() - 1);
