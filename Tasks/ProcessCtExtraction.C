@@ -14,6 +14,10 @@
 #include <sstream>
 #include <vector>
 
+#include <TROOT.h>
+#include <TSystem.h>
+#include <TDirectory.h>
+
 #include "../Tools/CtExtraction.h"
 #include "../Tools/CtExtraction.cxx"
 #include "../Tools/GeneralHelper.hpp"
@@ -23,6 +27,9 @@ using json = nlohmann::json;
 
 void ProcessCtExtraction(const char *configPath = "../configs/ct_extraction.json",
                          bool enableImplicitMT = true) {
+#include <TCanvas.h>
+#include <TH1.h>
+#include <RooPlot.h>
     if (!configPath || std::string(configPath).empty()) {
         throw std::runtime_error("ProcessCtExtraction: config path is empty");
     }
@@ -40,124 +47,130 @@ void ProcessCtExtraction(const char *configPath = "../configs/ct_extraction.json
         auto get_string = [&](const char *key, const std::string &fallback = std::string()) {
             return cfgJson.value(key, fallback);
         };
-        std::string sigmaMcToDataRangeStr = get_string("sigma_range_path", "");
-        bool easyMode = cfgJson.value("sigma_range_easy_mode", false);
-        std::string rangeFile;
-        if (!sigmaMcToDataRangeStr.empty()) {
-            if (easyMode) {
-                rangeFile = sigmaMcToDataRangeStr + "/combined/sigma_summary.txt";
-            } else {
-                rangeFile = sigmaMcToDataRangeStr + "/per_bin/pt_ratio_summary.txt";
-            }
-        }
+        // direct sigma mc->data ranges from config (per pt bin)
+        std::vector<std::vector<double>> sigmaRangesCfg = cfgJson.value("sigma_mc_to_data_range", std::vector<std::vector<double>>{});
 
         CtExtraction extractor(configPath);
         // *************************sigma range setting block start*************************
-        // If a range file was provided and exists, parse it and set sigma ranges
-        if (!rangeFile.empty() && std::filesystem::exists(rangeFile)) {
-            std::ifstream rf(rangeFile);
-            if (rf) {
-                std::string line;
-                // Read header to determine column indices
-                std::vector<std::string> headerTokens;
-                std::vector<std::tuple<double,double,double>> perBin; // ptmin, ptmax, ratio
-                double combinedRatio = 1.0;
-                while (std::getline(rf, line)) {
-                    if (line.empty()) continue;
-                    if (line.rfind("#", 0) == 0) {
-                        // header or comment
-                        // capture last header line that contains tokens
-                        std::string hdr = line.substr(1);
-                        std::istringstream hss(hdr);
-                        headerTokens.clear();
-                        std::string tok;
-                        while (hss >> tok) headerTokens.push_back(tok);
-                        continue;
-                    }
-                    // data line
-                    std::istringstream ss(line);
-                    std::vector<std::string> toks;
-                    std::string t;
-                    while (ss >> t) toks.push_back(t);
-                    if (toks.empty()) continue;
-                    if (easyMode) {
-                        // need to find column 'ratio' in headerTokens
-                        int idx = -1;
-                        for (size_t i = 0; i < headerTokens.size(); ++i) {
-                            if (headerTokens[i] == "ratio") { idx = static_cast<int>(i); break; }
-                        }
-                        if (idx >= 0 && idx < static_cast<int>(toks.size())) {
-                            combinedRatio = std::stod(toks[idx]);
-                        } else if (toks.size() >= 9) {
-                            // fallback: ratio is commonly the 9th column in combined summary
-                            combinedRatio = std::stod(toks[8]);
-                        }
-                        // only one combined line expected; break after reading
-                        break;
-                    } else {
-                        // per-bin file: columns pt_min pt_max constant_ratio ...
-                        int idxPtMin = -1, idxPtMax = -1, idxRatio = -1;
-                        for (size_t i = 0; i < headerTokens.size(); ++i) {
-                            if (headerTokens[i] == "pt_min") idxPtMin = static_cast<int>(i);
-                            if (headerTokens[i] == "pt_max") idxPtMax = static_cast<int>(i);
-                            if (headerTokens[i] == "constant_ratio") idxRatio = static_cast<int>(i);
-                        }
-                        double ptmin=0, ptmax=0, ratio=1.0;
-                        if (idxPtMin >=0 && idxPtMin < static_cast<int>(toks.size())) ptmin = std::stod(toks[idxPtMin]);
-                        else ptmin = std::stod(toks[0]);
-                        if (idxPtMax >=0 && idxPtMax < static_cast<int>(toks.size())) ptmax = std::stod(toks[idxPtMax]);
-                        else ptmax = std::stod(toks[1]);
-                        if (idxRatio >=0 && idxRatio < static_cast<int>(toks.size())) ratio = std::stod(toks[idxRatio]);
-                        else if (toks.size() >= 3) ratio = std::stod(toks[2]);
-                        perBin.emplace_back(ptmin, ptmax, ratio);
-                    }
-                }
-
-                // Build sigma ranges matching pt bins from config
-                std::vector<double> ptBins = cfgJson.value("pt_bins", std::vector<double>{});
-                if (ptBins.size() < 2) {
-                    std::cerr << "[ProcessCtExtraction] Warning: pt_bins not found or too short in config; skipping sigma range set." << std::endl;
-                } else {
-                    size_t nPtBins = ptBins.size() - 1;
-                    std::vector<std::vector<double>> ranges;
-                    ranges.reserve(nPtBins);
-                    for (size_t ib = 0; ib < nPtBins; ++ib) {
-                        double ptmin = ptBins[ib];
-                        double ptmax = ptBins[ib+1];
-                        double useRatio = combinedRatio;
-                        if (!easyMode) {
-                            // find matching perBin entry
-                            bool found = false;
-                            for (const auto &tpl : perBin) {
-                                double pmin, pmax, r;
-                                std::tie(pmin, pmax, r) = tpl;
-                                if (std::abs(pmin - ptmin) < 1e-6 && std::abs(pmax - ptmax) < 1e-6) {
-                                    useRatio = r; found = true; break;
-                                }
-                            }
-                            if (!found) {
-                                std::cerr << "[ProcessCtExtraction] Warning: no ratio found for pt bin " << ptmin << "-" << ptmax << "; using 1.0" << std::endl;
-                                useRatio = 1.0;
-                            }
-                        }
-                        ranges.push_back(std::vector<double>{1.0, useRatio});
-                    }
-                    extractor.SetSigmaRangeMcToData(ranges);
-                    std::cout << "[ProcessCtExtraction] Set sigma range mc->data for " << ranges.size() << " pt bins." << std::endl;
-                    std::cout << "[ProcessCtExtraction] Set sigma range mc->data for " << ranges.size() << " pt bins." << std::endl;
-                    std::cout << "[ProcessCtExtraction] Sigma ranges detail:" << std::endl;
-                    for (size_t ib = 0; ib < ranges.size(); ++ib) {
-                        std::cout << "  pt bin [" << ptBins[ib] << ", " << ptBins[ib + 1] << "] -> "
-                                  << ranges[ib][0] << " to " << ranges[ib][1] << std::endl;
-                    }
-                }
-            }
+        // Use sigma_mc_to_data_range directly from config (per-pt-bin array of [min,max])
+        if (!sigmaRangesCfg.empty()) {
+            extractor.SetSigmaRangeMcToData(sigmaRangesCfg);
+            std::cout << "[ProcessCtExtraction] Using sigma_mc_to_data_range from config for "
+                      << sigmaRangesCfg.size() << " pt bins." << std::endl;
         }
         // *************************sigma range setting block end*************************
 
         extractor.Run();
         std::cout << "[ProcessCtExtraction] Completed successfully using config: "
                   << configPath << std::endl;
+
+        // -------- Post-processing: export key histograms/canvases to PDF --------
+        const std::string matter = cfgJson.value("is_matter", std::string("both"));
+        const std::string outDirBase = cfgJson.value("output_dir", std::string("results/ct_extraction"));
+        const std::string outFileBase = cfgJson.value("output_file", std::string("ct_analysis"));
+        const std::string trialSuffix = cfgJson.value("trial_suffix", std::string(""));
+        const std::string stdDirName = trialSuffix.empty() ? "std" : ("std_" + trialSuffix);
+        const std::filesystem::path outDir = std::filesystem::path(outDirBase) / matter;
+        const std::filesystem::path rootPath = outDir / (outFileBase + ".root");
+        std::filesystem::create_directories(outDir);
+        if (!std::filesystem::exists(rootPath)) {
+            std::cerr << "[ProcessCtExtraction] Output ROOT file not found: " << rootPath << std::endl;
+            return;
+        }
+
+        auto styleAndSaveHist = [&](TH1 *h, const std::string &pdfName, Color_t color, const std::string &title, const char *yTitle = nullptr) {
+            if (!h) return;
+            h->SetStats(false); // hide statistics box on exported plots
+            h->SetTitle(title.c_str());
+            if (yTitle) h->GetYaxis()->SetTitle(yTitle);
+            h->SetLineColor(color);
+            h->SetMarkerColor(color);
+            h->SetMarkerStyle(20);
+            h->SetLineStyle(2); // dashed line
+            h->SetLineWidth(2);
+            TCanvas c("c_tmp", title.c_str(), 900, 650);
+            c.SetLeftMargin(0.14);
+            c.SetBottomMargin(0.12);
+            c.SetTopMargin(0.08);
+            c.SetRightMargin(0.05);
+            c.SetGridx();
+            c.SetGridy();
+            h->Draw("EP L");
+            c.SaveAs(pdfName.c_str());
+        };
+
+        auto saveCanvas = [&](TCanvas *c, const std::string &pdfName, const std::string &title) {
+            if (!c) return;
+            c->SetTitle(title.c_str());
+            c->SaveAs(pdfName.c_str());
+        };
+
+        auto saveRooPlot = [&](RooPlot *fr, const std::string &pdfName, const std::string &title) {
+            if (!fr) return;
+            TCanvas c("c_frame", title.c_str(), 900, 650);
+            fr->SetTitle(title.c_str());
+            fr->Draw();
+            c.SaveAs(pdfName.c_str());
+        };
+
+        std::unique_ptr<TFile> tf(TFile::Open(rootPath.string().c_str(), "READ"));
+        if (!tf || tf->IsZombie()) {
+            std::cerr << "[ProcessCtExtraction] Failed to open output file: " << rootPath << std::endl;
+            return;
+        }
+        TDirectory *stdDir = tf->GetDirectory(stdDirName.c_str());
+        if (!stdDir) {
+            std::cerr << "[ProcessCtExtraction] std directory not found: " << stdDirName << std::endl;
+            return;
+        }
+
+        // Save tau vs pt histogram
+        if (auto hTau = dynamic_cast<TH1*>(stdDir->Get("tau_per_ptbin"))) {
+            std::string pdf = (outDir / "tau_per_ptbin.pdf").string();
+            styleAndSaveHist(hTau, pdf, kBlack, Form("#tau vs p_{T} (%s)", matter.c_str()));
+        }
+
+        // Loop pt directories
+        TIter nextPtDir(stdDir->GetListOfKeys());
+        while (TObject *obj = nextPtDir()) {
+            TKey *key = dynamic_cast<TKey*>(obj);
+            if (!key) continue;
+            if (std::string(key->GetClassName()) != "TDirectoryFile") continue;
+            TDirectory *ptDir = dynamic_cast<TDirectory*>(key->ReadObj());
+            if (!ptDir) continue;
+            const std::string ptDirName = ptDir->GetName();
+
+            auto exportHistIfPresent = [&](const char *hname, Color_t col, const char *tag, const char *yTitle) {
+                if (auto h = dynamic_cast<TH1*>(ptDir->Get(hname))) {
+                    const std::string pdf = (outDir / Form("%s_%s.pdf", tag, ptDirName.c_str())).string();
+                    const std::string ttl = Form("%s (%s, %s)", tag, ptDirName.c_str(), matter.c_str());
+                    styleAndSaveHist(h, pdf, col, ttl, yTitle);
+                }
+            };
+
+            exportHistIfPresent(Form("h_acc_eff_%s", ptDirName.c_str()), kBlue + 1, "Acceptance", "Efficiency #times Acceptance");
+            exportHistIfPresent(Form("h_bdt_eff_%s", ptDirName.c_str()), kGreen + 2, "BDT efficiency", "BDT efficiency");
+
+            if (auto cFit = dynamic_cast<TCanvas*>(ptDir->Get(Form("c_ct_fit_%s", ptDirName.c_str())))) {
+                const std::string pdf = (outDir / Form("ct_fit_%s.pdf", ptDirName.c_str())).string();
+                const std::string ttl = Form("CT fit %s (%s)", ptDirName.c_str(), matter.c_str());
+                saveCanvas(cFit, pdf, ttl);
+            }
+
+            // Export any RooPlot in the pt directory (e.g., mc_massfit_*, data_massfit_*)
+            TIter nextObj(ptDir->GetListOfKeys());
+            while (TObject *o = nextObj()) {
+                TKey *k2 = dynamic_cast<TKey*>(o);
+                if (!k2) continue;
+                TObject *obj2 = k2->ReadObj();
+                if (auto fr = dynamic_cast<RooPlot*>(obj2)) {
+                    const std::string name = fr->GetName();
+                    const std::string pdf = (outDir / Form("%s.pdf", name.c_str())).string();
+                    const std::string ttl = Form("%s (%s)", name.c_str(), matter.c_str());
+                    saveRooPlot(fr, pdf, ttl);
+                }
+            }
+        }
     } catch (const std::exception &ex) {
         std::cerr << "[ProcessCtExtraction] Error: " << ex.what() << std::endl;
         throw;

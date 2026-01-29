@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <cctype>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -32,6 +33,12 @@
 struct FitResult {
     double signal{0.0};
     double signalErr{0.0};
+    double significance{0.0};
+    double significanceErr{0.0};
+    double chi2Data{0.0};
+    double chi2Mc{0.0};
+    int ndfData{0};
+    int ndfMc{0};
     std::unique_ptr<RooPlot> frame;
     std::unique_ptr<RooPlot> frameMc;
     std::shared_ptr<RooRealVar> massAxis;
@@ -59,6 +66,25 @@ struct SpectrumResult {
     std::vector<std::unique_ptr<TCanvas>> canvases;
     std::vector<std::unique_ptr<TCanvas>> canvasesMc;
     std::vector<std::shared_ptr<RooRealVar>> massAxes;
+    struct CorrectionRow {
+        double ptMin{0.0};
+        double ptMax{0.0};
+        double raw{0.0};
+        double rawErr{0.0};
+        double acc{1.0};
+        double abso{1.0};
+        double bdtEff{1.0};
+        double binWidth{0.0};
+        double nEvents{0.0};
+        double branchingRatio{1.0};
+        double deltaRap{1.0};
+        double matterRatio{1.0};
+        double corrected{0.0};
+        double correctedErr{0.0};
+        std::string label;
+        std::string tag;
+    };
+    std::vector<CorrectionRow> corrections;
 };
 
 class SpectrumCalculator {
@@ -69,6 +95,7 @@ public:
                              double nEvents,
                              const std::string &bkgFunc,
                              const std::string &sigFunc,
+                             const std::string &isMatter,
                              bool saveCanvas,
                              const std::string &frameSuffix = std::string()) const {
         if (bins.empty()) {
@@ -106,15 +133,44 @@ public:
             return s;
         };
         const std::string safeSuffix = makeSafe(frameSuffix);
+        const double matterRatio = (isMatter == "both") ? 2.0 : 1.0;
+        std::vector<typename SpectrumResult::CorrectionRow> corrRows;
+        corrRows.reserve(bins.size());
 
         for (size_t i = 0; i < bins.size(); ++i) {
             const auto &bin = bins[i];
             std::string cut = Form("model_output > %f", bin.wp.score);
+            const double bw = bin.ptMax - bin.ptMin;
+            const double acc = (bin.acceptance > 0) ? bin.acceptance : 1.0;
+            const double abso = (bin.absorption > 0) ? bin.absorption : 1.0;
+            double corr = 0.0;
+            double corrErr = 0.0;
+            double rawVal = 0.0;
+            double rawErr = 0.0;
+
             auto dataMass = bin.dfData->Filter(cut).Take<double>("fMassH3L");
             auto mcMass = bin.dfMc->Filter("fMassH3L>2.95 && fMassH3L<3.02").Take<double>("fMassH3L");
             if (dataMass->empty() || mcMass->empty()) {
                 hRaw->SetBinContent(static_cast<int>(i + 1), 0.0);
                 hCorr->SetBinContent(static_cast<int>(i + 1), 0.0);
+                SpectrumResult::CorrectionRow row;
+                row.ptMin = bin.ptMin;
+                row.ptMax = bin.ptMax;
+                row.raw = 0.0;
+                row.rawErr = 0.0;
+                row.acc = acc;
+                row.abso = abso;
+                row.bdtEff = bin.wp.efficiency;
+                row.binWidth = bw;
+                row.nEvents = nEvents;
+                row.branchingRatio = cfg_.branchingRatio;
+                row.deltaRap = cfg_.deltaRap;
+                row.matterRatio = matterRatio;
+                row.corrected = 0.0;
+                row.correctedErr = 0.0;
+                row.label = bin.label;
+                row.tag = safeSuffix;
+                corrRows.push_back(std::move(row));
                 continue;
             }
 
@@ -127,23 +183,63 @@ public:
                 hAcc->SetBinContent(static_cast<int>(i + 1), bin.acceptance);
                 hAbso->SetBinContent(static_cast<int>(i + 1), bin.absorption);
                 hBdt->SetBinContent(static_cast<int>(i + 1), bin.wp.efficiency);
+                SpectrumResult::CorrectionRow row;
+                row.ptMin = bin.ptMin;
+                row.ptMax = bin.ptMax;
+                row.raw = 0.0;
+                row.rawErr = 0.0;
+                row.acc = acc;
+                row.abso = abso;
+                row.bdtEff = bin.wp.efficiency;
+                row.binWidth = bw;
+                row.nEvents = nEvents;
+                row.branchingRatio = cfg_.branchingRatio;
+                row.deltaRap = cfg_.deltaRap;
+                row.matterRatio = matterRatio;
+                row.corrected = 0.0;
+                row.correctedErr = 0.0;
+                row.label = bin.label;
+                row.tag = safeSuffix;
+                corrRows.push_back(std::move(row));
                 continue;
             }
 
-            double bw = bin.ptMax - bin.ptMin;
-            double acc = (bin.acceptance > 0) ? bin.acceptance : 1.0;
-            double abso = (bin.absorption > 0) ? bin.absorption : 1.0;
-            double corr = fit.signal / acc / abso / bin.wp.efficiency / bw / nEvents / cfg_.branchingRatio / cfg_.deltaRap;
-            double relErr2 = 0.0;
-            if (fit.signal > 0) relErr2 += (fit.signalErr / fit.signal) * (fit.signalErr / fit.signal);
+            rawVal = fit.signal;
+            rawErr = fit.signalErr;
+            if (isMatter == "both") {
+                corr = fit.signal / acc / abso / bin.wp.efficiency / bw / nEvents / cfg_.branchingRatio / cfg_.deltaRap / matterRatio;
+                corrErr = fit.signalErr / acc / abso / bin.wp.efficiency / bw / nEvents / cfg_.branchingRatio / cfg_.deltaRap / matterRatio;
+            } else {
+                corr = fit.signal / acc / abso / bin.wp.efficiency / bw / nEvents / cfg_.branchingRatio / cfg_.deltaRap;
+                corrErr = fit.signalErr / acc / abso / bin.wp.efficiency / bw / nEvents / cfg_.branchingRatio / cfg_.deltaRap;
+            }
 
             hRaw->SetBinContent(static_cast<int>(i + 1), fit.signal);
             hRaw->SetBinError(static_cast<int>(i + 1), fit.signalErr);
             hCorr->SetBinContent(static_cast<int>(i + 1), corr);
-            hCorr->SetBinError(static_cast<int>(i + 1), corr * std::sqrt(relErr2));
+            hCorr->SetBinError(static_cast<int>(i + 1), corrErr);
             hAcc->SetBinContent(static_cast<int>(i + 1), bin.acceptance);
             hAbso->SetBinContent(static_cast<int>(i + 1), bin.absorption);
             hBdt->SetBinContent(static_cast<int>(i + 1), bin.wp.efficiency);
+
+            SpectrumResult::CorrectionRow row;
+            row.ptMin = bin.ptMin;
+            row.ptMax = bin.ptMax;
+            row.raw = rawVal;
+            row.rawErr = rawErr;
+            row.acc = acc;
+            row.abso = abso;
+            row.bdtEff = bin.wp.efficiency;
+            row.binWidth = bw;
+            row.nEvents = nEvents;
+            row.branchingRatio = cfg_.branchingRatio;
+            row.deltaRap = cfg_.deltaRap;
+            row.matterRatio = matterRatio;
+            row.corrected = corr;
+            row.correctedErr = corrErr;
+            row.label = bin.label;
+            row.tag = safeSuffix;
+            corrRows.push_back(std::move(row));
 
             const std::string safeLabel = makeSafe(bin.label);
             if (fit.frame) {
@@ -178,8 +274,16 @@ public:
         out.hBdtEff = std::move(hBdt);
         out.frames = std::move(frames);
         out.framesMc = std::move(framesMc);
+        out.corrections = std::move(corrRows);
         cout << "SpectrumCalculator::Calculate completed." << endl; // DEBUG
         return out;
+    }
+
+    FitResult FitMassPublic(const std::vector<double> &dataMass,
+                            const std::vector<double> &mcMass,
+                            const std::string &bkgFunc,
+                            const std::string &sigFunc) const {
+        return FitMass(dataMass, mcMass, bkgFunc, sigFunc);
     }
 
     void RedrawFrameCanvas(TCanvas *canvas, RooPlot *frame, bool isMc) const {
@@ -187,6 +291,12 @@ public:
     }
 
 private:
+    static std::string NormalizeSignalName(std::string sig) {
+        for (auto &c : sig) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (sig == "gaus") sig = "gauss";
+        return sig;
+    }
+
     std::unique_ptr<TCanvas> MakeFrameCanvas(const std::string &canvasName, RooPlot *frame, bool isMc) const {
         if (!frame) return nullptr;
         auto canvas = std::make_unique<TCanvas>(canvasName.c_str(), canvasName.c_str(), 800, 600);
@@ -237,7 +347,9 @@ private:
         return frame->findObject(name);
     }
     FitResult FitMass(const std::vector<double> &dataMass, const std::vector<double> &mcMass,
-                      const std::string &bkgFunc, const std::string &sigFunc) const {
+                      const std::string &bkgFuncRaw, const std::string &sigFuncRaw) const {
+        const std::string sigFunc = NormalizeSignalName(sigFuncRaw);
+        const std::string bkgFunc = bkgFuncRaw;
         RooRealVar mass("m", "Mass(H3l)", cfg_.massMin, cfg_.massMax, "GeV/c^{2}");
         RooDataSet data("data", "data", RooArgSet(mass));
         int dataCounts = 0;
@@ -303,15 +415,16 @@ private:
         sigma.setRange(cfg_.sigmaRangeMcToData[0] * sigmaMc, cfg_.sigmaRangeMcToData[1] * sigmaMc);
 
         RooAbsPdf *bkg = nullptr;
-        RooRealVar c0("c0", "c0", 0.0, -1.5, 1.5);
-        RooRealVar c1("c1", "c1", 0.0, -1.5, 1.5);
-        RooRealVar c2("c2", "c2", 0.0, -1.5, 1.5);
+        // Tighter Chebychev coefficient ranges to reduce negative-p.d.f excursions (NaN NLLs)
+        RooRealVar c0("c0", "c0", 0.0, -0.8, 0.8);
+        RooRealVar c1("c1", "c1", 0.0, -0.8, 0.8);
+        //RooRealVar c2("c2", "c2", 0.0, -1.5, 1.5);
         if (bkgFunc == "pol1") {
-            bkg = new RooChebychev("bkg", "bkg", mass, RooArgList(c0, c1));
+            bkg = new RooChebychev("bkg", "bkg", mass, RooArgList(c0));
         } else if (bkgFunc == "expo") {
             bkg = new RooExponential("bkg", "bkg", mass, c0);
         } else {
-            bkg = new RooChebychev("bkg", "bkg", mass, RooArgList(c0, c1, c2));
+            bkg = new RooChebychev("bkg", "bkg", mass, RooArgList(c0, c1));
         }
 
         const double nSigInit = std::max(1.0, 0.5 * static_cast<double>(dataCounts));
@@ -403,8 +516,14 @@ private:
         frame->addObject(textData.release());
 
         FitResult out;
-        out.signal = nSig.getVal();
-        out.signalErr = nSig.getError();
+        out.signal = signalCounts3s;
+        out.signalErr = signalCounts3sErr;
+        out.significance = significance;
+        out.significanceErr = significanceErr;
+        out.chi2Data = chi2OverNdfData;
+        out.chi2Mc = chi2OverNdfMc;
+        out.ndfData = ndfData;
+        out.ndfMc = ndfMc;
         out.frame = std::move(frame);
         out.frameMc = std::move(frameMc);
         out.massAxis = std::move(massHolder);

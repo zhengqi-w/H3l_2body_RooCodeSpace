@@ -8,20 +8,30 @@
 #include <TDirectory.h>
 #include <TFile.h>
 #include <TF1.h>
+#include <TGraphAsymmErrors.h>
+#include <TLine.h>
 #include <TString.h>
 #include <TSystem.h>
 #include <TLatex.h>
+#include <TBox.h>
 
 #include <ROOT/RDataFrame.hxx>
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iomanip>
+#include <limits>
+#include <map>
 #include <memory>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 namespace {
 
@@ -50,11 +60,54 @@ void AddLatexLine(RooPlot *frame, double x, double y, const std::string &text) {
     y -= 0.04;
 }
 
+std::string Sanitize(const std::string &s) {
+    std::string out = s;
+    for (char &c : out) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '-') c = '_';
+    }
+    return out;
+}
+
+void AppendCorrectionsCsv(const SpectrumResult &res, const std::pair<double, double> &cenRange,
+                         const Config &cfg, const std::string &tag, const std::string &outPath) {
+    if (res.corrections.empty()) {
+        std::cerr << "[Warn] No correction rows to write for " << outPath << "\n";
+        return;
+    }
+    const bool fileExists = std::filesystem::exists(outPath);
+    std::ofstream ofs(outPath, std::ios::app);
+    if (!ofs.is_open()) {
+        std::cerr << "[Warn] Failed to open CSV for writing: " << outPath << "\n";
+        return;
+    }
+    if (!fileExists) {
+        ofs << "tag,cen_min,cen_max,pt_min,pt_max,label,raw,raw_err,acc,abso,bdt_eff,bin_width,n_events,branching_ratio,delta_rap,matter_ratio,corrected,corrected_err\n";
+    }
+    ofs << std::defaultfloat << std::setprecision(8);
+    for (const auto &row : res.corrections) {
+        ofs << tag << ','
+            << cenRange.first << ',' << cenRange.second << ','
+            << row.ptMin << ',' << row.ptMax << ','
+            << row.label << ','
+            << row.raw << ',' << row.rawErr << ','
+            << row.acc << ',' << row.abso << ','
+            << row.bdtEff << ','
+            << row.binWidth << ','
+            << std::scientific << std::setprecision(6) << row.nEvents << ','
+            << std::defaultfloat << std::setprecision(8)
+            << cfg.branchingRatio << ','
+            << cfg.deltaRap << ','
+            << row.matterRatio << ','
+            << std::scientific << std::setprecision(6) << row.corrected << ',' << row.correctedErr << '\n';
+        ofs << std::defaultfloat << std::setprecision(8);
+    }
+}
+
 void AnnotateSpectrumFrames(SpectrumResult &res, const Config &cfg, double nEvents) {
     if (res.frames.empty()) return;
     const std::string experimentLine = "LHC23_PbPb_pass5 (#sqrt{#it{s_{NN}}} = 5.36TeV)";
     const std::string decayLine = MakeDecayString(cfg.isMatter);
-    std::string eventsLine = Form("N_{ev} = %.0f", nEvents);
+    std::string eventsLine = Form("N_{ev} = %.2e", nEvents);
     for (const auto &frame : res.frames) {
         if (!frame) continue;
         AddLatexLine(frame.get(), 0.15, 0.85, experimentLine);
@@ -153,24 +206,25 @@ std::unique_ptr<TH1D> BuildAcceptance(const Config &cfg, const std::pair<double,
     ROOT::RDF::RNode mcReweighted = reweightFunc ? ROOT::RDF::RNode(GeneralHelper::ReWeightSpectrum(mcReadyNode, reweightFunc.get(), "fAbsGenPt")) : mcReadyNode;
     auto accRes = AcceptanceHelper::ComputeAcceptanceFlexible(
         mcReweighted,
-        std::vector<double>{},
+        std::vector<double>{ptEdges},
         std::vector<double>{},
         std::vector<std::vector<double>>{},
-        std::vector<double>{cenRange.first, cenRange.second},
-        std::vector<std::vector<double>>{ptEdges});
-
+        std::vector<double>{}, // MC efficiency should not be related to Centrality Just do reweighting for each centrality
+        std::vector<std::vector<double>>{},
+        cfg.basicSelectionDataForMCEff // pass basic selection for data to calculate MC efficiency
+    );
     TH1D *src = nullptr;
     if (cfg.isMatter == "matter") {
-        if (!accRes.acc_pt_per_cent_matter.empty()) {
-            src = accRes.acc_pt_per_cent_matter.front();
+        if (!(accRes.acc_pt_matter == nullptr) ) {
+            src = accRes.acc_pt_matter;
         }
     } else if (cfg.isMatter == "antimatter") {
-        if (!accRes.acc_pt_per_cent_antimatter.empty()) {
-            src = accRes.acc_pt_per_cent_antimatter.front();
+        if (!(accRes.acc_pt_antimatter == nullptr) ) {
+            src = accRes.acc_pt_antimatter;
         }
     } else if (cfg.isMatter == "both") {
-        if (!accRes.acc_pt_per_cent.empty()) {
-            src = accRes.acc_pt_per_cent.front();
+        if (!(accRes.acc_pt_both == nullptr) ) {
+            src = accRes.acc_pt_both;
         }
     }
 
@@ -332,6 +386,110 @@ std::vector<BinInput> ShiftWorkingPoints(const std::vector<BinInput> &bins, doub
     return out;
 }
 
+struct BdtCandidate {
+    double score{0.0};
+    double efficiency{0.0};
+};
+
+std::vector<std::pair<double, double>> LoadScoreEfficiencyArray(const std::string &path) {
+    std::vector<std::pair<double, double>> rows;
+    if (path.empty()) return rows;
+    std::ifstream ifs(path);
+    if (!ifs.is_open()) {
+        std::cerr << "[Warn] score-efficiency array not found: " << path << std::endl;
+        return rows;
+    }
+    double score = 0.0, eff = 0.0;
+    while (ifs >> score >> eff) {
+        rows.emplace_back(score, eff);
+    }
+    if (rows.empty()) {
+        std::cerr << "[Warn] score-efficiency array empty: " << path << std::endl;
+    }
+    return rows;
+}
+
+std::vector<BdtCandidate> BuildBdtCandidates(double wpScore, double wpEff, int totalPoints,
+                                             const std::vector<std::pair<double, double>> &arr) {
+    std::vector<BdtCandidate> out;
+    if (totalPoints <= 0) {
+        out.push_back({wpScore, wpEff});
+        return out;
+    }
+    if (arr.empty()) {
+        out.push_back({wpScore, wpEff});
+        return out;
+    }
+    // find nearest score index to WP
+    size_t centerIdx = 0;
+    double bestDiff = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < arr.size(); ++i) {
+        double diff = std::abs(arr[i].first - wpScore);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            centerIdx = i;
+        }
+    }
+    const size_t totalDesired = static_cast<size_t>(totalPoints);
+    const size_t belowTarget = (totalDesired - 1) / 2;
+    const size_t aboveTarget = totalDesired - 1 - belowTarget;
+
+    out.push_back({arr[centerIdx].first, arr[centerIdx].second});
+    size_t belowAdded = 0, aboveAdded = 0;
+    size_t belowIdx = centerIdx;
+    size_t aboveIdx = centerIdx;
+    while (out.size() < totalDesired) {
+        bool tookBelow = false;
+        bool tookAbove = false;
+        if (belowAdded < belowTarget && belowIdx > 0) {
+            --belowIdx;
+            out.push_back({arr[belowIdx].first, arr[belowIdx].second});
+            ++belowAdded;
+            tookBelow = true;
+        }
+        if (out.size() >= totalDesired) break;
+        if (aboveAdded < aboveTarget && aboveIdx + 1 < arr.size()) {
+            ++aboveIdx;
+            out.push_back({arr[aboveIdx].first, arr[aboveIdx].second});
+            ++aboveAdded;
+            tookAbove = true;
+        }
+        if (!tookBelow && belowAdded < belowTarget && aboveAdded >= aboveTarget && aboveIdx + 1 < arr.size()) {
+            ++aboveIdx;
+            out.push_back({arr[aboveIdx].first, arr[aboveIdx].second});
+            ++aboveAdded;
+        } else if (!tookAbove && aboveAdded < aboveTarget && belowAdded >= belowTarget && belowIdx > 0) {
+            --belowIdx;
+            out.push_back({arr[belowIdx].first, arr[belowIdx].second});
+            ++belowAdded;
+        } else if (!tookBelow && !tookAbove) {
+            break; // cannot expand further
+        }
+    }
+    return out;
+}
+
+std::vector<std::tuple<size_t, size_t, size_t, size_t>> BuildTrailCombos(size_t nBdt, size_t nBkg,
+                                                                         size_t nSig, size_t nAbso) {
+    std::vector<std::tuple<size_t, size_t, size_t, size_t>> combos;
+    combos.reserve(nBdt * nBkg * nSig * nAbso);
+    for (size_t ibdt = 0; ibdt < nBdt; ++ibdt) {
+        for (size_t ibkg = 0; ibkg < nBkg; ++ibkg) {
+            for (size_t isig = 0; isig < nSig; ++isig) {
+                for (size_t iabso = 0; iabso < nAbso; ++iabso) {
+                    combos.emplace_back(ibdt, ibkg, isig, iabso);
+                }
+            }
+        }
+    }
+    return combos;
+}
+
+std::string BuildScoreEffPath(const Config &cfg, const std::string &label) {
+    if (cfg.systEfficiencyArrayPath.empty()) return std::string();
+    return cfg.systEfficiencyArrayPath + "/score_efficiency_array_" + label + ".txt";
+}
+
 } // namespace
 
 int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/configs/bdt_spectrum.json") {
@@ -343,6 +501,12 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
     Config cfg = LoadConfig(cfgPath);
     if (cfg.enableImplicitMT) ROOT::EnableImplicitMT();
     std::filesystem::create_directories(cfg.outputDir);
+    std::string mergedCsvPath;
+    if (cfg.doQAAfterwords) {
+        mergedCsvPath = cfg.outputDir + "/corrections_all.csv";
+        std::error_code ec;
+        std::filesystem::remove(mergedCsvPath, ec); // clear previous content if present
+    }
 
     WPSummaryReader wpReader(cfg.wpFile);
     SpectrumCalculator calculator(cfg);
@@ -373,59 +537,218 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
 
         TFile fout(outPath.c_str(), "RECREATE");
         TDirectory *stdDir = fout.mkdir("std");
-        SpectrumResult resStd = calculator.Calculate(bins, nEvents, cfg.bkgFunc, cfg.sigFunc, true, "_std");
+        SpectrumResult resStd = calculator.Calculate(bins, nEvents, cfg.bkgFunc, cfg.sigFunc, cfg.isMatter, true, "_std");
         AnnotateSpectrumFrames(resStd, cfg, nEvents);
         RefreshCanvases(resStd, calculator);
-        WriteSpectrum(resStd, stdDir, true);
-
-        std::vector<std::vector<double>> trailValues(ptEdges.size() - 1);
-        int trailIdx = 0;
-        if (cfg.doSystematics) {
-            for (double relShift : cfg.bdtScoreRelShifts) {
-                for (const auto &bkg : cfg.bkgFuncSyst) {
-                    if (std::abs(relShift) < 1e-6 && bkg == cfg.bkgFunc) continue; // avoid duplicating nominal
-                    auto binsVar = ShiftWorkingPoints(bins, relShift);
-                    std::string tag = Form("%s_trail%d_%s_shift%+.3f", cenDirName.c_str(), trailIdx, bkg.c_str(), relShift);
-                    SpectrumResult resVar = calculator.Calculate(binsVar, nEvents, bkg, cfg.sigFunc, true, tag);
-                    TDirectory *d = fout.mkdir(Form("trail%d", trailIdx++));
-                    WriteSpectrum(resVar, d, true);
-                    if (resVar.hCorr) {
-                        for (int ib = 1; ib <= resVar.hCorr->GetNbinsX(); ++ib) {
-                            trailValues[ib - 1].push_back(resVar.hCorr->GetBinContent(ib));
-                        }
-                    }
-                }
-            }
+        if (cfg.doQAAfterwords) {
+            AppendCorrectionsCsv(resStd, cenRange, cfg, "std", mergedCsvPath);
         }
+        WriteSpectrum(resStd, stdDir, true);
 
         fout.cd();
         std::vector<double> edges = CollectEdges(bins);
         TH1D hSyst("h_systematics", ";p_{T};#sigma_{syst}", static_cast<int>(edges.size() - 1), edges.data());
-        hSyst.SetDirectory(nullptr); // avoid ownership issues on close
-        for (size_t i = 0; i < trailValues.size(); ++i) {
-            const auto &vals = trailValues[i];
-            if (vals.empty()) continue;
-            double vmin = *std::min_element(vals.begin(), vals.end());
-            double vmax = *std::max_element(vals.begin(), vals.end());
-            double margin = 0.2 * std::max(1e-6, vmax - vmin);
-            TH1D hDist(Form("h_trail_dist_pt%zu", i), ";Y_{corr};Counts", 40, vmin - margin, vmax + margin);
-            hDist.SetDirectory(nullptr);
-            for (double v : vals) hDist.Fill(v);
-            double sigma = 0.0;
-            if (hDist.GetEntries() > 5) {
-                auto fitRes = hDist.Fit("gaus", "QS");
-                if (fitRes == 0 && hDist.GetFunction("gaus")) {
-                    sigma = hDist.GetFunction("gaus")->GetParameter(2);
-                } else {
-                    sigma = hDist.GetRMS();
+        hSyst.SetDirectory(nullptr);
+
+        if (cfg.doSystematics) {
+            std::mt19937 rng(static_cast<unsigned int>(cfg.randomSeed));
+            TDirectory *sysDir = fout.mkdir("sys");
+            std::filesystem::create_directories(cfg.outputDir + "/" + cenDirName + "/sys");
+            std::ofstream logFile(cfg.outputDir + "/" + cenDirName + "/sys/trails.log");
+            if (logFile.is_open()) {
+                logFile << "cen,ptmin,ptmax,trail,bdt_score,bdt_eff,bkg_func,sig_func,abso_file,abso,chi2ndf,significance,raw,raw_err,corr,corr_err,pass\n";
+            }
+
+            const std::vector<std::string> bkgFuncs = cfg.bkgFuncSyst.empty() ? std::vector<std::string>{cfg.bkgFunc} : cfg.bkgFuncSyst;
+            const std::vector<std::string> sigFuncs = cfg.systSignalFuncs.empty() ? std::vector<std::string>{cfg.sigFunc} : cfg.systSignalFuncs;
+            const std::vector<std::string> absoFiles = cfg.systAbsorptionFiles.empty() ? std::vector<std::string>{cfg.mcFileForAbsorption} : cfg.systAbsorptionFiles;
+
+            std::map<std::string, std::unique_ptr<TH1D>> absoHists;
+            for (const auto &absoFile : absoFiles) {
+                Config cfgAbso = cfg;
+                cfgAbso.mcFileForAbsorption = absoFile;
+                absoHists[absoFile] = BuildAbsorption(cfgAbso, cenRange, ptEdges);
+            }
+
+            const double matterRatio = (cfg.isMatter == "both") ? 2.0 : 1.0;
+            for (size_t ibin = 0; ibin < bins.size(); ++ibin) {
+                const auto &bin = bins[ibin];
+                const std::string binLabel = bin.label;
+                TDirectory *binDir = sysDir ? sysDir->mkdir(binLabel.c_str()) : nullptr;
+
+                std::string arrayPath = BuildScoreEffPath(cfg, binLabel);
+                auto scoreArray = LoadScoreEfficiencyArray(arrayPath);
+                auto bdtCandidates = BuildBdtCandidates(bin.wp.score, bin.wp.efficiency, cfg.systBdtScoreNPoints, scoreArray);
+                if (bdtCandidates.empty()) bdtCandidates.push_back({bin.wp.score, bin.wp.efficiency});
+
+                auto mcMass = bin.dfMc->Filter("fMassH3L>2.95 && fMassH3L<3.02").Take<double>("fMassH3L");
+                std::vector<ROOT::RDF::RResultPtr<std::vector<double>>> dataMassCache;
+                dataMassCache.reserve(bdtCandidates.size());
+                for (const auto &cand : bdtCandidates) {
+                    std::string cut = Form("model_output > %f", cand.score);
+                    dataMassCache.emplace_back(bin.dfData->Filter(cut).Take<double>("fMassH3L"));
+                }
+
+                auto combos = BuildTrailCombos(bdtCandidates.size(), bkgFuncs.size(), sigFuncs.size(), absoFiles.size());
+                std::shuffle(combos.begin(), combos.end(), rng);
+                if (combos.empty()) {
+                    std::cerr << "[Warn] No systematic combos for bin " << binLabel << std::endl;
+                    continue;
+                }
+                const size_t nUse = std::min(combos.size(), static_cast<size_t>(std::max(1, cfg.systNtrails)));
+
+                const double stdCorr = resStd.hCorr ? resStd.hCorr->GetBinContent(static_cast<int>(ibin + 1)) : 0.0;
+                const double stdCorrErr = resStd.hCorr ? resStd.hCorr->GetBinError(static_cast<int>(ibin + 1)) : 0.0;
+                double range = std::abs(stdCorr) * 0.6 + 5.0 * stdCorrErr;
+                if (range < 1e-6) range = 1.0;
+                TH1D hCorrDist(Form("h_corr_syst_%s", binLabel.c_str()), ";Corrected counts;Entries", 80, stdCorr - range, stdCorr + range);
+                hCorrDist.SetDirectory(nullptr);
+                TH1D hAbsoDist(Form("h_absorption_trails_%s", binLabel.c_str()), ";Trail;#epsilon_{abso}", static_cast<int>(nUse), 0.5, static_cast<double>(nUse) + 0.5);
+                hAbsoDist.SetDirectory(nullptr);
+                const double baselineAbso = (resStd.hAbso) ? resStd.hAbso->GetBinContent(static_cast<int>(ibin + 1)) : 1.0;
+
+                size_t trailCounter = 0;
+                for (size_t icombo = 0; icombo < nUse; ++icombo) {
+                    const auto [bdtIdx, bkgIdx, sigIdx, absoIdx] = combos[icombo];
+                    const auto &cand = bdtCandidates.at(bdtIdx);
+                    const std::string bkg = bkgFuncs.at(bkgIdx);
+                    const std::string sig = sigFuncs.at(sigIdx);
+                    const std::string absoFile = absoFiles.at(absoIdx);
+                    double absoVal = 1.0;
+                    auto itAbso = absoHists.find(absoFile);
+                    if (itAbso != absoHists.end() && itAbso->second) {
+                        absoVal = itAbso->second->GetBinContent(static_cast<int>(ibin + 1));
+                    }
+                    hAbsoDist.SetBinContent(static_cast<int>(trailCounter + 1), absoVal);
+
+                    FitResult fit = calculator.FitMassPublic(*dataMassCache.at(bdtIdx), *mcMass, bkg, sig);
+                    const double bw = bin.ptMax - bin.ptMin;
+                    const double acc = (bin.acceptance > 0) ? bin.acceptance : 1.0;
+                    const double eff = (cand.efficiency > 0) ? cand.efficiency : bin.wp.efficiency;
+                    double corr = 0.0;
+                    double corrErr = 0.0;
+                    if (bw > 0 && acc > 0 && absoVal > 0 && eff > 0) {
+                        double corrBase = fit.signal / acc / absoVal / eff / bw / nEvents / cfg.branchingRatio / cfg.deltaRap;
+                        double corrErrBase = fit.signalErr / acc / absoVal / eff / bw / nEvents / cfg.branchingRatio / cfg.deltaRap;
+                        corrBase /= matterRatio;
+                        corrErrBase /= matterRatio;
+                        corr = corrBase;
+                        corrErr = corrErrBase;
+                    }
+
+                    const bool pass = (fit.chi2Data < cfg.systThrChi2Ndf) && (fit.significance > cfg.systThrSignificance) && std::isfinite(corr) && std::isfinite(corrErr);
+                    if (pass) {
+                        hCorrDist.Fill(corr);
+                    }
+
+                    if (logFile.is_open()) {
+                        logFile << cenRange.first << '-' << cenRange.second << ',' << bin.ptMin << ',' << bin.ptMax << ','
+                                << trailCounter << ',' << cand.score << ',' << eff << ',' << bkg << ',' << sig << ','
+                                << absoFile << ',' << absoVal << ',' << fit.chi2Data << ',' << fit.significance << ','
+                                << fit.signal << ',' << fit.signalErr << ',' << corr << ',' << corrErr << ',' << pass << '\n';
+                    }
+
+                    if (binDir) {
+                        TDirectory::TContext ctx(binDir);
+                        TDirectory *trailDir = binDir->mkdir(Form("trail%zu", trailCounter));
+                        if (trailDir) {
+                            TDirectory::TContext ctxTrail(trailDir);
+                            if (fit.frame) {
+                                std::string name = Form("data_frame_%s_trail%zu", binLabel.c_str(), trailCounter);
+                                fit.frame->SetName(name.c_str());
+                                fit.frame->SetTitle(name.c_str());
+                                trailDir->WriteObject(fit.frame.get(), name.c_str());
+                            }
+                            if (fit.frameMc) {
+                                std::string nameMc = Form("mc_frame_%s_trail%zu", binLabel.c_str(), trailCounter);
+                                fit.frameMc->SetName(nameMc.c_str());
+                                fit.frameMc->SetTitle(nameMc.c_str());
+                                trailDir->WriteObject(fit.frameMc.get(), nameMc.c_str());
+                            }
+                        }
+                    }
+                    ++trailCounter;
+                }
+
+                // annotate distributions with baseline markers
+                if (std::isfinite(stdCorr)) {
+                    auto line = new TLine(stdCorr, 0.0, stdCorr, hCorrDist.GetMaximum() * 1.05);
+                    line->SetLineColor(kBlue + 2);
+                    line->SetLineStyle(kDashed);
+                    hCorrDist.GetListOfFunctions()->Add(line);
+                    auto band = new TBox(stdCorr - stdCorrErr, 0.0, stdCorr + stdCorrErr, hCorrDist.GetMaximum() * 1.02);
+                    band->SetFillColorAlpha(kBlue, 0.2);
+                    band->SetLineColor(kBlue + 2);
+                    hCorrDist.GetListOfFunctions()->Add(band);
+                }
+                auto lineAbso = new TLine(0.5, baselineAbso, static_cast<double>(nUse) + 0.5, baselineAbso);
+                lineAbso->SetLineColor(kRed + 1);
+                lineAbso->SetLineStyle(kDashed);
+                hAbsoDist.GetListOfFunctions()->Add(lineAbso);
+
+                double sigma = 0.0;
+                if (hCorrDist.GetEntries() > 2) {
+                    auto fitRes = hCorrDist.Fit("gaus", "QS");
+                    if (fitRes == 0 && hCorrDist.GetFunction("gaus")) {
+                        sigma = hCorrDist.GetFunction("gaus")->GetParameter(2);
+                        auto mean = hCorrDist.GetFunction("gaus")->GetParameter(1);
+                        auto band = new TBox(mean - sigma, 0.0, mean + sigma, hCorrDist.GetMaximum() * 1.02);
+                        band->SetFillColorAlpha(kOrange + 7, 0.25);
+                        band->SetLineColor(kOrange + 7);
+                        hCorrDist.GetListOfFunctions()->Add(band);
+                    } else {
+                        sigma = hCorrDist.GetRMS();
+                    }
+                }
+                hSyst.SetBinContent(static_cast<int>(ibin + 1), sigma);
+
+                if (sysDir) {
+                    TDirectory::TContext ctx(sysDir);
+                    hCorrDist.Write();
+                }
+                if (binDir) {
+                    TDirectory::TContext ctx(binDir);
+                    hAbsoDist.Write();
                 }
             }
+
+            // final spectrum with stat (bars) + syst (boxes)
+            auto hStat = std::unique_ptr<TH1D>(static_cast<TH1D *>(resStd.hCorr ? resStd.hCorr->Clone("h_final_spectrum_stat") : nullptr));
+            if (hStat) hStat->SetDirectory(nullptr);
+            auto gSys = std::make_unique<TGraphAsymmErrors>(static_cast<int>(bins.size()));
+            if (gSys) {
+                gSys->SetName("g_final_spectrum_sys");
+                gSys->SetTitle("Final spectrum with systematics");
+                gSys->SetFillColorAlpha(kRed, 0.25);
+                gSys->SetLineColor(kRed);
+                for (int i = 0; i < gSys->GetN(); ++i) {
+                    double x = 0.0, y = 0.0;
+                    if (hStat) {
+                        x = hStat->GetXaxis()->GetBinCenter(i + 1);
+                        y = hStat->GetBinContent(i + 1);
+                        const double xerr = hStat->GetXaxis()->GetBinWidth(i + 1) * 0.5;
+                        const double yerr = hSyst.GetBinContent(i + 1);
+                        gSys->SetPoint(i, x, y);
+                        gSys->SetPointError(i, xerr, xerr, yerr, yerr);
+                    }
+                }
+            }
+
+            auto cFinal = std::make_unique<TCanvas>("c_final_spectrum", "c_final_spectrum", 900, 700);
+            if (cFinal) {
+                if (hStat) hStat->Draw("E1");
+                if (gSys) gSys->Draw("E2 SAME");
+                cFinal->SetGrid();
+            }
+
             {
                 TDirectory::TContext ctx(&fout);
-                hDist.Write();
+                if (hStat) hStat->Write();
+                if (gSys) gSys->Write();
+                if (cFinal) cFinal->Write();
             }
-            hSyst.SetBinContent(static_cast<int>(i + 1), sigma);
         }
+
         {
             TDirectory::TContext ctx(&fout);
             hSyst.Write();

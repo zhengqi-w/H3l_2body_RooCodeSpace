@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <memory>
 #include <mutex>
@@ -215,6 +216,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
     const std::vector<std::vector<double>> &ctBinsPerPt,
     const std::vector<double> &centBins1D,
     const std::vector<std::vector<double>> &ptBinsPerCent,
+    const std::string &basicSel   = "",
     const std::string &centVar    = "fCentralityFT0C",
     const std::string &evselCol   = "fIsSurvEvSel",
     const std::string &recoCol    = "fIsReco",
@@ -266,6 +268,14 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
     auto [df_flags_evsel_int, evselFlagColInt] = ensure_int_flag_column(df_ready_flags, evselFlagCol, "__acc_evsel_flag_int");
     auto [df_ready_flags_int, recoFlagColInt] = ensure_int_flag_column(df_flags_evsel_int, recoFlagCol, "__acc_reco_flag_int");
 
+    auto df_with_basic_flag = df_ready_flags_int;
+    const std::string basicSelFlagName = "__acc_basic_flag";
+    if (!basicSel.empty())
+        df_with_basic_flag = df_with_basic_flag.Define(basicSelFlagName, basicSel);
+    else
+        df_with_basic_flag = df_with_basic_flag.Define(basicSelFlagName, []() -> int { return 1; });
+    auto [df_basic_int, basicSelFlagColInt] = ensure_int_flag_column(df_with_basic_flag, basicSelFlagName, "__acc_basic_flag_int");
+
     auto ensure_double_column = [](ROOT::RDF::RNode node,
                                    const std::string &colName,
                                    const std::string &alias) {
@@ -277,7 +287,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         return std::make_pair(next, alias);
     };
 
-    auto [df_with_genPt, genPtColUsed] = ensure_double_column(df_ready_flags_int, genPtCol, "__acc_genPt_double");
+    auto [df_with_genPt, genPtColUsed] = ensure_double_column(df_basic_int, genPtCol, "__acc_genPt_double");
     auto [df_with_genCt, genCtColUsed] = ensure_double_column(df_with_genPt, genCtCol, "__acc_genCt_double");
     auto [df_with_genMatter, genMatterColUsed] = ensure_double_column(df_with_genCt, genMatterCol, "__acc_genMatter_double");
     auto df_ready = df_with_genMatter;
@@ -326,10 +336,11 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genPt, int evselFlag, int recoFlag, double genMatter) {
+            [&](unsigned slot, double genPt, int evselFlag, int recoFlag, int basicFlag, double genMatter) {
                 auto &slotHist = acquire_slot(slot);
                 const bool passEvsel = evselFlag != 0;
-                const bool passReco = passEvsel && (recoFlag != 0);
+                const bool passBasic = basicFlag != 0;
+                const bool passReco =  passBasic && (recoFlag != 0);
                 const bool isMatter = genMatter > 0.0;
                 if (passEvsel) {
                     slotHist.evsel_pt_both->Fill(genPt);
@@ -346,7 +357,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_pt_antimatter->Fill(genPt);
                 }                
             },
-            {genPtColUsed, evselFlagColInt, recoFlagColInt, genMatterColUsed});
+            {genPtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, genMatterColUsed});
 
         res.evsel_pt_both = MergeSlotHists(slotHists, [](const SlotHistPt &slot) { return slot.evsel_pt_both.get(); }, "h_evsel_pt_both");
         res.reco_pt_both  = MergeSlotHists(slotHists, [](const SlotHistPt &slot) { return slot.reco_pt_both.get(); },  "h_reco_pt_both");
@@ -398,10 +409,11 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genCt, int evselFlag, int recoFlag, double genMatter) {
+            [&](unsigned slot, double genCt, int evselFlag, int recoFlag, int basicFlag, double genMatter) {
                 auto &slotHist = acquire_slot(slot);
                 const bool passEvsel = evselFlag != 0;
-                const bool passReco = passEvsel && (recoFlag != 0);
+                const bool passBasic = basicFlag != 0;
+                const bool passReco =  passBasic && (recoFlag != 0);
                 const bool isMatter = genMatter > 0.0;
                 if (passEvsel) {
                     slotHist.evsel_ct_both->Fill(genCt);
@@ -418,7 +430,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_ct_antimatter->Fill(genCt);
                 }
             },
-            {genCtColUsed, evselFlagColInt, recoFlagColInt, genMatterColUsed});
+            {genCtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, genMatterColUsed});
 
         res.evsel_ct_both = MergeSlotHists(slotHists, [](const SlotHistCt &slot) { return slot.evsel_ct_both.get(); }, "h_evsel_ct_both");
         res.reco_ct_both  = MergeSlotHists(slotHists, [](const SlotHistCt &slot) { return slot.reco_ct_both.get(); },  "h_reco_ct_both");
@@ -494,13 +506,14 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genPt, double genCt, int evselFlag, int recoFlag, double genMatter) {
+            [&](unsigned slot, double genPt, double genCt, int evselFlag, int recoFlag, int basicFlag, double genMatter) {
                 const int ptIdx = FindBin(ptBins1D, genPt);
                 if (ptIdx < 0)
                     return;
                 auto &slotHist = acquire_slot(slot);
                 const bool passEvsel = evselFlag != 0;
-                const bool passReco = recoFlag != 0;
+                const bool passBasic = basicFlag != 0;
+                const bool passReco = passBasic && (recoFlag != 0);
                 const bool isMatter = genMatter > 0.0;
                 if (passEvsel) {
                     slotHist.evsel_ct_both[ptIdx]->Fill(genCt);
@@ -517,7 +530,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_ct_antimatter[ptIdx]->Fill(genCt);
                 }
             },
-            {genPtColUsed, genCtColUsed, evselFlagColInt, recoFlagColInt, genMatterColUsed});
+            {genPtColUsed, genCtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, genMatterColUsed});
 
         auto merge_per_pt = [&](auto accessor, const std::string &namePrefix, std::vector<TH1D*> &target) {
             for (int i = 0; i < nPt; ++i) {
@@ -620,13 +633,14 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genPt, double cent, int evselFlag, int recoFlag, double genMatter) {
+            [&](unsigned slot, double genPt, double cent, int evselFlag, int recoFlag, int basicFlag, double genMatter) {
                 const int centIdx = FindBin(centBins1D, cent);
                 if (centIdx < 0)
                     return;
                 auto &slotHist = acquire_slot(slot);
                 const bool passEvsel = evselFlag != 0;
-                const bool passReco = recoFlag != 0;
+                const bool passBasic = basicFlag != 0;
+                const bool passReco = passBasic && (recoFlag != 0);
                 const bool isMatter = genMatter > 0.0;
                 if (passEvsel) {
                     slotHist.evsel_pt_both[centIdx]->Fill(genPt);
@@ -643,7 +657,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_pt_antimatter[centIdx]->Fill(genPt);
                 }
             },
-            {genPtColUsed, centColUsed, evselFlagColInt, recoFlagColInt, genMatterColUsed});
+            {genPtColUsed, centColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, genMatterColUsed});
 
         auto merge_per_cent = [&](auto accessor, const std::string &namePrefix, std::vector<TH1D*> &target) {
             for (int i = 0; i < nCent; ++i) {

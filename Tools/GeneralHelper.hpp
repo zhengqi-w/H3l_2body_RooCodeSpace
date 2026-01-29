@@ -4,9 +4,12 @@
 // GeneralHelper.hpp
 #include <filesystem>
 #include <iostream>
+#include <fstream>
 #include <string>
+#include <sstream>
 #include <thread>
 #include <vector>
+#include <cmath>
 #include <TRandom.h>
 #include <ROOT/RDataFrame.hxx>
 #include <algorithm>
@@ -161,12 +164,14 @@ inline auto CorrectAndConvertRDF(RDFType rdf, bool calibrate_he3_pt = false, boo
 
     // if MC add generator-level derived vars
     // Choose expressions at runtime so we can define columns unconditionally and avoid type-assign issues
+    std::string genDecRadExpr = "0";
     std::string genDecLenExpr = "0";
     std::string genPzExpr = "0";
     std::string genPExpr = "0";
     std::string absGenPtExpr = "0";
     std::string genCtExpr = "0";
     if (isMC) {
+        genDecRadExpr = "sqrt(fGenXDecVtx*fGenXDecVtx + fGenYDecVtx*fGenYDecVtx)";
         genDecLenExpr = "sqrt(fGenXDecVtx*fGenXDecVtx + fGenYDecVtx*fGenYDecVtx + fGenZDecVtx*fGenZDecVtx)";
         genPzExpr = "fGenPt * sinh(fGenEta)";
         genPExpr = "sqrt(fGenPt*fGenPt + fGenPz*fGenPz)";
@@ -174,7 +179,8 @@ inline auto CorrectAndConvertRDF(RDFType rdf, bool calibrate_he3_pt = false, boo
         double factor = (!isH4l) ? 2.99131 : 3.922;
         genCtExpr = std::string("fGenDecLen * ") + std::to_string(factor) + " / fGenP";
     }
-    auto out10 = out9.Define("fGenDecLen", genDecLenExpr)
+    auto out10 = out9.Define("fGenDecRad", genDecRadExpr)
+                    .Define("fGenDecLen", genDecLenExpr)
                     .Define("fGenPz", genPzExpr)
                     .Define("fGenP", genPExpr)
                     .Define("fAbsGenPt", absGenPtExpr)
@@ -389,6 +395,104 @@ inline bool SaveCanvas(TCanvas* c, const std::string& filename) {
     c->SaveAs(filename.c_str());
     return true;
 }
+
+struct WorkingPointResult {
+    double score = 0.0;
+    double eff = 0.0;
+    double significance = 0.0;
+    bool found = false;
+};
+
+// Simple parser: turn a whitespace separated numeric line into a vector<double>
+inline std::vector<double> ParseNumbers(const std::string &line) {
+    std::istringstream iss(line);
+    std::vector<double> vals;
+    double v;
+    while (iss >> v) {
+        vals.push_back(v);
+    }
+    return vals;
+}
+
+// Look up WP by centrality and pT bin in a file shaped like WorkingPoint_Spectrum*.txt
+// Columns: cenMin cenMax ptMin ptMax best_score best_eff max_significance
+inline WorkingPointResult GetWpForCenPt(const std::string &wpFile,
+                                        double cenMin, double cenMax,
+                                        double ptMin, double ptMax) {
+    std::ifstream in(wpFile);
+    if (!in.is_open()) {
+        std::cerr << "[GetWpForCenPt] Cannot open WP file: " << wpFile << "\n";
+        return {};
+    }
+    WorkingPointResult res;
+    const double eps = 1e-6;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        auto vals = ParseNumbers(line);
+        if (vals.size() < 7) continue;
+        double cmin = vals[0], cmax = vals[1], pmin = vals[2], pmax = vals[3];
+        if (std::abs(cmin - cenMin) < eps && std::abs(cmax - cenMax) < eps &&
+            std::abs(pmin - ptMin) < eps && std::abs(pmax - ptMax) < eps) {
+            res.score = vals[4];
+            res.eff = vals[5];
+            res.significance = vals[6];
+            res.found = true;
+            break;
+        }
+    }
+    return res;
+}
+
+// Look up WP by pT/ct bin (optionally centrality) in a file like WorkingPoint_Crosssection*.txt
+// Supports two layouts:
+//  (a) ptMin ptMax ctMin ctMax score eff sig          (7 columns)
+//  (b) cenMin cenMax ptMin ptMax ctMin ctMax score eff sig (9 columns, cen may be -1 -1 for wildcard)
+inline WorkingPointResult GetWpForPtCt(const std::string &wpFile,
+                                       double ptMin, double ptMax,
+                                       double ctMin, double ctMax,
+                                       double cenMin = -1.0, double cenMax = -1.0) {
+    std::ifstream in(wpFile);
+    if (!in.is_open()) {
+        std::cerr << "[GetWpForPtCt] Cannot open WP file: " << wpFile << "\n";
+        return {};
+    }
+    WorkingPointResult res;
+    const double eps = 1e-6;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        auto vals = ParseNumbers(line);
+        if (vals.size() == 7) {
+            double pmin = vals[0], pmax = vals[1], cmin = vals[2], cmax = vals[3];
+            if (std::abs(pmin - ptMin) < eps && std::abs(pmax - ptMax) < eps &&
+                std::abs(cmin - ctMin) < eps && std::abs(cmax - ctMax) < eps) {
+                res.score = vals[4];
+                res.eff = vals[5];
+                res.significance = vals[6];
+                res.found = true;
+                break;
+            }
+        } else if (vals.size() == 9) {
+            double cCenMin = vals[0], cCenMax = vals[1];
+            double pmin = vals[2], pmax = vals[3], cmin = vals[4], cmax = vals[5];
+            bool cenMatch = (std::abs(cenMin - (-1.0)) < eps && std::abs(cenMax - (-1.0)) < eps) ||
+                            (std::abs(cCenMin - (-1.0)) < eps && std::abs(cCenMax - (-1.0)) < eps) ||
+                            (std::abs(cCenMin - cenMin) < eps && std::abs(cCenMax - cenMax) < eps);
+            if (cenMatch &&
+                std::abs(pmin - ptMin) < eps && std::abs(pmax - ptMax) < eps &&
+                std::abs(cmin - ctMin) < eps && std::abs(cmax - ctMax) < eps) {
+                res.score = vals[6];
+                res.eff = vals[7];
+                res.significance = vals[8];
+                res.found = true;
+                break;
+            }
+        }
+    }
+    return res;
+}
+
 
 } // namespace GeneralHelper
 

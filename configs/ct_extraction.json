@@ -1,7 +1,7 @@
 {
   "data_snapshot_dir": "../../SnapShotsData/LHC23_PbPb_pass5_CustomV0s_HadronPID",
   "snapshot_tree_name": "O2hypcands",
-  "mc_file": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/AO2D_CustomV0s.root",
+  "mc_file": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11/AO2D_CustomV0s.root",
   "mc_tree_name": "O2mchypcands",
   "mc_snapshot_dir": "../../SnapShotsData/LHC23_PbPb_pass5_CustomV0s_HadronPID",
   "mc_snapshot_tree_name": "O2mchypcands",
@@ -12,7 +12,7 @@
   "output_dir": "../../Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/CtExtraction",
   "output_file": "ct_analysis",
   "trial_suffix": "",
-  "is_matter": "antimatter",
+  "is_matter": "both",
   "mass_column": "fMassH3L",
   "bdt_score_column": "model_output",
   "run_period_label": "Run 3",
@@ -28,6 +28,7 @@
     "fCosPA",
     "fNSigmaHe"
   ],
+  "basic_selection_data_for_mc_eff": "fTPCsignalPi<1000 && abs(fNSigmaHe)<5 && fCosPA>0.99 && fAvgClusterSizeHe > 5",
   "pt_bins": [2, 3, 4, 5.5, 8],
   "ct_bins": [ [1, 3, 6, 9, 12, 18, 30],
               [1, 3, 6, 9, 12, 18, 25],
@@ -40,12 +41,10 @@
   "bdt_score_shift": 0.0,
   "snapshot_pattern": "data_pt_%PTMIN%_%PTMAX%_ct_%CTMIN%_%CTMAX%.root",
   "sigma_mc_to_data_range": [
-    [1.0, 1.5],
-    [1.0, 1.5],
-    [1.0, 1.5],
-    [1.0, 1.5]
+    [0.8, 1.5],
+    [0.8, 1.5],
+    [0.8, 1.5],
+    [0.8, 1.5]
   ],
-  "sigma_range_path": "../../Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/CtExtraction/SigmaMatching",
-  "sigma_range_easy_mode": false,
   "bdt_overrides": []
 }

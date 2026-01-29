@@ -37,11 +37,15 @@ class BDTPreProcess:
         self.tree_name_mc = config['tree_name_mc']
         self.pt_bins = config.get('pt_bins', None)
         self.ct_bins = config.get('ct_bins', None)
+        self.pt_bins_single = config.get('pt_bins_single', None)
+        self.ct_bins_single = config.get('ct_bins_single', None)
         self.pt_bin = config.get('pt_bin', None)   # for separate mode optional
         self.ct_bin = config.get('ct_bin', None)   # for separate mode optional
-        self.training_preselections = config['training_preselections']
+        #self.training_preselections_data = config['training_preselections_data']
+        self.basic_selection_data = config.get('basic_selection_data', None)
         self.training_variables = config['training_variables']
-        self.extra_vars_used = config.get('extra_vars_used', [])
+        self.extra_vars_save_data = config.get('extra_vars_save_data', [])
+        self.extra_vars_save_mc = config.get('extra_vars_save_mc', [])
         self.test_set_size = config['test_set_size']
         self.bkg_fraction_max = config['bkg_fraction_max']
         self.random_state = config['random_state']
@@ -72,8 +76,8 @@ class BDTPreProcess:
         self.mc_rdf = utils.load_all_trees_to_chain(self.mc_file, self.chian_mc, self.tree_name_mc)
         self.data_rdf = utils.correct_and_convert_df(self.data_rdf, calibrate_he3_pt = False, isMC = False, isH4L = False)
         self.mc_rdf = utils.correct_and_convert_df(self.mc_rdf, calibrate_he3_pt = False, isMC = True, isH4L = False)
-        if self.training_preselections:
-            self.data_rdf = self.data_rdf.Filter(self.training_preselections)
+        if self.basic_selection_data:
+            self.data_rdf = self.data_rdf.Filter(self.basic_selection_data)
         spectrum_file = ROOT.TFile.Open("../../../H3l_2body_spectrum/utils/H3L_BwFit.root")
         he3_spectrum = spectrum_file.Get("BlastWave_H3L_10_30")
         self.mc_rdf_reweighted = utils.reweight_pt_spectrum(self.mc_rdf, "fAbsGenPt", he3_spectrum, is_rdf = True)
@@ -82,11 +86,14 @@ class BDTPreProcess:
         # self.data_rdf = self.data_rdf.Filter("(fMassH3L<2.95 || fMassH3L>3.02)")
         # self.mc_rdf_reweighted = self.mc_rdf_reweighted.Filter("(fMassH3L>2.95 && fMassH3L<3.02)")
         
-        if self.extra_vars_used:
-            self.data_columns = self.training_variables + self.extra_vars_used + ["fPt", "fCt", "fMassH3L", "fIsMatter"]
+        if self.extra_vars_save_data:
+            self.data_columns = self.training_variables + self.extra_vars_save_data
         else:
             self.data_columns = self.training_variables + ["fPt", "fCt", "fMassH3L", "fIsMatter"]
-        self.mc_columns = self.training_variables + ["fAbsGenPt", "fGenCt", "fMassH3L", "fIsMatter"]
+        if self.extra_vars_save_mc:
+            self.mc_columns = self.training_variables + self.extra_vars_save_mc
+        else:
+            self.mc_columns = self.training_variables + ["fAbsGenPt", "fGenCt", "fMassH3L", "fIsMatter"]
 
     def _make_label(self, pt_range=None, ct_range=None, cen_range=None):
         parts = []
@@ -391,6 +398,8 @@ class BDTPreProcess:
         side_band_sel_mc = f"(fMassH3L>{self.side_band_edges[0]} and fMassH3L<{self.side_band_edges[1]})"
         bin_data_hdl.apply_preselections(side_band_sel_data)
         bin_mc_hdl.apply_preselections(side_band_sel_mc)
+        #if self.training_preselections_data:
+            #bin_data_hdl.apply_preselections(self.training_preselections_data)
         bin_mc_hdl, bin_data_hdl = self._balance_and_prepare(bin_mc_hdl, bin_data_hdl)
         print(f"Training set sizes after balancing: MC={len(bin_mc_hdl)}, Data={len(bin_data_hdl)}")
 
@@ -442,17 +451,50 @@ class BDTPreProcess:
             self._process_training_unit(pt_range, ct_range, None)
 
         elif self.mix_mode == 'pt-single':
-            pt_range = self.pt_bin if self.pt_bin is not None else self._ensure_range(self.pt_bins, 'pt_bins')
-            self._process_training_unit(pt_range, None, None)
+            pt_ranges = []
+            if self.pt_bin is not None:
+                pt_ranges = [self._ensure_range(self.pt_bin, 'pt_bin')]
+            elif self.pt_bins_single is not None:
+                if len(self.pt_bins_single) < 2:
+                    raise ValueError("pt_bins_single must contain at least two edges.")
+                pt_ranges = list(zip(self.pt_bins_single[:-1], self.pt_bins_single[1:]))
+            elif self.pt_bins is not None:
+                if len(self.pt_bins) < 2:
+                    raise ValueError("pt_bins must contain at least two edges for pt-single mode.")
+                pt_ranges = list(zip(self.pt_bins[:-1], self.pt_bins[1:]))
+            else:
+                raise ValueError("Mix_mode 'pt-single' requires 'pt_bin', 'pt_bins_single' or 'pt_bins'.")
+
+            for pt_range in pt_ranges:
+                self._process_training_unit(pt_range, None, None)
 
         elif self.mix_mode == 'ct-single':
-            ct_range = self.ct_bin if self.ct_bin is not None else self._ensure_range(self.ct_bins, 'ct_bins')
+            # optional pt filter for all ct bins
             pt_range = None
             if self.pt_bin is not None:
                 pt_range = self._ensure_range(self.pt_bin, 'pt_bin')
             elif self.pt_bins is not None and len(self.pt_bins) == 2:
                 pt_range = (self.pt_bins[0], self.pt_bins[1])
-            self._process_training_unit(pt_range, ct_range, None)
+
+            ct_ranges = []
+            if self.ct_bin is not None:
+                ct_ranges = [self._ensure_range(self.ct_bin, 'ct_bin')]
+            elif self.ct_bins_single is not None:
+                if len(self.ct_bins_single) < 2:
+                    raise ValueError("ct_bins_single must contain at least two edges.")
+                ct_ranges = list(zip(self.ct_bins_single[:-1], self.ct_bins_single[1:]))
+            elif self.ct_bins is not None:
+                if len(self.ct_bins) < 2:
+                    raise ValueError("ct_bins must contain at least two edges for ct-single mode.")
+                # if a single pair is given, this gracefully handles it as well
+                ct_ranges = list(zip(self.ct_bins[:-1], self.ct_bins[1:])) if isinstance(self.ct_bins[0], (int, float)) else []
+                if not ct_ranges:
+                    raise ValueError("ct_bins must be a 1D edge list for ct-single mode; use ct_bins_single for multiple bins.")
+            else:
+                raise ValueError("Mix_mode 'ct-single' requires 'ct_bin', 'ct_bins_single' or 1D 'ct_bins'.")
+
+            for ct_range in ct_ranges:
+                self._process_training_unit(pt_range, ct_range, None)
 
         else:
             raise ValueError(f"Unsupported Mix_mode '{self.mix_mode}'.")

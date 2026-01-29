@@ -285,6 +285,16 @@ void CtExtraction::Run() {
     stdDir->cd();
     hTauVsPt->Write();
     hTauErrVsPt->Write();
+
+    // Explicitly flush and close the output file so downstream readers do not hit
+    // the ROOT recovery path (avoids "file probably not closed" warnings).
+    if (fOutputFile) {
+        fOutputFile->cd();
+        fOutputFile->Write();
+        fOutputFile->Flush();
+        fOutputFile->Close();
+        fOutputFile.reset();
+    }
 }
 
 void CtExtraction::SetBDTScoreOverride(double ptMin, double ptMax,
@@ -334,6 +344,7 @@ void CtExtraction::LoadConfig(const std::string &path) {
     fCfg.snapshotPattern = get_string("snapshot_pattern", "data_pt_%PTMIN%_%PTMAX%_ct_%CTMIN%_%CTMAX%.root");
     fCfg.mcReweightFile = get_string("mc_reweight_file", "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/H3l_2body_spectrum/utils/H3L_BWFit.root");
     fCfg.mcReweightFunc = get_string("mc_reweight_func", "BlastWave_H3L_10_30");
+    fCfg.basicSelectionDataForMCEff = get_string("basic_selection_data_for_mc_eff", "");
 
     fCfg.ptBins = fCfgJson.value("pt_bins", std::vector<double>{});
     fCfg.ctBins = fCfgJson.value("ct_bins", std::vector<std::vector<double>>{});
@@ -483,7 +494,8 @@ void CtExtraction::BuildAcceptance() {
         std::vector<double>{},
         fCfg.ctBins,
         std::vector<double>{},
-        std::vector<std::vector<double>>{}
+        std::vector<std::vector<double>>{},
+        fCfg.basicSelectionDataForMCEff
     );
 
     const std::vector<TH1D*> *perPt = nullptr;
@@ -710,7 +722,7 @@ CtExtraction::BinComputationResult CtExtraction::FitSpectrum(const BinKey &key,
 
     const double massMin = fCfg.massRange[0];
     const double massMax = fCfg.massRange[1];
-    auto massVar = std::make_shared<RooRealVar>("mass", "invariant mass", massMin, massMax);
+    auto massVar = std::make_shared<RooRealVar>("mass", "M_{(#pi^{-}+^{3}He)/(#pi^{+}+^{3}#bar{He})} (GeV/c^{2})", massMin, massMax);
     RooRealVar &mass = *massVar;
     RooArgSet vars(mass);
 
@@ -792,8 +804,8 @@ CtExtraction::BinComputationResult CtExtraction::FitSpectrum(const BinKey &key,
 
     RooRealVar c0("c0", "c0", 0.0, -1.5, 1.5);
     RooRealVar c1("c1", "c1", 0.0, -1.5, 1.5);
-    RooRealVar c2("c2", "c2", 0.0, -1.5, 1.5);
-    RooChebychev background("background", "background", mass, RooArgList(c0, c1, c2));
+    //RooRealVar c2("c2", "c2", 0.0, -1.5, 1.5);
+    RooChebychev background("background", "background", mass, RooArgList(c0, c1 /*, c2*/));
 
     const double entries = dataSet.sumEntries();
     RooRealVar nsig("nsig", "signal yield", std::max(1.0, entries * 0.1), 0.0, std::max(10.0, entries * 10.0));
@@ -863,7 +875,7 @@ CtExtraction::BinComputationResult CtExtraction::FitSpectrum(const BinKey &key,
     const int ndfData = std::max(1, static_cast<int>(fCfg.massBins) - nDataFloatParams);
     const double chi2Data = dataFrame->chiSquare("totalPDF", nullptr, nDataFloatParams);
 
-    auto pinfoVals = std::make_unique<TPaveText>(0.592, 0.50, 0.892, 0.85, "NDC");
+    auto pinfoVals = std::make_unique<TPaveText>(0.5, 0.4, 0.9, 0.85, "NDC");
     pinfoVals->SetBorderSize(0);
     pinfoVals->SetFillStyle(0);
     pinfoVals->SetTextAlign(11);

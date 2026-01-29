@@ -89,6 +89,7 @@ private:
         std::string massColumn{"fMassH3L"};
         std::string bdtScoreColumn{"model_output"};
         std::string snapshotPattern{"data_pt_%PTMIN%_%PTMAX%_ct_%CTMIN%_%CTMAX%.root"};
+        std::string basicSelectionDataForMCEff;
         std::vector<double> ptBins;
         std::vector<std::vector<double>> ctBins; // same length as ptBins-1
         std::vector<double> massRange{2.95, 3.05};
