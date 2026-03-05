@@ -116,6 +116,11 @@ public:
         hAcc->SetDirectory(nullptr);
         hAbso->SetDirectory(nullptr);
         hBdt->SetDirectory(nullptr);
+        hRaw->SetStats(false);
+        hCorr->SetStats(false);
+        hAcc->SetStats(false);
+        hAbso->SetStats(false);
+        hBdt->SetStats(false);
 
         SpectrumResult out;
         std::vector<std::unique_ptr<RooPlot>> frames;
@@ -427,10 +432,10 @@ private:
             bkg = new RooChebychev("bkg", "bkg", mass, RooArgList(c0, c1));
         }
 
-        const double nSigInit = std::max(1.0, 0.5 * static_cast<double>(dataCounts));
-        const double nSigMax = std::max(500.0, 10.0 * static_cast<double>(dataCounts));
-        const double nBkgInit = std::max(1.0, 0.5 * static_cast<double>(dataCounts));
-        const double nBkgMax = std::max(500.0, 30.0 * static_cast<double>(dataCounts));
+        const double nSigInit = std::max(1.0, 0.7 * static_cast<double>(dataCounts));
+        const double nSigMax = std::max(150.0, 3.0 * static_cast<double>(dataCounts));
+        const double nBkgInit = std::max(1.0, 0.3 * static_cast<double>(dataCounts));
+        const double nBkgMax = std::max(50.0, 1.0 * static_cast<double>(dataCounts));
         RooRealVar nSig("nSig", "nSig", nSigInit, 0.0, nSigMax);
         RooRealVar nBkg("nBkg", "nBkg", nBkgInit, 0.0, nBkgMax);
         RooAddPdf model("model", "total_pdf", RooArgList(*signalPdf, *bkg), RooArgList(nSig, nBkg));
@@ -516,8 +521,8 @@ private:
         frame->addObject(textData.release());
 
         FitResult out;
-        out.signal = signalCounts3s;
-        out.signalErr = signalCounts3sErr;
+        out.signal = signalValue;
+        out.signalErr = signalValueErr;
         out.significance = significance;
         out.significanceErr = significanceErr;
         out.chi2Data = chi2OverNdfData;

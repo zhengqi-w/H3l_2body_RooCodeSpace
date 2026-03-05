@@ -929,8 +929,8 @@ CtExtraction::BinComputationResult CtExtraction::FitSpectrum(const BinKey &key,
     
     dataFrame->addObject(pinfoAlice.release());
 
-    res.rawYield = signalIntVal3s;
-    res.rawYieldErr = signalIntErr3s;
+    res.rawYield = signalCounts;
+    res.rawYieldErr = signalCountsErr;
     res.fittedMean = mean.getVal();
     res.fittedSigma = sigma.getVal();
     res.fittedSigmaErr = sigma.getError();

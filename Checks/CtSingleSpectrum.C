@@ -44,9 +44,25 @@
 
 #include "../Tools/AcceptanceHelper.h"
 #include "../Tools/GeneralHelper.hpp"
+#include "../Tools/AbsorptionHelper.h"
 
 using namespace std;
 constexpr double kSpeedOfLightCmPerPs = 0.0299792458; // c * 1 ps
+
+static std::unique_ptr<TF1> LoadReweightFunc(const std::string &reweightPtFile) {
+  if (reweightPtFile.empty()) return nullptr;
+  auto f = std::unique_ptr<TFile>(TFile::Open(reweightPtFile.c_str(), "READ"));
+  if (!f || f->IsZombie()) {
+    ::Warning("CtSingleSpectrum", "Failed to open reweight file %s", reweightPtFile.c_str());
+    return nullptr;
+  }
+  TF1 *bw = dynamic_cast<TF1 *>(f->Get("BlastWave_H3L_0_80"));
+  if (!bw) {
+    ::Warning("CtSingleSpectrum", "BlastWave_H3L_0_80 not found in %s", reweightPtFile.c_str());
+    return nullptr;
+  }
+  return std::unique_ptr<TF1>(static_cast<TF1 *>(bw->Clone()));
+}
 
 struct WPBin { double ctMin{}, ctMax{}, score{}, eff{}; };
 
@@ -175,12 +191,15 @@ static std::unique_ptr<RooFitResult> FitData(const vector<double> &masses, RooRe
 void CtSingleSpectrum(){
   const string snapshotDir = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/SnapShotsData/LHC23_PbPb_pass5_CustomV0s_HadronPID";
   const string wpPath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/WorkingPoint/WorkingPoint_CtSingle.txt";
-  const string mcAo2d = "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11/AO2D_CustomV0s.root";
+  const string mcAo2d = "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/AO2D_CustomV0s.root";
+  const string reweightPtFile = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/Ploting_scrips/H3L_BWFit_Run3_23.root";
+  const string absorptionCorrFile = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/AbsorptionTrees/absorption_tree_x1.5.root";
   const string dataTree = "O2hypcands";
   const string mcTree   = "O2mchypcands";
+  const string absorTreename = "he3candidates";
   const string isMatter = "both"; // "matter", "antimatter", "both"
-  const string basicSelectionDataForMCEff = "fTPCsignalPi<1000 && fCosPA>0.99 && fAvgClusterSizeHe > 5 && fDecRad < 2.1";
-  const string outFileDir = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/Checks/LifeTime_BeamPipe";
+  const string basicSelectionDataForMCEff = "fTPCsignalPi<1000 && fCosPA>0.99 && fAvgClusterSizeHe > 5 && fDecRad > 0.5";
+  const string outFileDir = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/Checks/LifeTime_0_80";
   const string outFileName = outFileDir + "/ct_single_spectrum.root";
   const double massLo=2.96, massHi=3.04;
 
@@ -215,8 +234,15 @@ void CtSingleSpectrum(){
   if(mcChain.GetEntries()<=0){ ::Error("CtSingleSpectrum","MC chain empty (tree %s)", mcTree.c_str()); return; }
   ROOT::RDataFrame mcAo2df(mcChain);
   auto mcReady = GeneralHelper::CorrectAndConvertRDF(mcAo2df, false, true);
+
+  auto reweightFunc = LoadReweightFunc(reweightPtFile);
+
+  ROOT::RDF::RNode mcBase(mcReady);
+  if (reweightFunc) {
+    mcBase = GeneralHelper::ReWeightSpectrum(mcBase, reweightFunc.get(), "fAbsGenPt");
+  }
   auto accRes = AcceptanceHelper::ComputeAcceptanceFlexible(
-    mcReady,
+    mcBase,
     std::vector<double>{},
     ctEdges,
     std::vector<std::vector<double>>{},
@@ -239,10 +265,25 @@ void CtSingleSpectrum(){
   TFile fout(Form("%s", outFileName.c_str()),"RECREATE");
   TDirectory *dFits = fout.mkdir("Fits");
 
-  TH1D hRaw("h_raw_counts", ";ct (cm);Raw counts (|#it{m}-#mu|<3#sigma)", static_cast<int>(ctEdges.size())-1, ctEdges.data());
-  TH1D hAcc("h_acc", ";ct (cm);Acceptance", static_cast<int>(ctEdges.size())-1, ctEdges.data());
+  TH1D hRaw("h_raw_counts", ";ct (cm);Raw counts (N_{sig}) / Binwidth", static_cast<int>(ctEdges.size())-1, ctEdges.data());
+  TH1D hAcc("h_acc", ";ct (cm);Efficiency #times Acceptance", static_cast<int>(ctEdges.size())-1, ctEdges.data());
   TH1D hBdt("h_bdt_eff", ";ct (cm);BDT efficiency", static_cast<int>(ctEdges.size())-1, ctEdges.data());
-  TH1D hCorr("h_corrected", ";ct (cm);1/(Acc #times #epsilon_{BDT} #times #Delta ct) N_{3#sigma}", static_cast<int>(ctEdges.size())-1, ctEdges.data());
+  TH1D hAbso("h_abso_eff", ";ct (cm);Absorption efficiency", static_cast<int>(ctEdges.size())-1, ctEdges.data());
+  TH1D hCorr("h_corrected", ";ct (cm);1/(Acc #times #epsilon_{abso} #times #epsilon_{BDT} #times #Delta ct) N_{sig}", static_cast<int>(ctEdges.size())-1, ctEdges.data());
+
+  // absorption input
+  std::unique_ptr<TFile> fAbso(TFile::Open(absorptionCorrFile.c_str(), "READ"));
+  std::unique_ptr<ROOT::RDataFrame> rdfAbso;
+  if (fAbso && !fAbso->IsZombie()) {
+    TTree *tAbso = dynamic_cast<TTree *>(fAbso->Get(absorTreename.c_str()));
+    if (tAbso) {
+      rdfAbso = std::make_unique<ROOT::RDataFrame>(*tAbso);
+    } else {
+      ::Warning("CtSingleSpectrum", "Absorption tree %s not found", absorTreename.c_str());
+    }
+  } else {
+    ::Warning("CtSingleSpectrum", "Cannot open absorption file %s", absorptionCorrFile.c_str());
+  }
 
   for(const auto &dfPath : dataFiles){
     double lo=0,hi=0; if(!ParseCtEdges(dfPath,lo,hi)) continue;
@@ -281,16 +322,43 @@ void CtSingleSpectrum(){
     double acc = accHist->GetBinContent(accHist->FindBin((lo+hi)*0.5));
     double accErr = accHist->GetBinError(accHist->FindBin((lo+hi)*0.5));
     if(acc<=0){ ::Warning("CtSingleSpectrum","Zero acc for bin %.2f-%.2f", lo, hi); continue; }
+
+    double absoEff = 1.0, absoErr = 0.0;
+    if (rdfAbso) {
+      Absorption::CtAbsorptionCalculator absoCalc(*rdfAbso, lo, hi, 7.6);
+      absoCalc.Calculate();
+      const auto &res = absoCalc.Result();
+      if (isMatter == "matter") { absoEff = res.effMatter; absoErr = res.errMatter; }
+      else if (isMatter == "antimatter") { absoEff = res.effAnti; absoErr = res.errAnti; }
+      else { absoEff = res.effBoth; absoErr = res.errBoth; }
+      if (absoEff <= 0) { ::Warning("CtSingleSpectrum","Zero absorption eff for bin %.2f-%.2f", lo, hi); continue; }
+    }
+
     double width = hi-lo;
-    double corrected = raw3s / (wp.eff * acc * width);
+    double corrected = nsig / (wp.eff * acc * absoEff * width);
     double rel2 = 0.0;
-    if(raw3s>0 && raw3sErr>0) rel2 += (raw3sErr*raw3sErr)/(raw3s*raw3s);
+    if(nsig>0 && nsigErr>0) rel2 += (nsigErr*nsigErr)/(nsig*nsig);
     if(acc>0 && accErr>0) rel2 += (accErr*accErr)/(acc*acc);
+    if(absoEff>0 && absoErr>0) rel2 += (absoErr*absoErr)/(absoEff*absoEff);
     double corrErr = corrected * sqrt(rel2);
 
+    const TString frameTitle = TString::Format("ct %.2f-%.2f cm", lo, hi);
+    TString binTag = TString::Format("ct_%g_%g", lo, hi);
+    binTag.ReplaceAll(".", "p");
     dFits->cd();
-    if(frMC){ frMC->SetName(TString::Format("frame_mc_ct_%g_%g", lo, hi)); frMC->Write(); }
+    if(frMC){
+      frMC->SetName(TString::Format("frame_mc_ct_%g_%g", lo, hi));
+      frMC->SetTitle(frameTitle);
+      TCanvas cFrameMC(TString::Format("c_frame_mc_%s", binTag.Data()), frameTitle, 900, 700);
+      frMC->Draw();
+      cFrameMC.SaveAs(Form("%s/frame_mc_%s.pdf", outFileDir.c_str(), binTag.Data()));
+      frMC->Write();
+    }
     frData->SetName(TString::Format("frame_ct_%g_%g", lo, hi));
+    frData->SetTitle(frameTitle);
+    TCanvas cFrameData(TString::Format("c_frame_%s", binTag.Data()), frameTitle, 900, 700);
+    frData->Draw();
+    cFrameData.SaveAs(Form("%s/frame_%s.pdf", outFileDir.c_str(), binTag.Data()));
     frData->Write();
 
     TCanvas cFit(TString::Format("c_fit_%g_%g", lo, hi), "data fit", 900, 700);
@@ -305,9 +373,10 @@ void CtSingleSpectrum(){
     cFit.Write();
 
     const int binIdx = hRaw.FindBin((lo+hi)*0.5);
-    hRaw.SetBinContent(binIdx, raw3s); hRaw.SetBinError(binIdx, raw3sErr);
+    hRaw.SetBinContent(binIdx, nsig / width); hRaw.SetBinError(binIdx, nsigErr / width);
     hAcc.SetBinContent(binIdx, acc); hAcc.SetBinError(binIdx, accErr);
     hBdt.SetBinContent(binIdx, wp.eff); hBdt.SetBinError(binIdx, 0.0);
+    hAbso.SetBinContent(binIdx, absoEff); hAbso.SetBinError(binIdx, absoErr);
     hCorr.SetBinContent(binIdx, corrected); hCorr.SetBinError(binIdx, corrErr);
   }
 
@@ -361,7 +430,35 @@ void CtSingleSpectrum(){
   hRaw.Write();
   hAcc.Write();
   hBdt.Write();
+  hAbso.Write();
   hCorr.Write();
+
+  // Save key histograms and fit canvas as PDF alongside ROOT output
+  std::filesystem::create_directories(outFileDir);
+  hRaw.SetStats(false);
+  hAcc.SetStats(false);
+  hBdt.SetStats(false);
+  hAbso.SetStats(false);
+  hCorr.SetStats(false);
+
+  auto saveHistPdf = [](TH1 &h, const std::string &path) {
+    TCanvas c(Form("c_%s_pdf", h.GetName()), h.GetTitle(), 900, 700);
+    c.SetLeftMargin(0.12);
+    c.SetBottomMargin(0.12);
+    h.Draw("E1");
+    c.SaveAs(path.c_str());
+  };
+
+  saveHistPdf(hRaw, outFileDir + "/h_raw_counts.pdf");
+  saveHistPdf(hAcc, outFileDir + "/h_acc.pdf");
+  saveHistPdf(hBdt, outFileDir + "/h_bdt_eff.pdf");
+  saveHistPdf(hAbso, outFileDir + "/h_abso_eff.pdf");
+  saveHistPdf(hCorr, outFileDir + "/h_corrected.pdf");
+
+  if (gDirectory->Get("c_ct_fit")) {
+    auto cfit = dynamic_cast<TCanvas *>(gDirectory->Get("c_ct_fit"));
+    if (cfit) cfit->SaveAs((outFileDir + "/c_ct_fit.pdf").c_str());
+  }
 
   fout.Close();
   cout << "CtSingleSpectrum done. Output: ct_single_spectrum.root" << endl;

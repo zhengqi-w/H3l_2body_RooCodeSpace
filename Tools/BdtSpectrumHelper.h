@@ -47,7 +47,7 @@ struct Config {
     std::string reweightPtFile;
     std::string basicSelectionDataForMCEff;
     bool enableImplicitMT{false};
-    bool doQAAfterwords{false};
+    bool do_QA_afterward{false};
     int randomSeed{42};
     int systBdtScoreNPoints{20};
     int systNtrails{800};
@@ -56,6 +56,7 @@ struct Config {
     std::string systEfficiencyArrayPath;
     std::vector<std::string> systSignalFuncs;
     std::vector<std::string> systAbsorptionFiles;
+    std::vector<std::string> systAbsorptionFileLabels;
 };
 
 inline Config LoadConfig(const std::string &path) {
@@ -92,7 +93,7 @@ inline Config LoadConfig(const std::string &path) {
     cfg.reweightPtFile = j.value("reweight_pt_file", "");
     cfg.basicSelectionDataForMCEff = j.value("basic_selection_data_for_mc_eff", "");
     cfg.enableImplicitMT = j.value("enable_implicit_mt", cfg.enableImplicitMT);
-    cfg.doQAAfterwords = j.value("do_QA_afterwords", cfg.doQAAfterwords);
+    cfg.do_QA_afterward = j.value("do_QA_afterward", j.value("do_QA_afterwords", cfg.do_QA_afterward));
     cfg.randomSeed = j.value("random_seed", cfg.randomSeed);
     cfg.systBdtScoreNPoints = j.value("syst_bdt_score_npoints", cfg.systBdtScoreNPoints);
     cfg.systNtrails = j.value("syst_ntrails", cfg.systNtrails);
@@ -101,6 +102,7 @@ inline Config LoadConfig(const std::string &path) {
     cfg.systEfficiencyArrayPath = j.value("syst_efficiency_array_path", cfg.systEfficiencyArrayPath);
     cfg.systSignalFuncs = j.value("syst_signal_funcs", cfg.systSignalFuncs);
     cfg.systAbsorptionFiles = j.value("syst_absorption_files", cfg.systAbsorptionFiles);
+    cfg.systAbsorptionFileLabels = j.value("syst_absorption_file_labels", cfg.systAbsorptionFileLabels);
     return cfg;
 }
 

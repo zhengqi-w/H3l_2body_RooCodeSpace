@@ -42,12 +42,12 @@ std::string Clean(double v) {
 }
 
 void SnapshotDecRadCheck(const std::string &snapshotDir = "../../SnapShotsData/LHC23_PbPb_pass5_CustomV0s_HadronPID",
-                         const std::string &mcfile = "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11/AO2D_CustomV0s.root",
+                         const std::string &mcfile = "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/AO2D_CustomV0s.root",
                          const std::string &wpFile = "../../Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/WorkingPoint/WorkingPoint_SpectrumTest.txt",
                          const std::string &treeName = "O2hypcands",
                          const std::string &treeNameMc = "O2mchypcands",
                          const std::string &outDir = "../../Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/Checks/DecRad",
-                         const std::string &isMatter = "antimatter", // "matter", "antimatter", "both"
+                         const std::string &isMatter = "both", // "matter", "antimatter", "both"
                          const std::vector<double> &ctBins = {0.4, 0.6, 0.8, 1, 1.2, 1.6, 2, 3}) {
     using namespace GeneralHelper;
     SetDefaultStyle();
@@ -79,7 +79,7 @@ void SnapshotDecRadCheck(const std::string &snapshotDir = "../../SnapShotsData/L
         {2, 3, 3.5, 4, 4.5, 5, 6, 8},
         {2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8},
         {2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8},
-        {2, 2.5, 3, 3.5, 4, 4.5, 5, 8}
+        {2, 2.5, 3, 3.5, 4, 5, 8}
     };
 
     auto hasTree = [](const std::string &filePath, const std::string &tree) {
@@ -458,7 +458,7 @@ void SnapshotDecRadCheck(const std::string &snapshotDir = "../../SnapShotsData/L
     // Decay radius distributions (no decay-radius cut) within 2#sigma mass window
     const int decRadBins = 180;
     const double decRadMin = 0.0;
-    const double decRadMax = 45.0;
+    const double decRadMax = 5.0;
 
     TH1D hDecRadData("h_decRad_data", ";fDecRad (cm);Entries", decRadBins, decRadMin, decRadMax);
     hDecRadData.SetDirectory(nullptr);

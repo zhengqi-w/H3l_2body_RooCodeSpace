@@ -14,6 +14,9 @@
 #include <TSystem.h>
 #include <TLatex.h>
 #include <TBox.h>
+#include <TLegend.h>
+#include <TPaveText.h>
+#include <RooMsgService.h>
 
 #include <ROOT/RDataFrame.hxx>
 
@@ -58,6 +61,21 @@ void AddLatexLine(RooPlot *frame, double x, double y, const std::string &text) {
     latex->SetTextColor(kBlack);
     frame->addObject(latex.release());
     y -= 0.04;
+}
+
+void AddTrailAnnotation(RooPlot *frame, const std::string &bkg, const std::string &sig,
+                        double bdtScore, double bdtEff) {
+    if (!frame) return;
+    auto pave = std::make_unique<TPaveText>(0.58, 0.12, 0.88, 0.28, "NDC");
+    pave->SetBorderSize(0);
+    pave->SetFillStyle(0);
+    pave->SetTextAlign(12);
+    pave->SetTextFont(42);
+    pave->AddText(Form("Bkg: %s", bkg.c_str()));
+    pave->AddText(Form("Sig: %s", sig.c_str()));
+    pave->AddText(Form("BDT cut: %.4f", bdtScore));
+    pave->AddText(Form("BDT eff: %.3f", bdtEff));
+    frame->addObject(pave.release());
 }
 
 std::string Sanitize(const std::string &s) {
@@ -498,11 +516,15 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
         return 1;
     }
 
+    // Silence RooFit info prints during systematic trails
+    RooMsgService::instance().setGlobalKillBelow(RooFit::ERROR);
+    RooMsgService::instance().setSilentMode(true);
+
     Config cfg = LoadConfig(cfgPath);
     if (cfg.enableImplicitMT) ROOT::EnableImplicitMT();
     std::filesystem::create_directories(cfg.outputDir);
     std::string mergedCsvPath;
-    if (cfg.doQAAfterwords) {
+    if (cfg.do_QA_afterward) {
         mergedCsvPath = cfg.outputDir + "/corrections_all.csv";
         std::error_code ec;
         std::filesystem::remove(mergedCsvPath, ec); // clear previous content if present
@@ -510,6 +532,12 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
 
     WPSummaryReader wpReader(cfg.wpFile);
     SpectrumCalculator calculator(cfg);
+
+    auto saveHistPdf = [](TH1 &h, const std::string &path, const std::string &opt = "HIST") {
+        auto cTmp = std::make_unique<TCanvas>(Form("c_tmp_%s", h.GetName()), h.GetTitle(), 900, 700);
+        h.Draw(opt.c_str());
+        cTmp->SaveAs(path.c_str());
+    };
 
     for (size_t icen = 0; icen + 1 < cfg.cenBins.size(); ++icen) {
         std::pair<double, double> cenRange{cfg.cenBins[icen], cfg.cenBins[icen + 1]};
@@ -540,17 +568,37 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
         SpectrumResult resStd = calculator.Calculate(bins, nEvents, cfg.bkgFunc, cfg.sigFunc, cfg.isMatter, true, "_std");
         AnnotateSpectrumFrames(resStd, cfg, nEvents);
         RefreshCanvases(resStd, calculator);
-        if (cfg.doQAAfterwords) {
+        if (cfg.do_QA_afterward) {
             AppendCorrectionsCsv(resStd, cenRange, cfg, "std", mergedCsvPath);
         }
         WriteSpectrum(resStd, stdDir, true);
 
+        if (cfg.do_QA_afterward) {
+            std::string basePdfDir = cfg.outputDir + "/" + cenDirName;
+            if (resStd.hRaw) saveHistPdf(*resStd.hRaw, basePdfDir + "/h_raw_std.pdf", "E1");
+            if (resStd.hCorr) saveHistPdf(*resStd.hCorr, basePdfDir + "/h_corr_std.pdf", "E1");
+            if (resStd.hAcc) saveHistPdf(*resStd.hAcc, basePdfDir + "/h_acc_std.pdf");
+            if (resStd.hAbso) saveHistPdf(*resStd.hAbso, basePdfDir + "/h_abso_std.pdf");
+            if (resStd.hBdtEff) saveHistPdf(*resStd.hBdtEff, basePdfDir + "/h_bdteff_std.pdf");
+            for (const auto &c : resStd.canvases) {
+                if (c) c->SaveAs((basePdfDir + "/" + std::string(c->GetName()) + ".pdf").c_str());
+            }
+        }
+
         fout.cd();
         std::vector<double> edges = CollectEdges(bins);
-        TH1D hSyst("h_systematics", ";p_{T};#sigma_{syst}", static_cast<int>(edges.size() - 1), edges.data());
-        hSyst.SetDirectory(nullptr);
+        TH1D hSystFit("h_systematics_fit", ";p_{T};#sigma_{syst}^{fit}", static_cast<int>(edges.size() - 1), edges.data());
+        TH1D hSystAbso("h_systematics_absorption", ";p_{T};#sigma_{syst}^{abso}", static_cast<int>(edges.size() - 1), edges.data());
+        TH1D hSystTotal("h_systematics_total", ";p_{T};#sigma_{syst}^{total}", static_cast<int>(edges.size() - 1), edges.data());
+        hSystFit.SetDirectory(nullptr);
+        hSystAbso.SetDirectory(nullptr);
+        hSystTotal.SetDirectory(nullptr);
+        hSystFit.SetStats(false);
+        hSystAbso.SetStats(false);
+        hSystTotal.SetStats(false);
 
         if (cfg.doSystematics) {
+            std::cout << "[Info] Start systematics for centrality " << cenRange.first << "-" << cenRange.second << std::endl;
             std::mt19937 rng(static_cast<unsigned int>(cfg.randomSeed));
             TDirectory *sysDir = fout.mkdir("sys");
             std::filesystem::create_directories(cfg.outputDir + "/" + cenDirName + "/sys");
@@ -562,6 +610,7 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
             const std::vector<std::string> bkgFuncs = cfg.bkgFuncSyst.empty() ? std::vector<std::string>{cfg.bkgFunc} : cfg.bkgFuncSyst;
             const std::vector<std::string> sigFuncs = cfg.systSignalFuncs.empty() ? std::vector<std::string>{cfg.sigFunc} : cfg.systSignalFuncs;
             const std::vector<std::string> absoFiles = cfg.systAbsorptionFiles.empty() ? std::vector<std::string>{cfg.mcFileForAbsorption} : cfg.systAbsorptionFiles;
+
 
             std::map<std::string, std::unique_ptr<TH1D>> absoHists;
             for (const auto &absoFile : absoFiles) {
@@ -589,7 +638,8 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
                     dataMassCache.emplace_back(bin.dfData->Filter(cut).Take<double>("fMassH3L"));
                 }
 
-                auto combos = BuildTrailCombos(bdtCandidates.size(), bkgFuncs.size(), sigFuncs.size(), absoFiles.size());
+                // Fit-only systematics: fix absorption to the nominal one during trail studies
+                auto combos = BuildTrailCombos(bdtCandidates.size(), bkgFuncs.size(), sigFuncs.size(), 1);
                 std::shuffle(combos.begin(), combos.end(), rng);
                 if (combos.empty()) {
                     std::cerr << "[Warn] No systematic combos for bin " << binLabel << std::endl;
@@ -599,13 +649,18 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
 
                 const double stdCorr = resStd.hCorr ? resStd.hCorr->GetBinContent(static_cast<int>(ibin + 1)) : 0.0;
                 const double stdCorrErr = resStd.hCorr ? resStd.hCorr->GetBinError(static_cast<int>(ibin + 1)) : 0.0;
-                double range = std::abs(stdCorr) * 0.6 + 5.0 * stdCorrErr;
-                if (range < 1e-6) range = 1.0;
-                TH1D hCorrDist(Form("h_corr_syst_%s", binLabel.c_str()), ";Corrected counts;Entries", 80, stdCorr - range, stdCorr + range);
+                double range = stdCorrErr > 0 ? 5.0 * stdCorrErr : (std::abs(stdCorr) * 0.6);
+                //if (range < 1e-6) range = 1.0;
+                TH1D hCorrDist(Form("h_corr_syst_%s", binLabel.c_str()), ";Corrected counts;Entries", 100, stdCorr - range, stdCorr + range);
                 hCorrDist.SetDirectory(nullptr);
-                TH1D hAbsoDist(Form("h_absorption_trails_%s", binLabel.c_str()), ";Trail;#epsilon_{abso}", static_cast<int>(nUse), 0.5, static_cast<double>(nUse) + 0.5);
-                hAbsoDist.SetDirectory(nullptr);
+                hCorrDist.SetStats(false);
                 const double baselineAbso = (resStd.hAbso) ? resStd.hAbso->GetBinContent(static_cast<int>(ibin + 1)) : 1.0;
+                TLine *lineCorr = nullptr;
+                TBox *bandCorr = nullptr;
+                TBox *bandGauss = nullptr;
+                TF1 *fgaus = nullptr;
+                double gausMean = std::numeric_limits<double>::quiet_NaN();
+                double gausSigma = std::numeric_limits<double>::quiet_NaN();
 
                 size_t trailCounter = 0;
                 for (size_t icombo = 0; icombo < nUse; ++icombo) {
@@ -613,18 +668,23 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
                     const auto &cand = bdtCandidates.at(bdtIdx);
                     const std::string bkg = bkgFuncs.at(bkgIdx);
                     const std::string sig = sigFuncs.at(sigIdx);
-                    const std::string absoFile = absoFiles.at(absoIdx);
+                    const std::string absoFile = cfg.mcFileForAbsorption;
+                    int barLen = 20;
+                    int filled = static_cast<int>(std::round(static_cast<double>(trailCounter + 1) / nUse * barLen));
+                    std::string bar(filled, '<');
+                    std::cout << "\r[Info] Bin " << binLabel << " trails " << (trailCounter + 1) << "/" << nUse
+                              << " " << bar << std::flush;
                     double absoVal = 1.0;
                     auto itAbso = absoHists.find(absoFile);
                     if (itAbso != absoHists.end() && itAbso->second) {
                         absoVal = itAbso->second->GetBinContent(static_cast<int>(ibin + 1));
                     }
-                    hAbsoDist.SetBinContent(static_cast<int>(trailCounter + 1), absoVal);
+                    // absorption variation fixed to nominal during fit trails
+                    const double eff = (cand.efficiency > 0) ? cand.efficiency : bin.wp.efficiency;
 
                     FitResult fit = calculator.FitMassPublic(*dataMassCache.at(bdtIdx), *mcMass, bkg, sig);
                     const double bw = bin.ptMax - bin.ptMin;
                     const double acc = (bin.acceptance > 0) ? bin.acceptance : 1.0;
-                    const double eff = (cand.efficiency > 0) ? cand.efficiency : bin.wp.efficiency;
                     double corr = 0.0;
                     double corrErr = 0.0;
                     if (bw > 0 && acc > 0 && absoVal > 0 && eff > 0) {
@@ -636,7 +696,8 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
                         corrErr = corrErrBase;
                     }
 
-                    const bool pass = (fit.chi2Data < cfg.systThrChi2Ndf) && (fit.significance > cfg.systThrSignificance) && std::isfinite(corr) && std::isfinite(corrErr);
+                    const bool withinStd = (stdCorrErr > 0) ? (std::abs(corr - stdCorr) <= 5.0 * stdCorrErr) : true;
+                    const bool pass = (fit.chi2Data < cfg.systThrChi2Ndf) && (fit.significance > cfg.systThrSignificance) && withinStd && std::isfinite(corr) && std::isfinite(corrErr);
                     if (pass) {
                         hCorrDist.Fill(corr);
                     }
@@ -648,86 +709,194 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
                                 << fit.signal << ',' << fit.signalErr << ',' << corr << ',' << corrErr << ',' << pass << '\n';
                     }
 
-                    if (binDir) {
+                    if (binDir && fit.frame) {
                         TDirectory::TContext ctx(binDir);
-                        TDirectory *trailDir = binDir->mkdir(Form("trail%zu", trailCounter));
-                        if (trailDir) {
-                            TDirectory::TContext ctxTrail(trailDir);
-                            if (fit.frame) {
-                                std::string name = Form("data_frame_%s_trail%zu", binLabel.c_str(), trailCounter);
-                                fit.frame->SetName(name.c_str());
-                                fit.frame->SetTitle(name.c_str());
-                                trailDir->WriteObject(fit.frame.get(), name.c_str());
-                            }
-                            if (fit.frameMc) {
-                                std::string nameMc = Form("mc_frame_%s_trail%zu", binLabel.c_str(), trailCounter);
-                                fit.frameMc->SetName(nameMc.c_str());
-                                fit.frameMc->SetTitle(nameMc.c_str());
-                                trailDir->WriteObject(fit.frameMc.get(), nameMc.c_str());
-                            }
-                        }
+                        std::string name = Form("data_frame_%s_trail%zu", binLabel.c_str(), trailCounter);
+                        AddTrailAnnotation(fit.frame.get(), bkg, sig, cand.score, eff);
+                        fit.frame->SetName(name.c_str());
+                        fit.frame->SetTitle(name.c_str());
+                        binDir->WriteObject(fit.frame.get(), name.c_str());
                     }
                     ++trailCounter;
                 }
+                std::cout << std::endl;
 
                 // annotate distributions with baseline markers
                 if (std::isfinite(stdCorr)) {
-                    auto line = new TLine(stdCorr, 0.0, stdCorr, hCorrDist.GetMaximum() * 1.05);
-                    line->SetLineColor(kBlue + 2);
-                    line->SetLineStyle(kDashed);
-                    hCorrDist.GetListOfFunctions()->Add(line);
-                    auto band = new TBox(stdCorr - stdCorrErr, 0.0, stdCorr + stdCorrErr, hCorrDist.GetMaximum() * 1.02);
-                    band->SetFillColorAlpha(kBlue, 0.2);
-                    band->SetLineColor(kBlue + 2);
-                    hCorrDist.GetListOfFunctions()->Add(band);
+                    lineCorr = new TLine(stdCorr, 0.0, stdCorr, hCorrDist.GetMaximum() * 1.05);
+                    lineCorr->SetLineColor(kRed); // deep red for std line
+                    lineCorr->SetLineStyle(kDashed);
+                    bandCorr = new TBox(stdCorr - stdCorrErr, 0.0, stdCorr + stdCorrErr, hCorrDist.GetMaximum() * 1.02);
+                    bandCorr->SetFillColorAlpha(kOrange + 2, 0.36); // light orange band
+                    bandCorr->SetLineColor(kRed + 2);
                 }
-                auto lineAbso = new TLine(0.5, baselineAbso, static_cast<double>(nUse) + 0.5, baselineAbso);
-                lineAbso->SetLineColor(kRed + 1);
-                lineAbso->SetLineStyle(kDashed);
-                hAbsoDist.GetListOfFunctions()->Add(lineAbso);
-
                 double sigma = 0.0;
                 if (hCorrDist.GetEntries() > 2) {
-                    auto fitRes = hCorrDist.Fit("gaus", "QS");
-                    if (fitRes == 0 && hCorrDist.GetFunction("gaus")) {
-                        sigma = hCorrDist.GetFunction("gaus")->GetParameter(2);
-                        auto mean = hCorrDist.GetFunction("gaus")->GetParameter(1);
-                        auto band = new TBox(mean - sigma, 0.0, mean + sigma, hCorrDist.GetMaximum() * 1.02);
-                        band->SetFillColorAlpha(kOrange + 7, 0.25);
-                        band->SetLineColor(kOrange + 7);
-                        hCorrDist.GetListOfFunctions()->Add(band);
+                    const double initMean = hCorrDist.GetMean();
+                    const double initSigma = std::max(hCorrDist.GetRMS(), 1e-9);
+                    TF1 gausFunc("gaus", "gaus", hCorrDist.GetXaxis()->GetXmin(), hCorrDist.GetXaxis()->GetXmax());
+                    gausFunc.SetParameters(hCorrDist.GetMaximum(), initMean, initSigma); // p0=amp, p1=mean, p2=sigma
+                    auto fitRes = hCorrDist.Fit(&gausFunc, "QS");
+                    fgaus = hCorrDist.GetFunction("gaus");
+                    if (fitRes == 0 && fgaus) {
+                        fgaus->SetLineColor(kGreen + 3); // deep green for Gauss fit
+                        fgaus->SetLineWidth(2);
+                        fgaus->SetLineStyle(kSolid);
+                        sigma = fgaus->GetParameter(2);
+                        gausMean = fgaus->GetParameter(1);
+                        gausSigma = sigma;
+                        bandGauss = new TBox(gausMean - gausSigma, 0.0, gausMean + gausSigma, hCorrDist.GetMaximum() * 1.02);
+                        bandGauss->SetFillColorAlpha(kGreen + 1, 0.18); // light green band
+                        bandGauss->SetLineColor(kGreen + 3);
+                        std::cout << "[Info] Bin " << binLabel << " Gauss fit ok: entries=" << hCorrDist.GetEntries()
+                                  << " mean=" << gausMean << " sigma=" << gausSigma << " rms=" << hCorrDist.GetRMS() << std::endl;
                     } else {
                         sigma = hCorrDist.GetRMS();
+                        std::cout << "[Warning] Bin " << binLabel << " Gauss fit failed, using RMS=" << sigma << std::endl;
                     }
                 }
-                hSyst.SetBinContent(static_cast<int>(ibin + 1), sigma);
+                hSystFit.SetBinContent(static_cast<int>(ibin + 1), sigma);
 
                 if (sysDir) {
                     TDirectory::TContext ctx(sysDir);
                     hCorrDist.Write();
-                }
-                if (binDir) {
-                    TDirectory::TContext ctx(binDir);
-                    hAbsoDist.Write();
+                    auto cCorr = std::make_unique<TCanvas>(Form("c_corr_syst_%s", binLabel.c_str()), Form("c_corr_syst_%s", binLabel.c_str()), 900, 700);
+                    if (cCorr) {
+                        cCorr->cd();
+                        hCorrDist.SetTitle(Form("%s", binLabel.c_str()));
+                        hCorrDist.Draw("HIST SAME");
+                        if (bandCorr) {
+                            bandCorr->SetFillStyle(3004);
+                            bandCorr->SetFillColor(kOrange - 2);
+                            bandCorr->SetLineColor(kRed + 2);
+                            bandCorr->Draw("same");
+                        }
+                        if (bandGauss) {
+                            bandGauss->SetFillStyle(3005);
+                            bandGauss->SetFillColor(kGreen + 1);
+                            bandGauss->SetLineColor(kGreen + 3);
+                            bandGauss->Draw("same");
+                        }
+                        if (fgaus) {
+                            fgaus->Draw("same");
+                        }
+                        if (lineCorr) lineCorr->Draw("same");
+                        auto leg = std::make_unique<TLegend>(0.58, 0.70, 0.88, 0.88);
+                        leg->SetBorderSize(0);
+                        leg->SetFillStyle(0);
+                        leg->SetTextFont(42);
+                        leg->AddEntry(&hCorrDist, "Trails passing cuts", "lep");
+                        if (lineCorr) leg->AddEntry(lineCorr, "Std value", "l");
+                        if (bandCorr) leg->AddEntry(bandCorr, "Std stat band", "f");
+                        if (bandGauss) leg->AddEntry(bandGauss, "Gauss #pm1#sigma", "f");
+                        if (fgaus) leg->AddEntry(fgaus, "Gauss fit", "l");
+                        leg->Draw("same");
+
+                        auto pave = std::make_unique<TPaveText>(0.14, 0.74, 0.44, 0.90, "NDC");
+                        pave->SetBorderSize(0);
+                        pave->SetFillStyle(0);
+                        pave->SetTextAlign(12);
+                        pave->SetTextFont(42);
+                        if (std::isfinite(gausMean) && std::isfinite(gausSigma)) {
+                            pave->AddText(Form("Gauss #mu = %.3e", gausMean));
+                            pave->AddText(Form("Gauss #sigma = %.3e", gausSigma));
+                        } else {
+                            pave->AddText("Gauss fit: n/a");
+                        }
+                        pave->AddText(Form("RMS = %.3e", hCorrDist.GetRMS()));
+                        pave->AddText(Form("Central = %.3e", hCorrDist.GetMean()));
+                        pave->Draw("same");
+
+                        //cCorr->SetGrid();
+                        cCorr->Write();
+                        if (cfg.do_QA_afterward) {
+                            std::string basePdfDir = cfg.outputDir + "/" + cenDirName;
+                            cCorr->SaveAs((basePdfDir + "/c_corr_syst_" + binLabel + ".pdf").c_str());
+                        }
+                    }
                 }
             }
 
-            // final spectrum with stat (bars) + syst (boxes)
+            // absorption-only systematics evaluated separately from fit trails
+            TDirectory *sysAbsoDir = sysDir ? sysDir->mkdir("absorption") : nullptr;
+            std::vector<std::string> absoScanFiles = absoFiles;
+            if (!cfg.mcFileForAbsorption.empty() && std::find(absoScanFiles.begin(), absoScanFiles.end(), cfg.mcFileForAbsorption) == absoScanFiles.end()) {
+                absoScanFiles.push_back(cfg.mcFileForAbsorption);
+                Config cfgAbso = cfg;
+                cfgAbso.mcFileForAbsorption = cfg.mcFileForAbsorption;
+                absoHists[cfg.mcFileForAbsorption] = BuildAbsorption(cfgAbso, cenRange, ptEdges);
+            }
+            for (size_t ibin = 0; ibin < bins.size(); ++ibin) {
+                const std::string binLabel = bins[ibin].label;
+                const double baselineCorr = resStd.hCorr ? resStd.hCorr->GetBinContent(static_cast<int>(ibin + 1)) : 0.0;
+                const double baselineAbso = resStd.hAbso ? resStd.hAbso->GetBinContent(static_cast<int>(ibin + 1)) : 1.0;
+
+                const int nAbsoVar = static_cast<int>(absoScanFiles.size());
+                TH1D hAbsoCorrDist(Form("h_corr_abso_syst_%s", binLabel.c_str()), ";n#times#sigma(He3);Corrected counts", nAbsoVar, 0.5, static_cast<double>(nAbsoVar) + 0.5);
+                hAbsoCorrDist.SetDirectory(nullptr);
+                hAbsoCorrDist.SetStats(false);
+
+                double minCorr = std::numeric_limits<double>::infinity();
+                double maxCorr = -std::numeric_limits<double>::infinity();
+                for (size_t iabso = 0; iabso < absoScanFiles.size(); ++iabso) {
+                    const auto &absoFile = absoScanFiles[iabso];
+                    double absoVal = 1.0;
+                    auto itAbso = absoHists.find(absoFile);
+                    if (itAbso != absoHists.end() && itAbso->second) {
+                        absoVal = itAbso->second->GetBinContent(static_cast<int>(ibin + 1));
+                    }
+                    if (absoVal <= 0.0 || baselineAbso <= 0.0) {
+                        continue;
+                    }
+                    const double corrVariant = baselineCorr * (baselineAbso / absoVal);
+                    const int fillBin = static_cast<int>(iabso + 1);
+                    hAbsoCorrDist.SetBinContent(fillBin, corrVariant);
+                    std::string label = Sanitize(absoFile);
+                    if (iabso < cfg.systAbsorptionFileLabels.size()) {
+                        label = cfg.systAbsorptionFileLabels[iabso];
+                    }
+                    hAbsoCorrDist.GetXaxis()->SetBinLabel(fillBin, label.c_str());
+                    minCorr = std::min(minCorr, corrVariant);
+                    maxCorr = std::max(maxCorr, corrVariant);
+                }
+
+                const double absoSyst = std::isfinite(minCorr) && std::isfinite(maxCorr) ? (maxCorr - minCorr) : 0.0;
+                hSystAbso.SetBinContent(static_cast<int>(ibin + 1), absoSyst);
+
+                if (sysAbsoDir) {
+                    TDirectory::TContext ctx(sysAbsoDir);
+                    hAbsoCorrDist.Write();
+                }
+                if (cfg.do_QA_afterward) {
+                    std::string basePdfDir = cfg.outputDir + "/" + cenDirName;
+                    saveHistPdf(hAbsoCorrDist, basePdfDir + "/h_corr_abso_syst_" + binLabel + ".pdf");
+                }
+            }
+
+            // combine sources in quadrature
+            for (int ibin = 1; ibin <= hSystTotal.GetNbinsX(); ++ibin) {
+                const double fitVal = hSystFit.GetBinContent(ibin);
+                const double absoVal = hSystAbso.GetBinContent(ibin);
+                hSystTotal.SetBinContent(ibin, std::sqrt(fitVal * fitVal + absoVal * absoVal));
+            }
+
+            // final spectrum with stat (bars) + total syst (boxes)
             auto hStat = std::unique_ptr<TH1D>(static_cast<TH1D *>(resStd.hCorr ? resStd.hCorr->Clone("h_final_spectrum_stat") : nullptr));
             if (hStat) hStat->SetDirectory(nullptr);
             auto gSys = std::make_unique<TGraphAsymmErrors>(static_cast<int>(bins.size()));
             if (gSys) {
                 gSys->SetName("g_final_spectrum_sys");
                 gSys->SetTitle("Final spectrum with systematics");
-                gSys->SetFillColorAlpha(kRed, 0.25);
+                gSys->SetFillStyle(0); // transparent fill
                 gSys->SetLineColor(kRed);
+                gSys->SetLineStyle(kDotted);
                 for (int i = 0; i < gSys->GetN(); ++i) {
                     double x = 0.0, y = 0.0;
                     if (hStat) {
                         x = hStat->GetXaxis()->GetBinCenter(i + 1);
                         y = hStat->GetBinContent(i + 1);
                         const double xerr = hStat->GetXaxis()->GetBinWidth(i + 1) * 0.5;
-                        const double yerr = hSyst.GetBinContent(i + 1);
+                        const double yerr = hSystTotal.GetBinContent(i + 1);
                         gSys->SetPoint(i, x, y);
                         gSys->SetPointError(i, xerr, xerr, yerr, yerr);
                     }
@@ -739,6 +908,7 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
                 if (hStat) hStat->Draw("E1");
                 if (gSys) gSys->Draw("E2 SAME");
                 cFinal->SetGrid();
+                cFinal->SetLogy(true);
             }
 
             {
@@ -747,12 +917,62 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
                 if (gSys) gSys->Write();
                 if (cFinal) cFinal->Write();
             }
+
+            if (cfg.do_QA_afterward) {
+                std::string basePdfDir = cfg.outputDir + "/" + cenDirName;
+                if (hStat) saveHistPdf(*hStat, basePdfDir + "/h_final_spectrum_stat.pdf", "E1");
+                if (cFinal) cFinal->SaveAs((basePdfDir + "/c_final_spectrum.pdf").c_str());
+            }
         }
 
         {
             TDirectory::TContext ctx(&fout);
-            hSyst.Write();
+            hSystFit.Write();
+            hSystAbso.Write();
+            hSystTotal.Write();
         }
+
+        if (cfg.doSystematics) {
+            auto cSystOverlay = std::make_unique<TCanvas>("c_systematics_overlay", "c_systematics_overlay", 900, 700);
+            if (cSystOverlay) {
+                cSystOverlay->cd();
+                hSystTotal.SetLineColor(kBlack);
+                hSystTotal.SetLineWidth(3);
+                hSystTotal.Draw("HIST");
+
+                hSystFit.SetLineColor(kRed + 1);
+                hSystFit.SetLineWidth(2);
+                hSystFit.Draw("HIST SAME");
+
+                hSystAbso.SetLineColor(kAzure + 2);
+                hSystAbso.SetLineWidth(2);
+                hSystAbso.Draw("HIST SAME");
+
+                auto leg = std::make_unique<TLegend>(0.58, 0.70, 0.88, 0.88);
+                leg->SetBorderSize(0);
+                leg->SetFillStyle(0);
+                leg->SetTextFont(42);
+                leg->AddEntry(&hSystTotal, "Total syst", "l");
+                leg->AddEntry(&hSystFit, "Fit syst", "l");
+                leg->AddEntry(&hSystAbso, "Absorption syst", "l");
+                leg->Draw("same");
+                cSystOverlay->SetGrid();
+
+                {
+                    TDirectory::TContext ctx(&fout);
+                    cSystOverlay->Write();
+                }
+
+                if (cfg.do_QA_afterward) {
+                    std::string basePdfDir = cfg.outputDir + "/" + cenDirName;
+                    saveHistPdf(hSystFit, basePdfDir + "/h_systematics_fit.pdf");
+                    saveHistPdf(hSystAbso, basePdfDir + "/h_systematics_absorption.pdf");
+                    saveHistPdf(hSystTotal, basePdfDir + "/h_systematics_total.pdf");
+                    cSystOverlay->SaveAs((basePdfDir + "/c_systematics_overlay.pdf").c_str());
+                }
+            }
+        }
+
         std::cout << "Saved " << outPath << "\n";
     }
 

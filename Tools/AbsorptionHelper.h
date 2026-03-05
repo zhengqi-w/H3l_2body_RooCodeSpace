@@ -353,6 +353,85 @@ private:
     inline static const std::string keyAnti = "antimatter";
 };
 
+// CtAbsorptionCalculator: compute absorption efficiency in a single ct bin
+class CtAbsorptionCalculator {
+public:
+    struct EffResult {
+        double effBoth{0.0}, errBoth{0.0};
+        double effMatter{0.0}, errMatter{0.0};
+        double effAnti{0.0}, errAnti{0.0};
+        long totalBoth{0}, surviveBoth{0};
+        long totalMatter{0}, surviveMatter{0};
+        long totalAnti{0}, surviveAnti{0};
+    };
+
+    CtAbsorptionCalculator(ROOT::RDF::RNode rdf, double ctMin, double ctMax, double org_ctao = 7.6)
+        : fRdf(std::move(rdf)), fCtMin(ctMin), fCtMax(ctMax), fOrgCtao(org_ctao) {}
+
+    void Calculate() {
+        fRes = EffResult{};
+        std::vector<SlotCounts> slotData(1);
+        std::vector<std::mt19937> rngs(1);
+        auto seed = static_cast<unsigned>(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        for (unsigned int i = 0; i < rngs.size(); ++i) rngs[i].seed(seed + i * 101);
+        std::exponential_distribution<float> expo(1.0f / static_cast<float>(fOrgCtao));
+
+        fRdf.ForeachSlot([&](unsigned int slot, float pt, float eta, float phi, float ax, float ay, float az, int pdg) {
+            if (slot >= slotData.size()) {
+                slotData.resize(slot + 1);
+                rngs.resize(slot + 1);
+                rngs[slot].seed(seed + slot * 101);
+            }
+            TLorentzVector lv; lv.SetPtEtaPhiM(pt, eta, phi, HE3_MASS);
+            float he3p = lv.P();
+            float absoL = std::sqrt(ax * ax + ay * ay + az * az);
+            float absoCt = (he3p != 0) ? absoL * HE3_MASS / he3p : 1e9;
+            float decCt = expo(rngs[slot]);
+            if (decCt < fCtMin || decCt >= fCtMax) return;
+            bool isMat = pdg > 0;
+            SlotCounts &sc = slotData[slot];
+            sc.totalBoth++;
+            if (isMat) sc.totalMatter++; else sc.totalAnti++;
+            if (absoCt > decCt) {
+                sc.surviveBoth++;
+                if (isMat) sc.surviveMatter++; else sc.surviveAnti++;
+            }
+        }, {"pt", "eta", "phi", "absoX", "absoY", "absoZ", "pdg"});
+
+        for (const auto &sc : slotData) {
+            fRes.totalBoth += sc.totalBoth; fRes.surviveBoth += sc.surviveBoth;
+            fRes.totalMatter += sc.totalMatter; fRes.surviveMatter += sc.surviveMatter;
+            fRes.totalAnti += sc.totalAnti; fRes.surviveAnti += sc.surviveAnti;
+        }
+
+        computeEff(fRes.surviveBoth, fRes.totalBoth, fRes.effBoth, fRes.errBoth);
+        computeEff(fRes.surviveMatter, fRes.totalMatter, fRes.effMatter, fRes.errMatter);
+        computeEff(fRes.surviveAnti, fRes.totalAnti, fRes.effAnti, fRes.errAnti);
+    }
+
+    const EffResult &Result() const { return fRes; }
+
+private:
+    struct SlotCounts {
+        long totalBoth{0}, surviveBoth{0};
+        long totalMatter{0}, surviveMatter{0};
+        long totalAnti{0}, surviveAnti{0};
+    };
+
+    void computeEff(long survive, long total, double &eff, double &err) {
+        eff = 0.0; err = 0.0;
+        if (total <= 0) return;
+        eff = static_cast<double>(survive) / static_cast<double>(total);
+        err = std::sqrt(eff * (1.0 - eff) / static_cast<double>(total));
+    }
+
+    ROOT::RDF::RNode fRdf;
+    double fCtMin{0.0};
+    double fCtMax{0.0};
+    double fOrgCtao{7.6};
+    EffResult fRes{};
+};
+
 } // namespace Absorption
 
 #endif // ABSORPTION_HELPER_H
