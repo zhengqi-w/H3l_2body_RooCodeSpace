@@ -65,30 +65,71 @@ TopoConfig LoadTopoConfig(const std::string &path) {
     std::ifstream ifs(path);
     json j; ifs >> j;
     TopoConfig cfg;
-    cfg.snapshotDir = j.value("snapshot_dir", "");
-    cfg.nEventsFile = j.value("analysis_results_file", "");
-    cfg.nEventsHist = j.value("n_events_hist", "");
-    cfg.mcFileForAbsorption = j.value("mc_file_for_absorption", "");
-    cfg.mcFileForAcceptance = j.value("mc_file_for_acceptance", "");
-    cfg.reweightPtFile = j.value("reweight_pt_file", "");
-    cfg.treeNameData = j.value("tree_name", cfg.treeNameData);
-    cfg.treeNameMc = j.value("tree_name_mc", cfg.treeNameMc);
-    cfg.treeNameAbsorption = j.value("tree_name_absorption", cfg.treeNameAbsorption);
-    cfg.outputDir = j.value("output_dir", cfg.outputDir);
-    cfg.ptBins = j.value("pt_bins", std::vector<double>{});
-    cfg.cenBins = j.value("cen_bins", std::vector<double>{});
-    cfg.ptBinsByCen = j.value("pt_bins_by_centrality", std::vector<std::vector<double>>{});
-    cfg.dataSelectionTopo = j.value("data_selection_topology", std::vector<std::vector<std::string>>{});
-    cfg.isMatter = j.value("is_matter", cfg.isMatter);
-    cfg.bkgFunc = j.value("bkg_fit_func", cfg.bkgFunc);
-    cfg.sigFunc = j.value("signal_fit_func", cfg.sigFunc);
-    cfg.basicSelectionDataForMcEff = j.value("basic_selection_data_for_mc_eff", "");
-    cfg.branchingRatio = j.value("branching_ratio", cfg.branchingRatio);
-    cfg.deltaRap = j.value("delta_rap", cfg.deltaRap);
-    cfg.massMin = j.value("mass_min", cfg.massMin);
-    cfg.massMax = j.value("mass_max", cfg.massMax);
-    cfg.enableImplicitMT = j.value("enable_implicit_mt", cfg.enableImplicitMT);
-    cfg.do_QA_afterward = j.value("do_QA_afterward", j.value("do_QA_afterwords", cfg.do_QA_afterward));
+    auto get_string = [&](const char *key, const std::string &fallback) {
+        if (j.contains(key) && j[key].is_string()) return j[key].get<std::string>();
+        return fallback;
+    };
+    auto get_double = [&](const char *key, double fallback) {
+        if (j.contains(key) && j[key].is_number()) return j[key].get<double>();
+        return fallback;
+    };
+    auto get_bool = [&](const char *key, bool fallback) {
+        if (j.contains(key) && j[key].is_boolean()) return j[key].get<bool>();
+        return fallback;
+    };
+    auto get_double_vec = [&](const char *key) {
+        std::vector<double> out;
+        if (!j.contains(key) || !j[key].is_array()) return out;
+        for (const auto &v : j[key]) if (v.is_number()) out.push_back(v.get<double>());
+        return out;
+    };
+    auto get_2d_double_vec = [&](const char *key) {
+        std::vector<std::vector<double>> out;
+        if (!j.contains(key) || !j[key].is_array()) return out;
+        for (const auto &row : j[key]) {
+            if (!row.is_array()) continue;
+            std::vector<double> r;
+            for (const auto &v : row) if (v.is_number()) r.push_back(v.get<double>());
+            if (!r.empty()) out.push_back(std::move(r));
+        }
+        return out;
+    };
+    auto get_2d_string_vec = [&](const char *key) {
+        std::vector<std::vector<std::string>> out;
+        if (!j.contains(key) || !j[key].is_array()) return out;
+        for (const auto &row : j[key]) {
+            if (!row.is_array()) continue;
+            std::vector<std::string> r;
+            for (const auto &v : row) if (v.is_string()) r.push_back(v.get<std::string>());
+            if (!r.empty()) out.push_back(std::move(r));
+        }
+        return out;
+    };
+
+    cfg.snapshotDir = get_string("snapshot_dir", "");
+    cfg.nEventsFile = get_string("analysis_results_file", "");
+    cfg.nEventsHist = get_string("n_events_hist", "");
+    cfg.mcFileForAbsorption = get_string("mc_file_for_absorption", "");
+    cfg.mcFileForAcceptance = get_string("mc_file_for_acceptance", "");
+    cfg.reweightPtFile = get_string("reweight_pt_file", "");
+    cfg.treeNameData = get_string("tree_name", cfg.treeNameData);
+    cfg.treeNameMc = get_string("tree_name_mc", cfg.treeNameMc);
+    cfg.treeNameAbsorption = get_string("tree_name_absorption", cfg.treeNameAbsorption);
+    cfg.outputDir = get_string("output_dir", cfg.outputDir);
+    cfg.ptBins = get_double_vec("pt_bins");
+    cfg.cenBins = get_double_vec("cen_bins");
+    cfg.ptBinsByCen = get_2d_double_vec("pt_bins_by_centrality");
+    cfg.dataSelectionTopo = get_2d_string_vec("data_selection_topology");
+    cfg.isMatter = get_string("is_matter", cfg.isMatter);
+    cfg.bkgFunc = get_string("bkg_fit_func", cfg.bkgFunc);
+    cfg.sigFunc = get_string("signal_fit_func", cfg.sigFunc);
+    cfg.basicSelectionDataForMcEff = get_string("basic_selection_data_for_mc_eff", "");
+    cfg.branchingRatio = get_double("branching_ratio", cfg.branchingRatio);
+    cfg.deltaRap = get_double("delta_rap", cfg.deltaRap);
+    cfg.massMin = get_double("mass_min", cfg.massMin);
+    cfg.massMax = get_double("mass_max", cfg.massMax);
+    cfg.enableImplicitMT = get_bool("enable_implicit_mt", cfg.enableImplicitMT);
+    cfg.do_QA_afterward = get_bool("do_QA_afterward", get_bool("do_QA_afterwords", cfg.do_QA_afterward));
     return cfg;
 }
 
@@ -274,7 +315,7 @@ std::unique_ptr<TChain> MakeAo2dChain(const std::string &file, const std::string
     return chain;
 }
 
-int TopoSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/configs/topology_spectrum_V0s.json") {
+int ProcessTopologySpectrum(const char *cfgPath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/configs/topology_spectrum_V0s.json") {
     if (!cfgPath) {
         std::cerr << "Config path is null" << std::endl;
         return 1;

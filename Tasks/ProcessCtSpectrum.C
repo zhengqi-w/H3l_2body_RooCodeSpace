@@ -1,6 +1,6 @@
-// ProcessCtExtraction.C
+// ProcessCtSpectrum.C
 // Usage from ROOT prompt:
-//   root -l -b -q 'Tasks/ProcessCtExtraction.C("configs/ct_extraction.json", true)'
+//   root -l -b -q 'Tasks/ProcessCtSpectrum.C("configs/ct_extraction.json", true)'
 // The macro loads the JSON config, enables implicit MT (optional), and runs CtExtraction.
 
 #include <TROOT.h>
@@ -25,13 +25,13 @@
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
 
-void ProcessCtExtraction(const char *configPath = "../configs/ct_extraction.json",
-                         bool enableImplicitMT = true) {
+int ProcessCtSpectrum(const char *configPath = "../configs/ct_extraction.json",
+                      bool enableImplicitMT = true) {
 #include <TCanvas.h>
 #include <TH1.h>
 #include <RooPlot.h>
     if (!configPath || std::string(configPath).empty()) {
-        throw std::runtime_error("ProcessCtExtraction: config path is empty");
+        throw std::runtime_error("ProcessCtSpectrum: config path is empty");
     }
 
     if (enableImplicitMT) {
@@ -45,37 +45,73 @@ void ProcessCtExtraction(const char *configPath = "../configs/ct_extraction.json
         }
         json cfgJson = json::parse(ifs, nullptr, true, true);
         auto get_string = [&](const char *key, const std::string &fallback = std::string()) {
-            return cfgJson.value(key, fallback);
+            if (cfgJson.contains(key) && cfgJson[key].is_string()) {
+                return cfgJson[key].get<std::string>();
+            }
+            return fallback;
+        };
+        auto get_nested_double_vec = [&](const char *key, const std::vector<std::vector<double>> &fallback) {
+            if (!cfgJson.contains(key) || !cfgJson[key].is_array()) {
+                return fallback;
+            }
+            std::vector<std::vector<double>> out;
+            for (const auto &entry : cfgJson[key]) {
+                if (!entry.is_array()) {
+                    continue;
+                }
+                std::vector<double> row;
+                for (const auto &v : entry) {
+                    if (v.is_number()) {
+                        row.push_back(v.get<double>());
+                    }
+                }
+                if (!row.empty()) {
+                    out.push_back(std::move(row));
+                }
+            }
+            return out.empty() ? fallback : out;
+        };
+        auto get_bool = [&](const char *key, bool fallback) {
+            if (cfgJson.contains(key) && cfgJson[key].is_boolean()) {
+                return cfgJson[key].get<bool>();
+            }
+            return fallback;
+        };
+        auto get_double = [&](const char *key, double fallback) {
+            if (cfgJson.contains(key) && cfgJson[key].is_number()) {
+                return cfgJson[key].get<double>();
+            }
+            return fallback;
         };
         // direct sigma mc->data ranges from config (per pt bin)
-        std::vector<std::vector<double>> sigmaRangesCfg = cfgJson.value("sigma_mc_to_data_range", std::vector<std::vector<double>>{});
+        std::vector<std::vector<double>> sigmaRangesCfg = get_nested_double_vec("sigma_mc_to_data_range", std::vector<std::vector<double>>{});
 
         CtExtraction extractor(configPath);
         // *************************sigma range setting block start*************************
         // Use sigma_mc_to_data_range directly from config (per-pt-bin array of [min,max])
         if (!sigmaRangesCfg.empty()) {
             extractor.SetSigmaRangeMcToData(sigmaRangesCfg);
-            std::cout << "[ProcessCtExtraction] Using sigma_mc_to_data_range from config for "
+            std::cout << "[ProcessCtSpectrum] Using sigma_mc_to_data_range from config for "
                       << sigmaRangesCfg.size() << " pt bins." << std::endl;
         }
         // *************************sigma range setting block end*************************
 
         extractor.Run();
-        std::cout << "[ProcessCtExtraction] Completed successfully using config: "
+        std::cout << "[ProcessCtSpectrum] Completed successfully using config: "
                   << configPath << std::endl;
 
         // -------- Post-processing: export key histograms/canvases to PDF --------
-        const std::string matter = cfgJson.value("is_matter", std::string("both"));
-        const std::string outDirBase = cfgJson.value("output_dir", std::string("results/ct_extraction"));
-        const std::string outFileBase = cfgJson.value("output_file", std::string("ct_analysis"));
-        const std::string trialSuffix = cfgJson.value("trial_suffix", std::string(""));
+        const std::string matter = get_string("is_matter", "both");
+        const std::string outDirBase = get_string("output_dir", "results/ct_extraction");
+        const std::string outFileBase = get_string("output_file", "ct_analysis");
+        const std::string trialSuffix = get_string("trial_suffix", "");
         const std::string stdDirName = trialSuffix.empty() ? "std" : ("std_" + trialSuffix);
         const std::filesystem::path outDir = std::filesystem::path(outDirBase) / matter;
         const std::filesystem::path rootPath = outDir / (outFileBase + ".root");
         std::filesystem::create_directories(outDir);
         if (!std::filesystem::exists(rootPath)) {
-            std::cerr << "[ProcessCtExtraction] Output ROOT file not found: " << rootPath << std::endl;
-            return;
+            std::cerr << "[ProcessCtSpectrum] Output ROOT file not found: " << rootPath << std::endl;
+            return 0;
         }
 
         auto styleAndSaveHist = [&](TH1 *h, const std::string &pdfName, Color_t color, const std::string &title, const char *yTitle = nullptr) {
@@ -115,13 +151,13 @@ void ProcessCtExtraction(const char *configPath = "../configs/ct_extraction.json
 
         std::unique_ptr<TFile> tf(TFile::Open(rootPath.string().c_str(), "READ"));
         if (!tf || tf->IsZombie()) {
-            std::cerr << "[ProcessCtExtraction] Failed to open output file: " << rootPath << std::endl;
-            return;
+            std::cerr << "[ProcessCtSpectrum] Failed to open output file: " << rootPath << std::endl;
+            return 0;
         }
         TDirectory *stdDir = tf->GetDirectory(stdDirName.c_str());
         if (!stdDir) {
-            std::cerr << "[ProcessCtExtraction] std directory not found: " << stdDirName << std::endl;
-            return;
+            std::cerr << "[ProcessCtSpectrum] std directory not found: " << stdDirName << std::endl;
+            return 0;
         }
 
         // Save tau vs pt histogram
@@ -172,7 +208,8 @@ void ProcessCtExtraction(const char *configPath = "../configs/ct_extraction.json
             }
         }
     } catch (const std::exception &ex) {
-        std::cerr << "[ProcessCtExtraction] Error: " << ex.what() << std::endl;
+        std::cerr << "[ProcessCtSpectrum] Error: " << ex.what() << std::endl;
         throw;
     }
+    return 0;
 }

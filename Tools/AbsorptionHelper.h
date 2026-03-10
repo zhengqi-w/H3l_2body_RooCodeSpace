@@ -65,16 +65,14 @@ public:
         for (auto &p : fHRatio) 
             for (auto &h : p.second) h->Reset();
 
-        // RNG for Foreach must be copyable; we create local RNG here
-        std::mt19937 rng(static_cast<unsigned>(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
-        std::exponential_distribution<float> expo(1.0 / fOrgCtao);
         fRdfPtr->Foreach([&](float pt, float eta, float phi, float ax, float ay, float az, int pdg){
             std::string mat = (pdg>0) ? "matter" : "antimatter";
             TLorentzVector lv; lv.SetPtEtaPhiM(pt, eta, phi, HE3_MASS);
             float he3p = lv.P();
             float absoL = std::sqrt(ax*ax + ay*ay + az*az);
             float absoCt = (he3p!=0) ? absoL * HE3_MASS / he3p : 1e9;
-            float decCt = expo(rng);
+            const double u = std::max(1e-12, gRandom->Uniform());
+            float decCt = static_cast<float>(-fOrgCtao * std::log(u));
             // find pt bin
             for (size_t i=0;i<fPtBins.size()-1;++i) {
                 if (pt >= fPtBins[i] && pt < fPtBins[i+1]) {

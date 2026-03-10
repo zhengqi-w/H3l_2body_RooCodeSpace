@@ -43,11 +43,11 @@ std::pair<std::string, std::string> SplitPath(const std::string &full) {
 
 void BlastwaveFit(
     const std::vector<std::string> &filePaths = {
-        "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/BdtSpectrum_LHC25g11_G4list/cen0-10/pt_analysis_pbpb.root",
-        "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/BdtSpectrum_LHC25g11_G4list/cen10-30/pt_analysis_pbpb.root",
-        "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/BdtSpectrum_LHC25g11_G4list/cen30-50/pt_analysis_pbpb.root",
-        "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/BdtSpectrum_LHC25g11_G4list/cen50-80/pt_analysis_pbpb.root",
-        "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/BdtSpectrum_AllCent/cen0-80/pt_analysis_pbpb.root"
+        "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_backup/BdtSpectrum_LHC25g11_G4list/cen0-10/pt_analysis_pbpb.root",
+        "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_backup/BdtSpectrum_LHC25g11_G4list/cen10-30/pt_analysis_pbpb.root",
+        "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_backup/BdtSpectrum_LHC25g11_G4list/cen30-50/pt_analysis_pbpb.root",
+        "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_backup/BdtSpectrum_LHC25g11_G4list/cen50-80/pt_analysis_pbpb.root",
+        "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_backup/BdtSpectrum_AllCent/cen0-80/pt_analysis_pbpb.root"
     },
     const char *histPath = "std/h_corrected_counts",
     double mass = 2.991, double beta = 0.6,
@@ -88,13 +88,14 @@ void BlastwaveFit(
     fBW->SetParameter(3, n);
     fBW->SetParameter(4, norm);
 
-    const int first = h->FindFirstBinAbove(0.0);
-    const int last = h->FindLastBinAbove(0.0);
-    if (first > 0 && last >= first) {
-      const double xmin = h->GetXaxis()->GetBinLowEdge(first);
-      const double xmax = h->GetXaxis()->GetBinUpEdge(last);
-      fBW->SetRange(xmin, xmax);
-    }
+    // const int first = h->FindFirstBinAbove(0.0);
+    // const int last = h->FindLastBinAbove(0.0);
+    // if (first > 0 && last >= first) {
+    //   const double xmin = h->GetXaxis()->GetBinLowEdge(first);
+    //   const double xmax = h->GetXaxis()->GetBinUpEdge(last);
+    //   fBW->SetRange(xmin, xmax);
+    // }
+    fBW->SetRange(0, 10);
 
     h->Fit(fBW, "RQ");
 

@@ -1,0 +1,102 @@
+{
+  "alice_performance": false,
+  "basic_selection_data_for_mc_eff": "fTPCsignalPi<1000 && abs(fNSigmaHe)<5 && fCosPA>0.99 && fAvgClusterSizeHe > 5",
+  "bdt_overrides": [],
+  "bdt_score_column": "model_output",
+  "bdt_score_shift": 0.0,
+  "colliding_system": "Pb--Pb",
+  "collision_energy_tev": 5.36,
+  "ct_bins": [
+    [
+      1,
+      3,
+      6,
+      9,
+      12,
+      18,
+      30
+    ],
+    [
+      1,
+      3,
+      6,
+      9,
+      12,
+      18,
+      25
+    ],
+    [
+      1,
+      3,
+      6,
+      9,
+      15,
+      25
+    ],
+    [
+      1,
+      3,
+      6,
+      10,
+      23
+    ]
+  ],
+  "data_set_label": "CustomV0s_HadronPID",
+  "data_snapshot_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/SnapShotsData/LHC23_PbPb_pass5_CustomV0s_HadronPID",
+  "features": [
+    "fDcaV0Daug",
+    "fDcaHe",
+    "fDcaPi",
+    "fCosPA",
+    "fNSigmaHe"
+  ],
+  "is_matter": "both",
+  "mass_column": "fMassH3L",
+  "mass_nbins_data": 50,
+  "mass_nbins_mc": 80,
+  "mass_range": [
+    2.96,
+    3.04
+  ],
+  "mc_file": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/reweighted/AO2D_CustomV0s_0_80_reweighted.root",
+  "mc_reweight_file": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/H3l_2body_spectrum/utils/H3L_BWFit.root",
+  "mc_reweight_func": "BlastWave_H3L_10_30",
+  "mc_snapshot_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/SnapShotsData/LHC23_PbPb_pass5_CustomV0s_HadronPID",
+  "mc_snapshot_pattern": "mc_pt_%PTMIN%_%PTMAX%_ct_%CTMIN%_%CTMAX%.root",
+  "mc_snapshot_tree_name": "O2mchypcands",
+  "mc_tree_name": "O2mchypcands",
+  "min_entries_for_fit": 10,
+  "output_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/CtExtraction",
+  "output_file": "ct_analysis",
+  "pt_bins": [
+    2,
+    3,
+    4,
+    5.5,
+    8
+  ],
+  "run_period_label": "LHC23_PbPb_pass5",
+  "sigma_mc_to_data_range": [
+    [
+      1.0,
+      1.5
+    ],
+    [
+      1.0,
+      1.5
+    ],
+    [
+      1.0,
+      1.5
+    ],
+    [
+      1.0,
+      1.5
+    ]
+  ],
+  "snapshot_pattern": "data_pt_%PTMIN%_%PTMAX%_ct_%CTMIN%_%CTMAX%.root",
+  "snapshot_tree_name": "O2hypcands",
+  "sqrtsnn_label": "#sqrt{s_{NN}}",
+  "trial_suffix": "",
+  "working_point_file": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/WorkingPoint/WorkingPoint_Crosssection_CustomV0s.txt"
+}

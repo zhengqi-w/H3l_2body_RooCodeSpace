@@ -66,43 +66,83 @@ inline Config LoadConfig(const std::string &path) {
     std::ifstream ifs(path);
     json j; ifs >> j;
     Config cfg;
+    auto get_string = [&](const char *key, const std::string &fallback) {
+        if (j.contains(key) && j[key].is_string()) return j[key].get<std::string>();
+        return fallback;
+    };
+    auto get_double = [&](const char *key, double fallback) {
+        if (j.contains(key) && j[key].is_number()) return j[key].get<double>();
+        return fallback;
+    };
+    auto get_int = [&](const char *key, int fallback) {
+        if (j.contains(key) && j[key].is_number_integer()) return j[key].get<int>();
+        if (j.contains(key) && j[key].is_number()) return static_cast<int>(j[key].get<double>());
+        return fallback;
+    };
+    auto get_bool = [&](const char *key, bool fallback) {
+        if (j.contains(key) && j[key].is_boolean()) return j[key].get<bool>();
+        return fallback;
+    };
+    auto get_double_vec = [&](const char *key, const std::vector<double> &fallback) {
+        if (!j.contains(key) || !j[key].is_array()) return fallback;
+        std::vector<double> out;
+        for (const auto &v : j[key]) if (v.is_number()) out.push_back(v.get<double>());
+        return out.empty() ? fallback : out;
+    };
+    auto get_string_vec = [&](const char *key, const std::vector<std::string> &fallback) {
+        if (!j.contains(key) || !j[key].is_array()) return fallback;
+        std::vector<std::string> out;
+        for (const auto &v : j[key]) if (v.is_string()) out.push_back(v.get<std::string>());
+        return out.empty() ? fallback : out;
+    };
+    auto get_2d_double_vec = [&](const char *key, const std::vector<std::vector<double>> &fallback) {
+        if (!j.contains(key) || !j[key].is_array()) return fallback;
+        std::vector<std::vector<double>> out;
+        for (const auto &row : j[key]) {
+            if (!row.is_array()) continue;
+            std::vector<double> r;
+            for (const auto &v : row) if (v.is_number()) r.push_back(v.get<double>());
+            if (!r.empty()) out.push_back(std::move(r));
+        }
+        return out.empty() ? fallback : out;
+    };
     cfg.snapshotDir = j.at("snapshot_dir").get<std::string>();
-    cfg.treeNameData = j.value("tree_name", cfg.treeNameData);
-    cfg.treeNameMc = j.value("tree_name_mc", cfg.treeNameMc);
-    cfg.treeNameAbsorption = j.value("tree_name_absorption", cfg.treeNameAbsorption);
+    cfg.treeNameData = get_string("tree_name", cfg.treeNameData);
+    cfg.treeNameMc = get_string("tree_name_mc", cfg.treeNameMc);
+    cfg.treeNameAbsorption = get_string("tree_name_absorption", cfg.treeNameAbsorption);
     cfg.wpFile = j.at("working_point_file").get<std::string>();
-    cfg.outputDir = j.value("output_dir", cfg.outputDir);
-    cfg.ptBins = j.value("pt_bins", std::vector<double>{});
-    cfg.cenBins = j.value("cen_bins", std::vector<double>{});
-    cfg.ptBinsByCen = j.value("pt_bins_by_centrality", std::vector<std::vector<double>>{});
-    cfg.isMatter = j.value("is_matter", cfg.isMatter);
-    cfg.bkgFunc = j.value("bkg_fit_func", cfg.bkgFunc);
-    cfg.sigFunc = j.value("signal_fit_func", cfg.sigFunc);
-    cfg.sigmaRangeMcToData = j.value("sigma_range_mc_to_data", cfg.sigmaRangeMcToData);
-    cfg.branchingRatio = j.value("branching_ratio", cfg.branchingRatio);
-    cfg.deltaRap = j.value("delta_rap", cfg.deltaRap);
-    cfg.massMin = j.value("mass_min", cfg.massMin);
-    cfg.massMax = j.value("mass_max", cfg.massMax);
-    cfg.doSystematics = j.value("do_systematics", cfg.doSystematics);
-    cfg.bdtScoreRelShifts = j.value("syst_bdt_score_rel_shifts", cfg.bdtScoreRelShifts);
-    cfg.bkgFuncSyst = j.value("syst_bkg_funcs", cfg.bkgFuncSyst);
-    cfg.nEventsFile = j.value("analysis_results_file", "");
-    cfg.nEventsHist = j.value("n_events_hist", "");
-    cfg.mcFileForAcceptance = j.value("mc_file_for_acceptance", "");
-    cfg.mcFileForAbsorption = j.value("mc_file_for_absorption", "");
-    cfg.reweightPtFile = j.value("reweight_pt_file", "");
-    cfg.basicSelectionDataForMCEff = j.value("basic_selection_data_for_mc_eff", "");
-    cfg.enableImplicitMT = j.value("enable_implicit_mt", cfg.enableImplicitMT);
-    cfg.do_QA_afterward = j.value("do_QA_afterward", j.value("do_QA_afterwords", cfg.do_QA_afterward));
-    cfg.randomSeed = j.value("random_seed", cfg.randomSeed);
-    cfg.systBdtScoreNPoints = j.value("syst_bdt_score_npoints", cfg.systBdtScoreNPoints);
-    cfg.systNtrails = j.value("syst_ntrails", cfg.systNtrails);
-    cfg.systThrChi2Ndf = j.value("syst_thrashold_chi2ndf", cfg.systThrChi2Ndf);
-    cfg.systThrSignificance = j.value("syst_thrashold_significance", cfg.systThrSignificance);
-    cfg.systEfficiencyArrayPath = j.value("syst_efficiency_array_path", cfg.systEfficiencyArrayPath);
-    cfg.systSignalFuncs = j.value("syst_signal_funcs", cfg.systSignalFuncs);
-    cfg.systAbsorptionFiles = j.value("syst_absorption_files", cfg.systAbsorptionFiles);
-    cfg.systAbsorptionFileLabels = j.value("syst_absorption_file_labels", cfg.systAbsorptionFileLabels);
+    cfg.outputDir = get_string("output_dir", cfg.outputDir);
+    cfg.ptBins = get_double_vec("pt_bins", std::vector<double>{});
+    cfg.cenBins = get_double_vec("cen_bins", std::vector<double>{});
+    cfg.ptBinsByCen = get_2d_double_vec("pt_bins_by_centrality", std::vector<std::vector<double>>{});
+    cfg.isMatter = get_string("is_matter", cfg.isMatter);
+    cfg.bkgFunc = get_string("bkg_fit_func", cfg.bkgFunc);
+    cfg.sigFunc = get_string("signal_fit_func", cfg.sigFunc);
+    cfg.sigmaRangeMcToData = get_double_vec("sigma_range_mc_to_data", cfg.sigmaRangeMcToData);
+    cfg.branchingRatio = get_double("branching_ratio", cfg.branchingRatio);
+    cfg.deltaRap = get_double("delta_rap", cfg.deltaRap);
+    cfg.massMin = get_double("mass_min", cfg.massMin);
+    cfg.massMax = get_double("mass_max", cfg.massMax);
+    cfg.doSystematics = get_bool("do_systematics", cfg.doSystematics);
+    cfg.bdtScoreRelShifts = get_double_vec("syst_bdt_score_rel_shifts", cfg.bdtScoreRelShifts);
+    cfg.bkgFuncSyst = get_string_vec("syst_bkg_funcs", cfg.bkgFuncSyst);
+    cfg.nEventsFile = get_string("analysis_results_file", "");
+    cfg.nEventsHist = get_string("n_events_hist", "");
+    cfg.mcFileForAcceptance = get_string("mc_file_for_acceptance", "");
+    cfg.mcFileForAbsorption = get_string("mc_file_for_absorption", "");
+    cfg.reweightPtFile = get_string("reweight_pt_file", "");
+    cfg.basicSelectionDataForMCEff = get_string("basic_selection_data_for_mc_eff", "");
+    cfg.enableImplicitMT = get_bool("enable_implicit_mt", cfg.enableImplicitMT);
+    cfg.do_QA_afterward = get_bool("do_QA_afterward", get_bool("do_QA_afterwords", cfg.do_QA_afterward));
+    cfg.randomSeed = get_int("random_seed", cfg.randomSeed);
+    cfg.systBdtScoreNPoints = get_int("syst_bdt_score_npoints", cfg.systBdtScoreNPoints);
+    cfg.systNtrails = get_int("syst_ntrails", cfg.systNtrails);
+    cfg.systThrChi2Ndf = get_double("syst_thrashold_chi2ndf", cfg.systThrChi2Ndf);
+    cfg.systThrSignificance = get_double("syst_thrashold_significance", cfg.systThrSignificance);
+    cfg.systEfficiencyArrayPath = get_string("syst_efficiency_array_path", cfg.systEfficiencyArrayPath);
+    cfg.systSignalFuncs = get_string_vec("syst_signal_funcs", cfg.systSignalFuncs);
+    cfg.systAbsorptionFiles = get_string_vec("syst_absorption_files", cfg.systAbsorptionFiles);
+    cfg.systAbsorptionFileLabels = get_string_vec("syst_absorption_file_labels", cfg.systAbsorptionFileLabels);
     return cfg;
 }
 
@@ -125,18 +165,6 @@ struct WorkingPoint {
     double efficiency{0.0};
     double significance{0.0};
 };
-
-enum class WPFormat {
-    Full,   // cen pt ct
-    CenPt,  // cen pt
-    PtCt    // pt ct
-};
-
-inline bool CloseEnough(double a, double b, double tol = 1e-6) {
-    if (std::isnan(a) || std::isnan(b)) return false;
-    if (std::abs(a + 1.0) < tol && std::abs(b + 1.0) < tol) return true; // sentinel -1 pair
-    return std::abs(a - b) < tol;
-}
 
 inline std::string FormatEdge(double v) {
     std::ostringstream os;
@@ -163,88 +191,5 @@ inline std::string MakeLabel(const BinKey &key) {
     if (label.empty()) label = "all";
     return label;
 }
-
-class WPSummaryReader {
-public:
-    explicit WPSummaryReader(const std::string &path, double tol = 1e-6) : fPath(path), fTol(tol) {
-        Load();
-    }
-
-    WorkingPoint Lookup(const BinKey &key) const {
-        for (const auto &[k, wp] : fMap) {
-            if (CloseEnough(k.cenMin, key.cenMin, fTol) && CloseEnough(k.cenMax, key.cenMax, fTol) &&
-                CloseEnough(k.ptMin, key.ptMin, fTol) && CloseEnough(k.ptMax, key.ptMax, fTol) &&
-                CloseEnough(k.ctMin, key.ctMin, fTol) && CloseEnough(k.ctMax, key.ctMax, fTol)) {
-                return wp;
-            }
-        }
-        throw std::runtime_error("Working point not found for label: " + MakeLabel(key));
-    }
-
-    std::vector<BinKey> Keys() const {
-        std::vector<BinKey> out;
-        out.reserve(fMap.size());
-        for (const auto &kv : fMap) out.push_back(kv.first);
-        return out;
-    }
-
-private:
-    void Load() {
-        namespace fs = std::filesystem;
-        if (!fs::exists(fPath)) {
-            throw std::runtime_error("WP file not found: " + fPath);
-        }
-        std::ifstream ifs(fPath);
-        std::string line;
-        while (std::getline(ifs, line)) {
-            if (line.empty()) continue;
-            if (line[0] == '#') {
-                ParseFormatHint(line);
-                continue;
-            }
-            std::istringstream ss(line);
-            std::vector<double> vals;
-            double v;
-            while (ss >> v) vals.push_back(v);
-            if (vals.empty()) continue;
-
-            if (vals.size() >= 9) {
-                BinKey key{vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]};
-                fMap[key] = WorkingPoint{vals[6], vals[7], vals[8]};
-                continue;
-            }
-
-            // 4 boundaries + 3 numbers (score/eff/sig)
-            if (vals.size() >= 7) {
-                if (format_ == WPFormat::PtCt) {
-                    double cenMin = -1.0, cenMax = -1.0;
-                    double ptMin = vals[0], ptMax = vals[1];
-                    double ctMin = vals[2], ctMax = vals[3];
-                    fMap[{cenMin, cenMax, ptMin, ptMax, ctMin, ctMax}] = WorkingPoint{vals[4], vals[5], vals[6]};
-                } else { // CenPt default
-                    double cenMin = vals[0], cenMax = vals[1];
-                    double ptMin = vals[2], ptMax = vals[3];
-                    double ctMin = -1.0, ctMax = -1.0;
-                    fMap[{cenMin, cenMax, ptMin, ptMax, ctMin, ctMax}] = WorkingPoint{vals[4], vals[5], vals[6]};
-                }
-            }
-        }
-    }
-
-    void ParseFormatHint(const std::string &line) {
-        if (line.find("ptmin ptmax ctmin ctmax") != std::string::npos) {
-            format_ = WPFormat::PtCt;
-        } else if (line.find("cenmin cenmax ptmin ptmax") != std::string::npos) {
-            format_ = WPFormat::CenPt;
-        } else if (line.find("ctmin ctmax") != std::string::npos) {
-            format_ = WPFormat::Full;
-        }
-    }
-
-    std::string fPath;
-    double fTol{1e-6};
-    std::map<BinKey, WorkingPoint> fMap;
-    WPFormat format_{WPFormat::Full};
-};
 
 #endif // BDT_SPECTRUM_HELPER_H

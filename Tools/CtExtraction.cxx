@@ -62,7 +62,6 @@ std::unique_ptr<TF1> MakeExpoFitFunction(const std::string &name, double xmin, d
 CtExtraction::CtExtraction(const std::string &configPath) {
     LoadConfig(configPath);
     ValidateConfig();
-    LoadWorkingPoints();
 
     fInputMcFile = TFile::Open(fCfg.mcFile.c_str(), "READ");
     if (!fInputMcFile || fInputMcFile->IsZombie()) {
@@ -71,6 +70,11 @@ CtExtraction::CtExtraction(const std::string &configPath) {
 }
 
 CtExtraction::~CtExtraction() {
+    for (auto *h : fAcceptancePerPt) {
+        delete h;
+    }
+    fAcceptancePerPt.clear();
+
     if (fInputMcFile) {
         fInputMcFile->Close();
         delete fInputMcFile;
@@ -257,27 +261,27 @@ void CtExtraction::Run() {
         fitFunc->SetLineWidth(3);
         fitFunc->Draw("SAME");
 
-        auto legend = std::make_unique<TLegend>(0.60, 0.70, 0.90, 0.90);
-        legend->SetBorderSize(0);
-        legend->SetFillStyle(0);
-        legend->SetTextSize(0.045);
-        legend->AddEntry(hCorr.get(), "Corrected spectrum", "lep");
-        legend->AddEntry(fitFunc.get(), "Exp fit", "l");
-        legend->Draw();
+        TLegend legend(0.60, 0.70, 0.90, 0.90);
+        legend.SetBorderSize(0);
+        legend.SetFillStyle(0);
+        legend.SetTextSize(0.045);
+        legend.AddEntry(hCorr.get(), "Corrected spectrum", "lep");
+        legend.AddEntry(fitFunc.get(), "Exp fit", "l");
+        legend.Draw();
 
-        auto pave = std::make_unique<TPaveText>(0.18, 0.70, 0.55, 0.90, "NDC");
-        pave->SetFillStyle(0);
-        pave->SetBorderSize(0);
-        pave->SetTextAlign(12);
-        pave->SetTextSize(0.045);
+        TPaveText pave(0.18, 0.70, 0.55, 0.90, "NDC");
+        pave.SetFillStyle(0);
+        pave.SetBorderSize(0);
+        pave.SetTextAlign(12);
+        pave.SetTextSize(0.045);
         const double chi2 = fitFunc->GetChisquare();
         const int ndf = fitFunc->GetNDF();
         const double fitProb = (ndf > 0) ? TMath::Prob(chi2, ndf) : 0.0;
-        pave->AddText(Form("#tau = %.2f #pm %.2f ps", tauPs, tauPsErr));
-        pave->AddText(Form("#chi^{2}/ndf = %.2f / %d", chi2, ndf));
-        pave->AddText(Form("Fit prob. = %.3f", fitProb));
+        pave.AddText(Form("#tau = %.2f #pm %.2f ps", tauPs, tauPsErr));
+        pave.AddText(Form("#chi^{2}/ndf = %.2f / %d", chi2, ndf));
+        pave.AddText(Form("Fit prob. = %.3f", fitProb));
 
-        pave->Draw();
+        pave.Draw();
 
         canvas->Write();
     }
@@ -324,7 +328,64 @@ void CtExtraction::LoadConfig(const std::string &path) {
     fCfgJson = json::parse(ifs, nullptr, true, true);
 
     auto get_string = [&](const char *key, const std::string &fallback = std::string()) {
-        return fCfgJson.value(key, fallback);
+        if (fCfgJson.contains(key) && fCfgJson[key].is_string()) {
+            return fCfgJson[key].get<std::string>();
+        }
+        return fallback;
+    };
+    auto get_double = [&](const char *key, double fallback) {
+        if (fCfgJson.contains(key) && fCfgJson[key].is_number()) {
+            return fCfgJson[key].get<double>();
+        }
+        return fallback;
+    };
+    auto get_int = [&](const char *key, int fallback) {
+        if (fCfgJson.contains(key) && fCfgJson[key].is_number_integer()) {
+            return fCfgJson[key].get<int>();
+        }
+        if (fCfgJson.contains(key) && fCfgJson[key].is_number()) {
+            return static_cast<int>(fCfgJson[key].get<double>());
+        }
+        return fallback;
+    };
+    auto get_bool = [&](const char *key, bool fallback) {
+        if (fCfgJson.contains(key) && fCfgJson[key].is_boolean()) {
+            return fCfgJson[key].get<bool>();
+        }
+        return fallback;
+    };
+    auto get_double_vec = [&](const char *key, const std::vector<double> &fallback) {
+        if (!fCfgJson.contains(key) || !fCfgJson[key].is_array()) {
+            return fallback;
+        }
+        std::vector<double> out;
+        for (const auto &v : fCfgJson[key]) {
+            if (v.is_number()) {
+                out.push_back(v.get<double>());
+            }
+        }
+        return out.empty() ? fallback : out;
+    };
+    auto get_nested_double_vec = [&](const char *key, const std::vector<std::vector<double>> &fallback) {
+        if (!fCfgJson.contains(key) || !fCfgJson[key].is_array()) {
+            return fallback;
+        }
+        std::vector<std::vector<double>> out;
+        for (const auto &entry : fCfgJson[key]) {
+            if (!entry.is_array()) {
+                continue;
+            }
+            std::vector<double> row;
+            for (const auto &v : entry) {
+                if (v.is_number()) {
+                    row.push_back(v.get<double>());
+                }
+            }
+            if (!row.empty()) {
+                out.push_back(std::move(row));
+            }
+        }
+        return out.empty() ? fallback : out;
     };
 
     fCfg.dataSnapshotDir = get_string("data_snapshot_dir");
@@ -346,34 +407,46 @@ void CtExtraction::LoadConfig(const std::string &path) {
     fCfg.mcReweightFunc = get_string("mc_reweight_func", "BlastWave_H3L_10_30");
     fCfg.basicSelectionDataForMCEff = get_string("basic_selection_data_for_mc_eff", "");
 
-    fCfg.ptBins = fCfgJson.value("pt_bins", std::vector<double>{});
-    fCfg.ctBins = fCfgJson.value("ct_bins", std::vector<std::vector<double>>{});
-    fCfg.massRange = fCfgJson.value("mass_range", std::vector<double>{2.95, 3.05});
-    fCfg.massBins = fCfgJson.value("mass_nbins_data", 50);
-    fCfg.mcMassBins = fCfgJson.value("mass_nbins_mc", 80);
+    fCfg.ptBins = get_double_vec("pt_bins", std::vector<double>{});
+    fCfg.ctBins = get_nested_double_vec("ct_bins", std::vector<std::vector<double>>{});
+    fCfg.massRange = get_double_vec("mass_range", std::vector<double>{2.95, 3.05});
+    fCfg.massBins = get_int("mass_nbins_data", 50);
+    fCfg.mcMassBins = get_int("mass_nbins_mc", 80);
 
-    fCfg.minEntriesForFit = fCfgJson.value("min_entries_for_fit", 60.0);
-    fCfg.minScoreShift = fCfgJson.value("bdt_score_shift", 0.0);
+    fCfg.minEntriesForFit = get_double("min_entries_for_fit", 60.0);
+    fCfg.minScoreShift = get_double("bdt_score_shift", 0.0);
     fCfg.runPeriodLabel = get_string("run_period_label", "Run 3");
     fCfg.collidingSystem = get_string("colliding_system", "Pb-Pb");
     fCfg.sqrtsLabel = get_string("sqrtsnn_label", "#sqrt{s_{NN}}");
     fCfg.dataSetLabel = get_string("data_set_label", "LHC23_PbPb_pass5");
-    fCfg.collisionEnergyTeV = fCfgJson.value("collision_energy_tev", 5.36);
-    fCfg.alicePerformance = fCfgJson.value("alice_performance", false);
-    fCfg.sigmaRangeMcToData = fCfgJson.value("sigma_mc_to_data_range", std::vector<std::vector<double>>{ {0.9, 1.5}, {0.9, 1.5} , {0.9, 1.5} , {0.9, 1.5} });
+    fCfg.collisionEnergyTeV = get_double("collision_energy_tev", 5.36);
+    fCfg.alicePerformance = get_bool("alice_performance", false);
+    fCfg.sigmaRangeMcToData = get_nested_double_vec("sigma_mc_to_data_range", std::vector<std::vector<double>>{ {0.9, 1.5}, {0.9, 1.5} , {0.9, 1.5} , {0.9, 1.5} });
 
     if (fCfgJson.contains("bdt_overrides")) {
         for (const auto &item : fCfgJson["bdt_overrides"]) {
             if (!item.contains("pt") || !item.contains("ct") || !item.contains("score")) {
                 continue;
             }
-            auto pt = item["pt"].get<std::vector<double>>();
-            auto ct = item["ct"].get<std::vector<double>>();
+            std::vector<double> pt;
+            std::vector<double> ct;
+            if (item["pt"].is_array()) {
+                for (const auto &v : item["pt"]) {
+                    if (v.is_number()) pt.push_back(v.get<double>());
+                }
+            }
+            if (item["ct"].is_array()) {
+                for (const auto &v : item["ct"]) {
+                    if (v.is_number()) ct.push_back(v.get<double>());
+                }
+            }
             if (pt.size() != 2 || ct.size() != 2) {
                 continue;
             }
             BinKey key{pt[0], pt[1], ct[0], ct[1]};
-            fUserOverrides[key] = item["score"].get<double>();
+            if (item["score"].is_number()) {
+                fUserOverrides[key] = item["score"].get<double>();
+            }
         }
     }
 }
@@ -419,27 +492,6 @@ void CtExtraction::ValidateConfig() const {
     }
     if (fCfg.mcSnapshotPattern.empty()) {
         throw std::runtime_error("mc_snapshot_pattern cannot be empty");
-    }
-}
-
-void CtExtraction::LoadWorkingPoints() {
-    std::ifstream ifs(fCfg.workingPointFile);
-    if (!ifs) {
-        throw std::runtime_error("Failed to open working point file: " + fCfg.workingPointFile);
-    }
-    std::string line;
-    while (std::getline(ifs, line)) {
-        if (line.empty() || line[0] == '#') {
-            continue;
-        }
-        std::stringstream ss(line);
-        double ptMin, ptMax, ctMin, ctMax, bestScore, bestEff, bestSig;
-        ss >> ptMin >> ptMax >> ctMin >> ctMax >> bestScore >> bestEff >> bestSig;
-        if (ss.fail()) {
-            continue;
-        }
-        BinKey key{ptMin, ptMax, ctMin, ctMax};
-        fWorkingPoints[key] = WorkingPoint{bestScore, bestEff, bestSig};
     }
 }
 
@@ -507,17 +559,22 @@ void CtExtraction::BuildAcceptance() {
         perPt = &accResult.acc_ct_per_pt;
     }
 
+    for (auto *h : fAcceptancePerPt) {
+        delete h;
+    }
     fAcceptancePerPt.clear();
     fAcceptancePerPt.reserve(perPt->size());
     for (size_t i = 0; i < perPt->size(); ++i) {
         TH1D *src = perPt->at(i);
         if (!src) {
-            fAcceptancePerPt.emplace_back();
+            fAcceptancePerPt.emplace_back(nullptr);
             continue;
         }
-        auto clone = std::unique_ptr<TH1D>(static_cast<TH1D*>(src->Clone(Form("acc_per_pt_%zu", i))));
-        clone->SetDirectory(nullptr);
-        fAcceptancePerPt.emplace_back(std::move(clone));
+        TH1D *clone = static_cast<TH1D*>(src->Clone(Form("acc_per_pt_%zu", i)));
+        if (clone) {
+            clone->SetDirectory(nullptr);
+        }
+        fAcceptancePerPt.emplace_back(clone);
     }
 
     // clean up dynamically allocated histograms inside accResult to avoid leaks
@@ -525,11 +582,11 @@ void CtExtraction::BuildAcceptance() {
 }
 
 CtExtraction::WorkingPoint CtExtraction::GetWorkingPoint(const BinKey &key) const {
-    auto it = fWorkingPoints.find(key);
-    if (it == fWorkingPoints.end()) {
-        throw std::runtime_error("Missing working point entry for bin " + key.ToString());
+    auto wp = GeneralHelper::GetWpForPtCt(fCfg.workingPointFile, key.ptMin, key.ptMax, key.ctMin, key.ctMax);
+    if (!wp.found) {
+        throw std::runtime_error("Missing working point entry for bin " + key.ToString() + " in " + fCfg.workingPointFile);
     }
-    return it->second;
+    return WorkingPoint{wp.score, wp.eff, wp.significance};
 }
 
 double CtExtraction::ResolveBDTScore(const BinKey &key) const {
@@ -602,54 +659,16 @@ std::vector<double> CtExtraction::CollectMassValues(const BinKey &key,
         node = node.Filter("fIsMatter < 0.5");
     }
 
-    auto filtered = node.Filter([bdtScore](float score) { return static_cast<double>(score) > bdtScore; }, {fCfg.bdtScoreColumn});
+    const std::string bdtCutExpr = fCfg.bdtScoreColumn + " > " + std::to_string(bdtScore);
+    auto filtered = node.Filter(bdtCutExpr);
 
     auto countBefore = node.Count();
     auto countAfter = filtered.Count();
 
-    struct SlotMassBuffer {
-        std::vector<double> masses;
-    };
-    std::mutex slotMutex;
-    std::vector<std::unique_ptr<SlotMassBuffer>> buffers;
-
-    auto acquire = [&](unsigned slot) -> SlotMassBuffer & {
-        std::lock_guard<std::mutex> guard(slotMutex);
-        if (slot >= buffers.size()) {
-            buffers.resize(slot + 1);
-        }
-        if (!buffers[slot]) {
-            buffers[slot] = std::make_unique<SlotMassBuffer>();
-        }
-        return *buffers[slot];
-    };
-
-    filtered.ForeachSlot(
-        [&](unsigned slot, double mass) {
-            auto &buf = acquire(slot);
-            buf.masses.push_back(mass);
-        },
-        std::vector<std::string>{fCfg.massColumn});
-
     entriesBefore = static_cast<int>(countBefore.GetValue());
     entriesAfter = static_cast<int>(countAfter.GetValue());
-
-    std::vector<double> massValues;
-    size_t total = 0;
-    for (const auto &slotBuf : buffers) {
-        if (!slotBuf) {
-            continue;
-        }
-        total += slotBuf->masses.size();
-    }
-    massValues.reserve(total);
-    for (const auto &slotBuf : buffers) {
-        if (!slotBuf) {
-            continue;
-        }
-        massValues.insert(massValues.end(), slotBuf->masses.begin(), slotBuf->masses.end());
-    }
-    return massValues;
+    auto massValues = filtered.Take<double>(fCfg.massColumn);
+    return massValues.GetValue();
 }
 
 std::vector<double> CtExtraction::CollectMCMasses(const BinKey &key) const {
@@ -666,46 +685,8 @@ std::vector<double> CtExtraction::CollectMCMasses(const BinKey &key) const {
         node = node.Filter("fIsMatter < 0.5");
     }
 
-    struct SlotMassBuffer {
-        std::vector<double> masses;
-    };
-    std::mutex slotMutex;
-    std::vector<std::unique_ptr<SlotMassBuffer>> buffers;
-
-    auto acquire = [&](unsigned slot) -> SlotMassBuffer & {
-        std::lock_guard<std::mutex> guard(slotMutex);
-        if (slot >= buffers.size()) {
-            buffers.resize(slot + 1);
-        }
-        if (!buffers[slot]) {
-            buffers[slot] = std::make_unique<SlotMassBuffer>();
-        }
-        return *buffers[slot];
-    };
-
-    node.ForeachSlot(
-        [&](unsigned slot, double mass) {
-            auto &buf = acquire(slot);
-            buf.masses.push_back(mass);
-        },
-        std::vector<std::string>{fCfg.massColumn});
-
-    std::vector<double> massValues;
-    size_t total = 0;
-    for (const auto &slotBuf : buffers) {
-        if (!slotBuf) {
-            continue;
-        }
-        total += slotBuf->masses.size();
-    }
-    massValues.reserve(total);
-    for (const auto &slotBuf : buffers) {
-        if (!slotBuf) {
-            continue;
-        }
-        massValues.insert(massValues.end(), slotBuf->masses.begin(), slotBuf->masses.end());
-    }
-    return massValues;
+    auto massValues = node.Take<double>(fCfg.massColumn);
+    return massValues.GetValue();
 }
 
 CtExtraction::BinComputationResult CtExtraction::FitSpectrum(const BinKey &key,
@@ -720,226 +701,24 @@ CtExtraction::BinComputationResult CtExtraction::FitSpectrum(const BinKey &key,
     res.entriesBeforeBDT = entriesBefore;
     res.entriesAfterBDT = entriesAfter;
 
-    const double massMin = fCfg.massRange[0];
-    const double massMax = fCfg.massRange[1];
-    auto massVar = std::make_shared<RooRealVar>("mass", "M_{(#pi^{-}+^{3}He)/(#pi^{+}+^{3}#bar{He})} (GeV/c^{2})", massMin, massMax);
-    RooRealVar &mass = *massVar;
-    RooArgSet vars(mass);
+    GeneralHelper::MassFitConfig fitCfg;
+    fitCfg.massMin = fCfg.massRange[0];
+    fitCfg.massMax = fCfg.massRange[1];
+    fitCfg.sigmaRangeMcToData = sigmaRange;
 
-    RooDataSet dataSet("data", "data", vars);
-    for (double value : massValues) {
-        if (value < massMin || value > massMax) {
-            continue;
-        }
-        mass.setVal(value);
-        dataSet.add(vars);
-    }
+    auto fit = GeneralHelper::FitMassSpectrum(massValues, mcMassValues, fitCfg, "pol2", "dscb");
 
-    RooDataSet mcSet("mc", "mc", vars);
-    for (double value : mcMassValues) {
-        if (value < massMin || value > massMax) {
-            continue;
-        }
-        mass.setVal(value);
-        mcSet.add(vars);
-    }
-
-    if (dataSet.numEntries() < fCfg.minEntriesForFit) {
-        throw std::runtime_error("Dataset too small to fit for bin " + key.ToString());
-    }
-    if (mcSet.numEntries() < fCfg.minEntriesForFit) {
-        throw std::runtime_error("MC dataset too small to fit for bin " + key.ToString());
-    }
-    // Fit MC spectrum
-    RooRealVar alphaL("alphaL", "alphaL", 1.5, 0.1, 10.0);
-    RooRealVar nL("nL", "nL", 5.0, 0.5, 30.0);
-    RooRealVar alphaR("alphaR", "alphaR", 1.5, 0.1, 10.0);
-    RooRealVar nR("nR", "nR", 5.0, 0.5, 30.0);
-
-    RooRealVar meanMC("meanMC", "meanMC", 2.991, massMin, massMax);
-    RooRealVar sigmaMC("sigmaMC", "sigmaMC", 1.5e-3, 1.1e-3, 1.8e-3);
-    RooCrystalBall signalMC("signalMC", "signalMC", mass, meanMC, sigmaMC, alphaL, nL, alphaR, nR);
-    signalMC.fitTo(mcSet, RooFit::Save(true), RooFit::PrintLevel(-1));
-    alphaL.setConstant(true);
-    nL.setConstant(true);
-    alphaR.setConstant(true);
-    nR.setConstant(true);
-    sigmaMC.setConstant(true);
-
-    std::unique_ptr<RooPlot> mcFrame(mass.frame(fCfg.mcMassBins));
-    mcSet.plotOn(mcFrame.get());
-    signalMC.plotOn(mcFrame.get(), RooFit::LineColor(kRed + 1), RooFit::LineWidth(2), RooFit::Name("signalMC"), RooFit::LineStyle(kSolid));
-    auto fitParamMc = std::make_unique<TPaveText>(0.6, 0.43, 0.9, 0.85, "NDC");
-    fitParamMc->SetBorderSize(0);
-    fitParamMc->SetFillStyle(0);
-    fitParamMc->SetTextAlign(12);
-    fitParamMc->AddText(Form("#mu = %.2f #pm %.2f MeV/#it{c}^{2}",
-                             meanMC.getVal() * 1e3,
-                             meanMC.getError() * 1e3));
-    fitParamMc->AddText(Form("#sigma = %.2f #pm %.2f MeV/#it{c}^{2}",
-                             sigmaMC.getVal() * 1e3,
-                             sigmaMC.getError() * 1e3));
-    fitParamMc->AddText(Form("#alpha_{L} = %.2f #pm %.2f",
-                             alphaL.getVal(),
-                             alphaL.getError()));
-    fitParamMc->AddText(Form("#alpha_{R} = %.2f #pm %.2f",
-                             alphaR.getVal(),
-                             alphaR.getError()));
-    fitParamMc->AddText(Form("n_{L} = %.2f #pm %.2f",
-                             nL.getVal(),
-                             nL.getError()));
-    fitParamMc->AddText(Form("n_{R} = %.2f #pm %.2f",
-                             nR.getVal(),
-                             nR.getError()));
-    constexpr int nMcFloatParams = 6;
-    const int ndfMc = std::max(1, static_cast<int>(fCfg.mcMassBins) - nMcFloatParams);
-    const double chi2OverNdfMc = mcFrame->chiSquare(signalMC.GetName(), nullptr, nMcFloatParams);
-    fitParamMc->AddText(Form("#chi^{2} / NDF = %.3f (NDF: %d)", chi2OverNdfMc, ndfMc));
-    mcFrame->addObject(fitParamMc.release());
-    
-    // Fit data spectrum
-    RooRealVar mean("mean", "mean", meanMC.getVal(), massMin, massMax);
-    RooRealVar sigma("sigma", "sigma", 1.05 * sigmaMC.getVal(), sigmaRange[0] * sigmaMC.getVal(), sigmaRange[1] * sigmaMC.getVal());
-    RooCrystalBall signal("signal", "signal", mass, mean, sigma, alphaL, nL, alphaR, nR);
-
-    RooRealVar c0("c0", "c0", 0.0, -1.5, 1.5);
-    RooRealVar c1("c1", "c1", 0.0, -1.5, 1.5);
-    //RooRealVar c2("c2", "c2", 0.0, -1.5, 1.5);
-    RooChebychev background("background", "background", mass, RooArgList(c0, c1 /*, c2*/));
-
-    const double entries = dataSet.sumEntries();
-    RooRealVar nsig("nsig", "signal yield", std::max(1.0, entries * 0.1), 0.0, std::max(10.0, entries * 10.0));
-    RooRealVar nbkg("nbkg", "background yield", std::max(1.0, entries * 0.9 + 1.0), 0.0, std::max(10.0, entries * 10.0));
-
-    RooAddPdf model("model", "signal+background", RooArgList(signal, background), RooArgList(nsig, nbkg));
-    model.fitTo(dataSet, RooFit::Save(true), RooFit::PrintLevel(-1));
-
-    std::unique_ptr<RooPlot> dataFrame(mass.frame(fCfg.massBins));
-    dataSet.plotOn(dataFrame.get());
-    const Int_t kOrangeC = TColor::GetColor("#ff7f00");
-    model.plotOn(dataFrame.get(), RooFit::LineColor(kAzure + 1), RooFit::LineWidth(3), RooFit::Name("totalPDF"), RooFit::LineStyle(kSolid));
-    model.plotOn(dataFrame.get(), RooFit::Components(background.GetName()), RooFit::LineStyle(kDashed), RooFit::LineColor(kOrangeC), RooFit::LineWidth(3), RooFit::Name("background"));
-    model.plotOn(dataFrame.get(),RooFit::Components(signal.GetName()), RooFit::LineColor(kGreen + 2), RooFit::LineWidth(3), RooFit::Name("signal"), RooFit::LineStyle(kDashDotted));
-    const double scoreUsed = wp.score;
-    const double effHere = wp.efficiency;
-    const double muVal = mean.getVal();
-    const double sigmaVal = sigma.getVal();
-
-    double windowMin = std::max(massMin, muVal - 3.0 * sigmaVal);
-    double windowMax = std::min(massMax, muVal + 3.0 * sigmaVal);
-    if (windowMax <= windowMin) {
-        windowMin = massMin;
-        windowMax = massMax;
-    }
-    mass.setRange("sigWindow", windowMin, windowMax);
-
-    std::unique_ptr<RooAbsReal> sigIntegral(signal.createIntegral(mass, RooFit::NormSet(mass), RooFit::Range("sigWindow")));
-    std::unique_ptr<RooAbsReal> bkgIntegral(background.createIntegral(mass, RooFit::NormSet(mass), RooFit::Range("sigWindow")));
-
-    const double sigFrac3s = sigIntegral ? sigIntegral->getVal() : 0.0;
-    const double bkgFrac3s = bkgIntegral ? bkgIntegral->getVal() : 0.0;
-
-    const double signalCounts = nsig.getVal();
-    const double signalCountsErr = nsig.getError();
-    const double signalIntVal3s = signalCounts * sigFrac3s;
-    const double signalIntErr3s = signalCountsErr * sigFrac3s;
-
-    const double bkgIntVal3s = nbkg.getVal() * bkgFrac3s;
-    const double bkgIntErr3s = nbkg.getError() * bkgFrac3s;
-
-    double sOverB = 0.0;
-    double sOverBErr = 0.0;
-    const bool validSOverB = bkgIntVal3s > 0.0;
-    if (validSOverB) {
-        sOverB = signalIntVal3s / bkgIntVal3s;
-        const double dSd = 1.0 / bkgIntVal3s;
-        const double dBd = -signalIntVal3s / (bkgIntVal3s * bkgIntVal3s);
-        sOverBErr = std::sqrt(std::pow(dSd * signalIntErr3s, 2) + std::pow(dBd * bkgIntErr3s, 2));
-    }
-
-    double significance = 0.0;
-    double significanceErr = 0.0;
-    const double sumSB = signalIntVal3s + bkgIntVal3s;
-    if (sumSB > 0.0) {
-        significance = signalIntVal3s / std::sqrt(sumSB);
-        const double denomPow = std::pow(sumSB, 1.5);
-        if (denomPow > 0.0) {
-            const double dFdS = (signalIntVal3s + 2.0 * bkgIntVal3s) / (2.0 * denomPow);
-            const double dFdB = -signalIntVal3s / (2.0 * denomPow);
-            significanceErr = std::sqrt(std::pow(dFdS * signalIntErr3s, 2) + std::pow(dFdB * bkgIntErr3s, 2));
-        }
-    }
-
-
-    constexpr int nDataFloatParams = 7;
-    const int ndfData = std::max(1, static_cast<int>(fCfg.massBins) - nDataFloatParams);
-    const double chi2Data = dataFrame->chiSquare("totalPDF", nullptr, nDataFloatParams);
-
-    auto pinfoVals = std::make_unique<TPaveText>(0.5, 0.4, 0.9, 0.85, "NDC");
-    pinfoVals->SetBorderSize(0);
-    pinfoVals->SetFillStyle(0);
-    pinfoVals->SetTextAlign(11);
-    pinfoVals->SetTextFont(42);
-    pinfoVals->AddText(Form("BDT score > %.3f   Effi(#it{BDT}) = %.3f", scoreUsed, effHere));
-    pinfoVals->AddText(Form("Signal Counts(3 #sigma): %.0f #pm %.0f", signalIntVal3s, signalIntErr3s));
-    if (validSOverB) {
-        pinfoVals->AddText(Form("S/B (3 #sigma): %.1f #pm %.1f", sOverB, sOverBErr));
-    } else {
-        pinfoVals->AddText("S/B (3 #sigma): n/a");
-    }
-    if (sumSB > 0.0) {
-        pinfoVals->AddText(Form("S/#sqrt{S+B} (3 #sigma): %.1f #pm %.1f", significance, significanceErr));
-    } else {
-        pinfoVals->AddText("S/#sqrt{S+B} (3 #sigma): n/a");
-    }
-    pinfoVals->AddText(Form("#mu = %.2f #pm %.2f MeV/#it{c}^{2}", muVal * 1e3, mean.getError() * 1e3));
-    pinfoVals->AddText(Form("#sigma Range Fixed to [%.2f, %.2f] #times #sigma_{MC}(%.2f MeV/#it{c}^{2})", sigmaRange[0], sigmaRange[1], sigmaMC.getVal() * 1e3));
-    pinfoVals->AddText(Form("#sigma = %.2f #pm %.2f MeV/#it{c}^{2}", sigmaVal * 1e3, sigma.getError() * 1e3));
-    pinfoVals->AddText(Form("#chi^{2} / NDF = %.3f (NDF: %d)", chi2Data, ndfData));
-    dataFrame->addObject(pinfoVals.release());
-
-    const std::string &runPeriod = fCfg.runPeriodLabel;
-    const std::string &collidingSystem = fCfg.collidingSystem;
-    const std::string &sqrtsLabel = fCfg.sqrtsLabel;
-    const double collisionEnergy = fCfg.collisionEnergyTeV;
-    const std::string &dataSetLabel = fCfg.dataSetLabel;
-    const std::string decayString = fCfg.isMatter == "matter"
-                                        ? "{}^{3}_{#Lambda}H #rightarrow ^{3}He+#pi^{-}"
-                                        : (fCfg.isMatter == "antimatter"
-                                               ? "{}^{3}_{#bar{#Lambda}}#bar{H} #rightarrow ^{3}#bar{He}+#pi^{+}"
-                                               : "{}^{3}_{#Lambda}H({}^{3}_{#bar{#Lambda}}#bar{H}) #rightarrow ^{3}He+#pi(^{3}#bar{He}+#pi^{+})");
-
-    auto pinfoAlice = std::make_unique<TPaveText>(0.10, 0.6, 0.38, 0.85, "NDC");
-    pinfoAlice->SetBorderSize(0);
-    pinfoAlice->SetFillStyle(0);
-    pinfoAlice->SetTextAlign(11);
-    pinfoAlice->SetTextFont(42);
-    if (fCfg.alicePerformance) {
-        pinfoAlice->AddText("ALICE Performance");
-        pinfoAlice->AddText(Form("%s, %s @ %s = %.2f TeV",
-                                 runPeriod.c_str(),
-                                 collidingSystem.c_str(),
-                                 sqrtsLabel.c_str(),
-                                 collisionEnergy));
-    }
-    else {
-       pinfoAlice->AddText(dataSetLabel.c_str());
-       pinfoAlice->AddText(decayString.c_str());
-    }
-    
-    dataFrame->addObject(pinfoAlice.release());
-
-    res.rawYield = signalCounts;
-    res.rawYieldErr = signalCountsErr;
-    res.fittedMean = mean.getVal();
-    res.fittedSigma = sigma.getVal();
-    res.fittedSigmaErr = sigma.getError();
-    res.fittedSigmaMC = sigmaMC.getVal();
-    res.fittedSigmaMCErr = sigmaMC.getError();
-    res.fittedChi2 = chi2Data;
-    res.mcMassFrame = std::move(mcFrame);
-    res.dataMassFrame = std::move(dataFrame);
-    res.massAxis = std::move(massVar);
+    res.rawYield = fit.signal;
+    res.rawYieldErr = fit.signalErr;
+    res.fittedMean = fit.meanData;
+    res.fittedSigma = fit.sigmaData;
+    res.fittedSigmaErr = fit.sigmaDataErr;
+    res.fittedSigmaMC = fit.sigmaMc;
+    res.fittedSigmaMCErr = fit.sigmaMcErr;
+    res.fittedChi2 = fit.chi2Data;
+    res.mcMassFrame = std::move(fit.frameMc);
+    res.dataMassFrame = std::move(fit.frame);
+    res.massAxis = std::move(fit.massAxis);
 
     return res;
 }
@@ -954,7 +733,7 @@ double CtExtraction::LookupAcceptance(const BinKey &key, double &err) const {
     if (ptIndex >= fAcceptancePerPt.size()) {
         throw std::runtime_error("Acceptance histogram missing for pt bin " + key.ToString());
     }
-    TH1D *hist = fAcceptancePerPt[ptIndex].get();
+    TH1D *hist = fAcceptancePerPt[ptIndex];
     if (!hist) {
         throw std::runtime_error("Acceptance histogram is null for pt index " + std::to_string(ptIndex));
     }

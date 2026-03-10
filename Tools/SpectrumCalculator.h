@@ -1,23 +1,13 @@
 #pragma once
 
 #include "BdtSpectrumHelper.h"
+#include "GeneralHelper.hpp"
 
 #include <ROOT/RDataFrame.hxx>
 #include <TH1D.h>
 #include <TCanvas.h>
 #include <TLegend.h>
 #include <TString.h>
-#include <TPaveText.h>
-
-#include <RooAddPdf.h>
-#include <RooArgList.h>
-#include <RooArgSet.h>
-#include <RooChebychev.h>
-#include <RooCrystalBall.h>
-#include <RooDataSet.h>
-#include <RooExponential.h>
-#include <RooFitResult.h>
-#include <RooGaussian.h>
 #include <RooPlot.h>
 #include <RooRealVar.h>
 
@@ -30,19 +20,7 @@
 #include <tuple>
 #include <vector>
 
-struct FitResult {
-    double signal{0.0};
-    double signalErr{0.0};
-    double significance{0.0};
-    double significanceErr{0.0};
-    double chi2Data{0.0};
-    double chi2Mc{0.0};
-    int ndfData{0};
-    int ndfMc{0};
-    std::unique_ptr<RooPlot> frame;
-    std::unique_ptr<RooPlot> frameMc;
-    std::shared_ptr<RooRealVar> massAxis;
-};
+using FitResult = GeneralHelper::MassFitResult;
 
 struct BinInput {
     double ptMin{0.0};
@@ -179,7 +157,7 @@ public:
                 continue;
             }
 
-            FitResult fit = FitMass(*dataMass, *mcMass, bkgFunc, sigFunc);
+            FitResult fit = FitMassPublic(*dataMass, *mcMass, bkgFunc, sigFunc);
             if (!std::isfinite(fit.signal) || !std::isfinite(fit.signalErr) || fit.signal < 0) {
                 hRaw->SetBinContent(static_cast<int>(i + 1), 0.0);
                 hRaw->SetBinError(static_cast<int>(i + 1), 0.0);
@@ -288,7 +266,11 @@ public:
                             const std::vector<double> &mcMass,
                             const std::string &bkgFunc,
                             const std::string &sigFunc) const {
-        return FitMass(dataMass, mcMass, bkgFunc, sigFunc);
+        GeneralHelper::MassFitConfig fitCfg;
+        fitCfg.massMin = cfg_.massMin;
+        fitCfg.massMax = cfg_.massMax;
+        fitCfg.sigmaRangeMcToData = cfg_.sigmaRangeMcToData;
+        return GeneralHelper::FitMassSpectrum(dataMass, mcMass, fitCfg, bkgFunc, sigFunc);
     }
 
     void RedrawFrameCanvas(TCanvas *canvas, RooPlot *frame, bool isMc) const {
@@ -296,12 +278,6 @@ public:
     }
 
 private:
-    static std::string NormalizeSignalName(std::string sig) {
-        for (auto &c : sig) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (sig == "gaus") sig = "gauss";
-        return sig;
-    }
-
     std::unique_ptr<TCanvas> MakeFrameCanvas(const std::string &canvasName, RooPlot *frame, bool isMc) const {
         if (!frame) return nullptr;
         auto canvas = std::make_unique<TCanvas>(canvasName.c_str(), canvasName.c_str(), 800, 600);
@@ -350,192 +326,6 @@ private:
     static TObject *FindPlotObject(RooPlot *frame, const char *name) {
         if (!frame || !name) return nullptr;
         return frame->findObject(name);
-    }
-    FitResult FitMass(const std::vector<double> &dataMass, const std::vector<double> &mcMass,
-                      const std::string &bkgFuncRaw, const std::string &sigFuncRaw) const {
-        const std::string sigFunc = NormalizeSignalName(sigFuncRaw);
-        const std::string bkgFunc = bkgFuncRaw;
-        RooRealVar mass("m", "Mass(H3l)", cfg_.massMin, cfg_.massMax, "GeV/c^{2}");
-        RooDataSet data("data", "data", RooArgSet(mass));
-        int dataCounts = 0;
-        for (double v : dataMass) {
-            if (v < cfg_.massMin || v > cfg_.massMax) continue; // drop under/overflow to avoid pileup in first bin
-            mass.setVal(v);
-            data.add(RooArgSet(mass));
-            ++dataCounts;
-        }
-
-        RooDataSet mc("mc", "mc", RooArgSet(mass));
-        for (double v : mcMass) {
-            if (v < cfg_.massMin || v > cfg_.massMax) continue;
-            mass.setVal(v);
-            mc.add(RooArgSet(mass));
-        }
-
-        RooRealVar muMc("muMc", "muMc", 2.991, 2.97, 3.01);
-        RooRealVar sigmaMcVar("sigmaMc", "sigmaMc", 1.5e-3, 1.1e-3, 2.1e-3);
-        RooRealVar a1McVar("a1Mc", "a1Mc", 1.5, 0.1, 10.0);
-        RooRealVar a2McVar("a2Mc", "a2Mc", 1.5, 0.1, 10.0);
-        RooRealVar n1McVar("n1Mc", "n1Mc", 5.0, 0.5, 30.0);
-        RooRealVar n2McVar("n2Mc", "n2Mc", 5.0, 0.5, 30.0);
-        RooAbsPdf *signalPdfMc = nullptr;
-        if (sigFunc == "gauss") {
-            signalPdfMc = new RooGaussian("sigMc", "sigMc", mass, muMc, sigmaMcVar);
-        } else {
-            signalPdfMc = new RooCrystalBall("sigMc", "sigMc", mass, muMc, sigmaMcVar, a1McVar, n1McVar, a2McVar, n2McVar);
-        }
-
-        signalPdfMc->fitTo(mc, RooFit::Range(2.97, 3.01), RooFit::Save(true), RooFit::PrintLevel(-1));
-        if (sigFunc != "gauss") {
-            a1McVar.setConstant(); a2McVar.setConstant(); n1McVar.setConstant(); n2McVar.setConstant();
-        }
-        const double sigmaMc = sigmaMcVar.getVal();
-        const double sigmaErrMc = sigmaMcVar.getError();
-        const double muMcVal = muMc.getVal();
-        const double muErrMc = muMc.getError();
-        double a1Mc = 0.0, a1ErrMc = 0.0, n1Mc = 0.0, n1ErrMc = 0.0, a2Mc = 0.0, a2ErrMc = 0.0, n2Mc = 0.0, n2ErrMc = 0.0;
-        if (sigFunc != "gauss") {
-            a1Mc = a1McVar.getVal();
-            a1ErrMc = a1McVar.getError();
-            n1Mc = n1McVar.getVal();
-            n1ErrMc = n1McVar.getError();
-            a2Mc = a2McVar.getVal();
-            a2ErrMc = a2McVar.getError();
-            n2Mc = n2McVar.getVal();
-            n2ErrMc = n2McVar.getError();
-        }
-        const int nMcFloatParams = ((sigFunc == "gauss") ? 2 : 6);
-        const int ndfMc = std::max(1, 80 - nMcFloatParams); // 80 bins used in frame below
-        double chi2OverNdfMc = 0.0;
-
-        // build independent signal pdf for data so MC frame is not altered by data fit
-        RooRealVar mu("mu", "mu", 2.991, 2.985, 2.992);
-        RooRealVar sigma("sigma", "sigma", sigmaMc, 1.1e-3, 3e-3);
-        RooAbsPdf *signalPdf = nullptr;
-        if (sigFunc == "gauss") {
-            signalPdf = new RooGaussian("sig", "sig", mass, mu, sigma);
-        } else {
-            signalPdf = new RooCrystalBall("sig", "sig", mass, mu, sigma, a1McVar, n1McVar, a2McVar, n2McVar);
-        }
-        sigma.setRange(cfg_.sigmaRangeMcToData[0] * sigmaMc, cfg_.sigmaRangeMcToData[1] * sigmaMc);
-
-        RooAbsPdf *bkg = nullptr;
-        // Tighter Chebychev coefficient ranges to reduce negative-p.d.f excursions (NaN NLLs)
-        RooRealVar c0("c0", "c0", 0.0, -0.8, 0.8);
-        RooRealVar c1("c1", "c1", 0.0, -0.8, 0.8);
-        //RooRealVar c2("c2", "c2", 0.0, -1.5, 1.5);
-        if (bkgFunc == "pol1") {
-            bkg = new RooChebychev("bkg", "bkg", mass, RooArgList(c0));
-        } else if (bkgFunc == "expo") {
-            bkg = new RooExponential("bkg", "bkg", mass, c0);
-        } else {
-            bkg = new RooChebychev("bkg", "bkg", mass, RooArgList(c0, c1));
-        }
-
-        const double nSigInit = std::max(1.0, 0.7 * static_cast<double>(dataCounts));
-        const double nSigMax = std::max(150.0, 3.0 * static_cast<double>(dataCounts));
-        const double nBkgInit = std::max(1.0, 0.3 * static_cast<double>(dataCounts));
-        const double nBkgMax = std::max(50.0, 1.0 * static_cast<double>(dataCounts));
-        RooRealVar nSig("nSig", "nSig", nSigInit, 0.0, nSigMax);
-        RooRealVar nBkg("nBkg", "nBkg", nBkgInit, 0.0, nBkgMax);
-        RooAddPdf model("model", "total_pdf", RooArgList(*signalPdf, *bkg), RooArgList(nSig, nBkg));
-        model.fitTo(data, RooFit::Extended(true), RooFit::Save(true), RooFit::PrintLevel(-1));
-
-        const double muData = mu.getVal();
-        const double muErrData = mu.getError();
-        const double sigmaData = sigma.getVal();
-        const double sigmaErrData = sigma.getError();
-
-        const double windowMin = muData - 3.0 * sigmaData;
-        const double windowMax = muData + 3.0 * sigmaData;
-        mass.setRange("sigWindow", windowMin, windowMax);
-        std::unique_ptr<RooAbsReal> sigIntegral(signalPdf->createIntegral(mass, RooFit::NormSet(mass), RooFit::Range("sigWindow")));
-        std::unique_ptr<RooAbsReal> bkgIntegral(bkg->createIntegral(mass, RooFit::NormSet(mass), RooFit::Range("sigWindow")));
-        const double sigFrac = sigIntegral ? sigIntegral->getVal() : 0.0;
-        const double bkgFrac = bkgIntegral ? bkgIntegral->getVal() : 0.0;
-        const double signalValue = nSig.getVal();
-        const double signalValueErr = nSig.getError();
-        const double signalCounts3s = signalValue * sigFrac;
-        const double signalCounts3sErr = signalValueErr * sigFrac;
-        const double bkgCounts3s = nBkg.getVal() * bkgFrac;
-        const double bkgCounts3sErr = nBkg.getError() * bkgFrac;
-        double significance = 0.0;
-        double significanceErr = 0.0;
-        bool vaildSignificance = bkgCounts3s + signalCounts3s > 0.0;
-        if (vaildSignificance) {
-            significance = signalCounts3s / std::sqrt(signalCounts3s + bkgCounts3s);
-            const double dSdSig = std::sqrt(signalCounts3s + bkgCounts3s) - (signalCounts3s / (2.0 * std::sqrt(signalCounts3s + bkgCounts3s)));
-            const double dBdSig = -(signalCounts3s / (2.0 * std::sqrt(signalCounts3s + bkgCounts3s)));
-            significanceErr = std::sqrt(std::pow(dSdSig * signalCounts3sErr, 2) + std::pow(dBdSig * bkgCounts3sErr, 2));
-        }
-        const int nDataFloatParams = ((bkgFunc == "pol1") ? 2 : (bkgFunc == "expo") ? 2 : 3) + ((sigFunc == "gauss") ? 2 : 6);
-        const int ndfData = std::max(1, 40 - nDataFloatParams); // 40 bins used in frame below
-        double chi2OverNdfData = 0.0;
-        
-
-        std::unique_ptr<RooPlot> frame;
-        std::unique_ptr<RooPlot> frameMc;
-        std::shared_ptr<RooRealVar> massHolder = std::make_shared<RooRealVar>(mass); // keep axis alive with frames
-        //MC
-        frameMc.reset(massHolder->frame(80));
-        mc.plotOn(frameMc.get(), RooFit::Name("mc"));
-        signalPdfMc->plotOn(frameMc.get(), RooFit::LineColor(kRed), RooFit::LineStyle(kDashed), RooFit::Name("sig_fit_mc"));
-        chi2OverNdfMc = frameMc->chiSquare("sig_fit_mc", "mc", nMcFloatParams);
-        auto textMC = std::make_unique<TPaveText>(0.6, 0.43, 0.9, 0.85, "NDC");
-        textMC->SetBorderSize(0);
-        textMC->SetFillStyle(0);
-        textMC->SetTextAlign(12);
-        textMC->AddText(Form("MC Fit Parameters:"));
-        textMC->AddText(Form(" #mu = %.3f #pm %.3f MeV/c^{2}", muMcVal * 1e3, muErrMc * 1e3));
-        textMC->AddText(Form(" #sigma = %.3f #pm %.3f MeV/c^{2}", sigmaMc * 1e3, sigmaErrMc * 1e3));
-        if (sigFunc != "gauss") {
-            textMC->AddText(Form(" #alpha_{l} = %.3f #pm %.3f", a1Mc, a1ErrMc));
-            textMC->AddText(Form(" n_{l} = %.3f #pm %.3f", n1Mc, n1ErrMc));
-            textMC->AddText(Form(" #alpha_{r} = %.3f #pm %.3f", a2Mc, a2ErrMc));
-            textMC->AddText(Form(" n_{r} = %.3f #pm %.3f", n2Mc, n2ErrMc));
-        }
-        textMC->AddText(Form(" #chi^{2}/NDF = %.2f / %d", chi2OverNdfMc , ndfMc));
-        frameMc->addObject(textMC.release());
-        //Data
-        frame.reset(massHolder->frame(40));
-        data.plotOn(frame.get(), RooFit::Name("data"));
-        model.plotOn(frame.get(), RooFit::Name("total"));
-        model.plotOn(frame.get(), RooFit::Components(*bkg), RooFit::LineStyle(kDashed), RooFit::LineColor(kRed + 1), RooFit::Name("bkg"));
-        model.plotOn(frame.get(), RooFit::Components(*signalPdf), RooFit::LineStyle(kDotted), RooFit::LineColor(kGreen + 2), RooFit::Name("sig"));
-        chi2OverNdfData = frame->chiSquare("total", "data", nDataFloatParams);
-        auto textData = std::make_unique<TPaveText>(0.58,0.36,0.88,0.88, "NDC");
-        textData->SetBorderSize(0);
-        textData->SetFillStyle(0);
-        textData->SetTextAlign(12);
-        textData->AddText(Form("Data Fit Parameters:"));
-        textData->AddText(Form(" S (3#sigma) = %.1f #pm %.1f", signalCounts3s, signalCounts3sErr));
-        textData->AddText(Form(" B (3#sigma) = %.1f #pm %.1f", bkgCounts3s, bkgCounts3sErr));
-        if (vaildSignificance) {
-            textData->AddText(Form(" S/#sqrt{S+B} (3#sigma) = %.2f #pm %.2f", significance, significanceErr));
-        } else {
-            textData->AddText(" Significance = N/A");
-        }
-        textData->AddText(Form(" #mu = %.3f #pm %.3f MeV/c^{2}", muData * 1e3, muErrData * 1e3));
-        textData->AddText(Form(" #sigma = %.3f #pm %.3f MeV/c^{2}", sigmaData * 1e3, sigmaErrData * 1e3));
-        textData->AddText(Form(" #chi^{2}/NDF = %.2f / %d", chi2OverNdfData , ndfData));
-        frame->addObject(textData.release());
-
-        FitResult out;
-        out.signal = signalValue;
-        out.signalErr = signalValueErr;
-        out.significance = significance;
-        out.significanceErr = significanceErr;
-        out.chi2Data = chi2OverNdfData;
-        out.chi2Mc = chi2OverNdfMc;
-        out.ndfData = ndfData;
-        out.ndfMc = ndfMc;
-        out.frame = std::move(frame);
-        out.frameMc = std::move(frameMc);
-        out.massAxis = std::move(massHolder);
-        delete bkg;
-        delete signalPdf;
-        delete signalPdfMc;
-        return out;
     }
 
     Config cfg_;

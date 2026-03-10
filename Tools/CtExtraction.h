@@ -136,8 +136,8 @@ private:
     std::map<BinKey, WorkingPoint> fWorkingPoints;
     std::map<BinKey, double> fUserOverrides;
 
-    // Acceptance cache per pt-bin (ownership via unique_ptr)
-    std::vector<std::unique_ptr<TH1D>> fAcceptancePerPt;
+    // Acceptance cache per pt-bin (owned raw pointers, cleaned in destructor)
+    std::vector<TH1D*> fAcceptancePerPt;
 
     // Output file handle (created in Run)
     std::unique_ptr<TFile> fOutputFile;

@@ -10,9 +10,13 @@
 #include <thread>
 #include <vector>
 #include <cmath>
+#include <memory>
+#include <tuple>
+#include <stdexcept>
 #include <TRandom.h>
 #include <ROOT/RDataFrame.hxx>
 #include <algorithm>
+#include <nlohmann/json.hpp>
 
 #include "TCanvas.h"
 #include "TStyle.h"
@@ -28,7 +32,67 @@
 #include "TDirectory.h"
 #include "TTree.h"
 
+#include <RooAbsPdf.h>
+#include <RooAbsReal.h>
+#include <RooAddPdf.h>
+#include <RooArgList.h>
+#include <RooArgSet.h>
+#include <RooChebychev.h>
+#include <RooCrystalBall.h>
+#include <RooDataSet.h>
+#include <RooExponential.h>
+#include <RooFit.h>
+#include <RooGaussian.h>
+#include <RooPlot.h>
+#include <RooRealVar.h>
+
+#include "TPaveText.h"
+
 namespace GeneralHelper {
+using Json = nlohmann::json;
+
+inline Json LoadJsonFile(const std::string &path) {
+    std::ifstream ifs(path);
+    if (!ifs.is_open()) {
+        throw std::runtime_error("Cannot open JSON file: " + path);
+    }
+    Json j;
+    ifs >> j;
+    return j;
+}
+
+inline void SaveJsonFile(const std::string &path, const Json &j, int indent = 2) {
+    std::filesystem::path p(path);
+    if (p.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(p.parent_path(), ec);
+    }
+    std::ofstream ofs(path);
+    if (!ofs.is_open()) {
+        throw std::runtime_error("Cannot write JSON file: " + path);
+    }
+    ofs << j.dump(indent) << "\n";
+}
+
+inline void MergeJson(Json &base, const Json &override) {
+    if (!override.is_object()) {
+        base = override;
+        return;
+    }
+    if (!base.is_object()) {
+        base = Json::object();
+    }
+    for (auto it = override.begin(); it != override.end(); ++it) {
+        const auto &key = it.key();
+        const auto &val = it.value();
+        if (base.contains(key) && base[key].is_object() && val.is_object()) {
+            MergeJson(base[key], val);
+        } else {
+            base[key] = val;
+        }
+    }
+}
+
 // open EnableImplicitMT with preferred number of threads
 inline void EnableImplicitMTWithPreferredThreads() {
   unsigned int preferred = std::thread::hardware_concurrency();
@@ -396,12 +460,251 @@ inline bool SaveCanvas(TCanvas* c, const std::string& filename) {
     return true;
 }
 
+struct MassFitConfig {
+    double massMin{2.96};
+    double massMax{3.04};
+    std::vector<double> sigmaRangeMcToData{1.0, 1.5};
+};
+
+struct MassFitResult {
+    double signal{0.0};
+    double signalErr{0.0};
+    double significance{0.0};
+    double significanceErr{0.0};
+    double meanData{0.0};
+    double meanDataErr{0.0};
+    double sigmaData{0.0};
+    double sigmaDataErr{0.0};
+    double sigmaMc{0.0};
+    double sigmaMcErr{0.0};
+    double chi2Data{0.0};
+    double chi2Mc{0.0};
+    int ndfData{0};
+    int ndfMc{0};
+    std::unique_ptr<RooPlot> frame;
+    std::unique_ptr<RooPlot> frameMc;
+    std::shared_ptr<RooRealVar> massAxis;
+};
+
+inline std::string NormalizeSignalFunc(std::string sig) {
+    for (auto &c : sig) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (sig == "gaus") sig = "gauss";
+    return sig;
+}
+
+inline MassFitResult FitMassSpectrum(const std::vector<double> &dataMass,
+                                     const std::vector<double> &mcMass,
+                                     const MassFitConfig &cfg,
+                                     const std::string &bkgFuncRaw,
+                                     const std::string &sigFuncRaw) {
+    const std::string sigFunc = NormalizeSignalFunc(sigFuncRaw);
+    const std::string bkgFunc = bkgFuncRaw;
+
+    const double sigmaScaleMin = cfg.sigmaRangeMcToData.empty() ? 1.0 : cfg.sigmaRangeMcToData.front();
+    const double sigmaScaleMax = cfg.sigmaRangeMcToData.size() < 2 ? 1.5 : cfg.sigmaRangeMcToData[1];
+
+    RooRealVar mass("m", "Mass(H3l)", cfg.massMin, cfg.massMax, "GeV/c^{2}");
+    RooDataSet data("data", "data", RooArgSet(mass));
+    int dataCounts = 0;
+    for (double v : dataMass) {
+        if (v < cfg.massMin || v > cfg.massMax) continue;
+        mass.setVal(v);
+        data.add(RooArgSet(mass));
+        ++dataCounts;
+    }
+
+    RooDataSet mc("mc", "mc", RooArgSet(mass));
+    for (double v : mcMass) {
+        if (v < cfg.massMin || v > cfg.massMax) continue;
+        mass.setVal(v);
+        mc.add(RooArgSet(mass));
+    }
+
+    RooRealVar muMc("muMc", "muMc", 2.991, 2.97, 3.01);
+    RooRealVar sigmaMcVar("sigmaMc", "sigmaMc", 1.5e-3, 1.1e-3, 2.1e-3);
+    RooRealVar a1McVar("a1Mc", "a1Mc", 1.5, 0.1, 10.0);
+    RooRealVar a2McVar("a2Mc", "a2Mc", 1.5, 0.1, 10.0);
+    RooRealVar n1McVar("n1Mc", "n1Mc", 5.0, 0.5, 30.0);
+    RooRealVar n2McVar("n2Mc", "n2Mc", 5.0, 0.5, 30.0);
+    RooAbsPdf *signalPdfMc = nullptr;
+    if (sigFunc == "gauss") {
+        signalPdfMc = new RooGaussian("sigMc", "sigMc", mass, muMc, sigmaMcVar);
+    } else {
+        signalPdfMc = new RooCrystalBall("sigMc", "sigMc", mass, muMc, sigmaMcVar, a1McVar, n1McVar, a2McVar, n2McVar);
+    }
+
+    signalPdfMc->fitTo(mc, RooFit::Range(2.97, 3.01), RooFit::Save(true), RooFit::PrintLevel(-1));
+    if (sigFunc != "gauss") {
+        a1McVar.setConstant(); a2McVar.setConstant(); n1McVar.setConstant(); n2McVar.setConstant();
+    }
+    const double sigmaMc = sigmaMcVar.getVal();
+    const double sigmaErrMc = sigmaMcVar.getError();
+    const double muMcVal = muMc.getVal();
+    const double muErrMc = muMc.getError();
+    double a1Mc = 0.0, a1ErrMc = 0.0, n1Mc = 0.0, n1ErrMc = 0.0, a2Mc = 0.0, a2ErrMc = 0.0, n2Mc = 0.0, n2ErrMc = 0.0;
+    if (sigFunc != "gauss") {
+        a1Mc = a1McVar.getVal();
+        a1ErrMc = a1McVar.getError();
+        n1Mc = n1McVar.getVal();
+        n1ErrMc = n1McVar.getError();
+        a2Mc = a2McVar.getVal();
+        a2ErrMc = a2McVar.getError();
+        n2Mc = n2McVar.getVal();
+        n2ErrMc = n2McVar.getError();
+    }
+    const int nMcFloatParams = ((sigFunc == "gauss") ? 2 : 6);
+    const int ndfMc = std::max(1, 80 - nMcFloatParams);
+    double chi2OverNdfMc = 0.0;
+
+    RooRealVar mu("mu", "mu", 2.991, 2.985, 2.992);
+    RooRealVar sigma("sigma", "sigma", sigmaMc, 1.1e-3, 3e-3);
+    RooAbsPdf *signalPdf = nullptr;
+    if (sigFunc == "gauss") {
+        signalPdf = new RooGaussian("sig", "sig", mass, mu, sigma);
+    } else {
+        signalPdf = new RooCrystalBall("sig", "sig", mass, mu, sigma, a1McVar, n1McVar, a2McVar, n2McVar);
+    }
+    sigma.setRange(sigmaScaleMin * sigmaMc, sigmaScaleMax * sigmaMc);
+
+    RooAbsPdf *bkg = nullptr;
+    RooRealVar c0("c0", "c0", 0.0, -0.8, 0.8);
+    RooRealVar c1("c1", "c1", 0.0, -0.8, 0.8);
+    if (bkgFunc == "pol1") {
+        bkg = new RooChebychev("bkg", "bkg", mass, RooArgList(c0));
+    } else if (bkgFunc == "expo") {
+        bkg = new RooExponential("bkg", "bkg", mass, c0);
+    } else {
+        bkg = new RooChebychev("bkg", "bkg", mass, RooArgList(c0, c1));
+    }
+
+    const double nSigInit = std::max(1.0, 0.7 * static_cast<double>(dataCounts));
+    const double nSigMax = std::max(150.0, 3.0 * static_cast<double>(dataCounts));
+    const double nBkgInit = std::max(1.0, 0.3 * static_cast<double>(dataCounts));
+    const double nBkgMax = std::max(50.0, 1.0 * static_cast<double>(dataCounts));
+    RooRealVar nSig("nSig", "nSig", nSigInit, 0.0, nSigMax);
+    RooRealVar nBkg("nBkg", "nBkg", nBkgInit, 0.0, nBkgMax);
+    RooAddPdf model("model", "total_pdf", RooArgList(*signalPdf, *bkg), RooArgList(nSig, nBkg));
+    model.fitTo(data, RooFit::Extended(true), RooFit::Save(true), RooFit::PrintLevel(-1));
+
+    const double muData = mu.getVal();
+    const double muErrData = mu.getError();
+    const double sigmaData = sigma.getVal();
+    const double sigmaErrData = sigma.getError();
+
+    const double windowMin = muData - 3.0 * sigmaData;
+    const double windowMax = muData + 3.0 * sigmaData;
+    mass.setRange("sigWindow", windowMin, windowMax);
+    std::unique_ptr<RooAbsReal> sigIntegral(signalPdf->createIntegral(mass, RooFit::NormSet(mass), RooFit::Range("sigWindow")));
+    std::unique_ptr<RooAbsReal> bkgIntegral(bkg->createIntegral(mass, RooFit::NormSet(mass), RooFit::Range("sigWindow")));
+    const double sigFrac = sigIntegral ? sigIntegral->getVal() : 0.0;
+    const double bkgFrac = bkgIntegral ? bkgIntegral->getVal() : 0.0;
+    const double signalValue = nSig.getVal();
+    const double signalValueErr = nSig.getError();
+    const double signalCounts3s = signalValue * sigFrac;
+    const double signalCounts3sErr = signalValueErr * sigFrac;
+    const double bkgCounts3s = nBkg.getVal() * bkgFrac;
+    const double bkgCounts3sErr = nBkg.getError() * bkgFrac;
+
+    double significance = 0.0;
+    double significanceErr = 0.0;
+    bool validSignificance = bkgCounts3s + signalCounts3s > 0.0;
+    if (validSignificance) {
+        significance = signalCounts3s / std::sqrt(signalCounts3s + bkgCounts3s);
+        const double dSdSig = std::sqrt(signalCounts3s + bkgCounts3s) - (signalCounts3s / (2.0 * std::sqrt(signalCounts3s + bkgCounts3s)));
+        const double dBdSig = -(signalCounts3s / (2.0 * std::sqrt(signalCounts3s + bkgCounts3s)));
+        significanceErr = std::sqrt(std::pow(dSdSig * signalCounts3sErr, 2) + std::pow(dBdSig * bkgCounts3sErr, 2));
+    }
+
+    const int nDataFloatParams = ((bkgFunc == "pol1") ? 2 : (bkgFunc == "expo") ? 2 : 3) + ((sigFunc == "gauss") ? 2 : 6);
+    const int ndfData = std::max(1, 40 - nDataFloatParams);
+    double chi2OverNdfData = 0.0;
+
+    std::unique_ptr<RooPlot> frame;
+    std::unique_ptr<RooPlot> frameMc;
+    std::shared_ptr<RooRealVar> massHolder = std::make_shared<RooRealVar>(mass);
+
+    frameMc.reset(massHolder->frame(80));
+    mc.plotOn(frameMc.get(), RooFit::Name("mc"));
+    signalPdfMc->plotOn(frameMc.get(), RooFit::LineColor(kRed), RooFit::LineStyle(kDashed), RooFit::Name("sig_fit_mc"));
+    chi2OverNdfMc = frameMc->chiSquare("sig_fit_mc", "mc", nMcFloatParams);
+    auto textMC = std::make_unique<TPaveText>(0.6, 0.43, 0.9, 0.85, "NDC");
+    textMC->SetBorderSize(0);
+    textMC->SetFillStyle(0);
+    textMC->SetTextAlign(12);
+    textMC->AddText(Form("MC Fit Parameters:"));
+    textMC->AddText(Form(" #mu = %.3f #pm %.3f MeV/c^{2}", muMcVal * 1e3, muErrMc * 1e3));
+    textMC->AddText(Form(" #sigma = %.3f #pm %.3f MeV/c^{2}", sigmaMc * 1e3, sigmaErrMc * 1e3));
+    if (sigFunc != "gauss") {
+        textMC->AddText(Form(" #alpha_{l} = %.3f #pm %.3f", a1Mc, a1ErrMc));
+        textMC->AddText(Form(" n_{l} = %.3f #pm %.3f", n1Mc, n1ErrMc));
+        textMC->AddText(Form(" #alpha_{r} = %.3f #pm %.3f", a2Mc, a2ErrMc));
+        textMC->AddText(Form(" n_{r} = %.3f #pm %.3f", n2Mc, n2ErrMc));
+    }
+    textMC->AddText(Form(" #chi^{2}/NDF = %.2f / %d", chi2OverNdfMc , ndfMc));
+    frameMc->addObject(textMC.release());
+
+    frame.reset(massHolder->frame(40));
+    data.plotOn(frame.get(), RooFit::Name("data"));
+    model.plotOn(frame.get(), RooFit::Name("total"));
+    model.plotOn(frame.get(), RooFit::Components(*bkg), RooFit::LineStyle(kDashed), RooFit::LineColor(kRed + 1), RooFit::Name("bkg"));
+    model.plotOn(frame.get(), RooFit::Components(*signalPdf), RooFit::LineStyle(kDotted), RooFit::LineColor(kGreen + 2), RooFit::Name("sig"));
+    chi2OverNdfData = frame->chiSquare("total", "data", nDataFloatParams);
+    auto textData = std::make_unique<TPaveText>(0.58,0.36,0.88,0.88, "NDC");
+    textData->SetBorderSize(0);
+    textData->SetFillStyle(0);
+    textData->SetTextAlign(12);
+    textData->AddText(Form("Data Fit Parameters:"));
+    textData->AddText(Form(" S (3#sigma) = %.1f #pm %.1f", signalCounts3s, signalCounts3sErr));
+    textData->AddText(Form(" B (3#sigma) = %.1f #pm %.1f", bkgCounts3s, bkgCounts3sErr));
+    if (validSignificance) {
+        textData->AddText(Form(" S/#sqrt{S+B} (3#sigma) = %.2f #pm %.2f", significance, significanceErr));
+    } else {
+        textData->AddText(" Significance = N/A");
+    }
+    textData->AddText(Form(" #mu = %.3f #pm %.3f MeV/c^{2}", muData * 1e3, muErrData * 1e3));
+    textData->AddText(Form(" #sigma = %.3f #pm %.3f MeV/c^{2}", sigmaData * 1e3, sigmaErrData * 1e3));
+    textData->AddText(Form(" #chi^{2}/NDF = %.2f / %d", chi2OverNdfData , ndfData));
+    frame->addObject(textData.release());
+
+    MassFitResult out;
+    out.signal = signalValue;
+    out.signalErr = signalValueErr;
+    out.significance = significance;
+    out.significanceErr = significanceErr;
+    out.meanData = muData;
+    out.meanDataErr = muErrData;
+    out.sigmaData = sigmaData;
+    out.sigmaDataErr = sigmaErrData;
+    out.sigmaMc = sigmaMc;
+    out.sigmaMcErr = sigmaErrMc;
+    out.chi2Data = chi2OverNdfData;
+    out.chi2Mc = chi2OverNdfMc;
+    out.ndfData = ndfData;
+    out.ndfMc = ndfMc;
+    out.frame = std::move(frame);
+    out.frameMc = std::move(frameMc);
+    out.massAxis = std::move(massHolder);
+
+    delete bkg;
+    delete signalPdf;
+    delete signalPdfMc;
+    return out;
+}
+
 struct WorkingPointResult {
     double score = 0.0;
     double eff = 0.0;
     double significance = 0.0;
     bool found = false;
 };
+
+inline bool IsWpBinSet(double minv, double maxv, double eps = 1e-6) {
+    return (std::abs(minv - (-1.0)) >= eps) && (std::abs(maxv - (-1.0)) >= eps);
+}
+
+inline bool MatchEdge(double a, double b, double eps = 1e-6) {
+    return std::abs(a - b) < eps;
+}
 
 // Simple parser: turn a whitespace separated numeric line into a vector<double>
 inline std::vector<double> ParseNumbers(const std::string &line) {
@@ -414,34 +717,145 @@ inline std::vector<double> ParseNumbers(const std::string &line) {
     return vals;
 }
 
+// Unified WP lookup.
+// Supports layouts:
+//  (1) cenMin cenMax ptMin ptMax ctMin ctMax score eff sig        (>=9)
+//  (2) cenMin cenMax ptMin ptMax score eff sig                     (>=7)
+//  (3) ptMin ptMax ctMin ctMax score eff sig                       (>=7)
+//  (4) ptMin ptMax ctMin ctMax score eff                           (>=6)
+//  (5) ptMin ptMax score eff [sig]                                 (>=4)
+//  (6) ctMin ctMax score eff [sig]                                 (>=4)
+// Sentinel -1 -1 is treated as wildcard for centrality in file/query.
+inline WorkingPointResult GetWp(const std::string &wpFile,
+                                double cenMin = -1.0, double cenMax = -1.0,
+                                double ptMin = -1.0, double ptMax = -1.0,
+                                double ctMin = -1.0, double ctMax = -1.0) {
+    std::ifstream in(wpFile);
+    if (!in.is_open()) {
+        std::cerr << "[GetWp] Cannot open WP file: " << wpFile << "\n";
+        return {};
+    }
+
+    WorkingPointResult res;
+    const double eps = 1e-6;
+    const bool needCen = IsWpBinSet(cenMin, cenMax, eps);
+    const bool needPt = IsWpBinSet(ptMin, ptMax, eps);
+    const bool needCt = IsWpBinSet(ctMin, ctMax, eps);
+
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        const auto vals = ParseNumbers(line);
+        if (vals.size() < 4) continue;
+
+        auto fillResult = [&](int iScore, int iEff, int iSig) {
+            res.score = (iScore >= 0 && iScore < static_cast<int>(vals.size())) ? vals[iScore] : 0.0;
+            res.eff = (iEff >= 0 && iEff < static_cast<int>(vals.size())) ? vals[iEff] : 0.0;
+            res.significance = (iSig >= 0 && iSig < static_cast<int>(vals.size())) ? vals[iSig] : 0.0;
+            res.found = true;
+        };
+
+        // (1) full: cen+pt+ct + score/eff/sig
+        if (vals.size() >= 9) {
+            const double cCenMin = vals[0], cCenMax = vals[1];
+            const double cPtMin  = vals[2], cPtMax  = vals[3];
+            const double cCtMin  = vals[4], cCtMax  = vals[5];
+
+            const bool cenMatch = !needCen ||
+                                  ((MatchEdge(cCenMin, -1.0, eps) && MatchEdge(cCenMax, -1.0, eps)) ||
+                                   (MatchEdge(cenMin, -1.0, eps) && MatchEdge(cenMax, -1.0, eps)) ||
+                                   (MatchEdge(cCenMin, cenMin, eps) && MatchEdge(cCenMax, cenMax, eps)));
+            const bool ptMatch = !needPt || (MatchEdge(cPtMin, ptMin, eps) && MatchEdge(cPtMax, ptMax, eps));
+            const bool ctMatch = !needCt || (MatchEdge(cCtMin, ctMin, eps) && MatchEdge(cCtMax, ctMax, eps));
+            if (cenMatch && ptMatch && ctMatch) {
+                fillResult(6, 7, 8);
+                break;
+            }
+            continue;
+        }
+
+        // (2)/(3): 4 edges + score/eff/sig
+        if (vals.size() >= 7) {
+            const double a0 = vals[0], a1 = vals[1], a2 = vals[2], a3 = vals[3];
+
+            // prefer cen+pt if query asks for cen+pt only
+            if (needCen && needPt && !needCt) {
+                if (MatchEdge(a0, cenMin, eps) && MatchEdge(a1, cenMax, eps) &&
+                    MatchEdge(a2, ptMin, eps)  && MatchEdge(a3, ptMax, eps)) {
+                    fillResult(4, 5, 6);
+                    break;
+                }
+            }
+
+            // prefer pt+ct if query asks for pt+ct
+            if (needPt && needCt) {
+                if (MatchEdge(a0, ptMin, eps) && MatchEdge(a1, ptMax, eps) &&
+                    MatchEdge(a2, ctMin, eps) && MatchEdge(a3, ctMax, eps)) {
+                    fillResult(4, 5, 6);
+                    break;
+                }
+            }
+
+            // fallback for pt single / ct single:
+            // - pt single may come from [pt ct ...] (a0,a1) or [cen pt ...] (a2,a3)
+            // - ct single may come from [pt ct ...] (a2,a3) or [ct ...] (a0,a1)
+            if (needPt && !needCt && !needCen) {
+                if ((MatchEdge(a0, ptMin, eps) && MatchEdge(a1, ptMax, eps)) ||
+                    (MatchEdge(a2, ptMin, eps) && MatchEdge(a3, ptMax, eps))) {
+                    fillResult(4, 5, 6);
+                    break;
+                }
+            }
+            if (needCt && !needPt && !needCen) {
+                if ((MatchEdge(a2, ctMin, eps) && MatchEdge(a3, ctMax, eps)) ||
+                    (MatchEdge(a0, ctMin, eps) && MatchEdge(a1, ctMax, eps))) {
+                    fillResult(4, 5, 6);
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // (4): 4 edges + score/eff (no significance)
+        if (vals.size() >= 6) {
+            const double a0 = vals[0], a1 = vals[1], a2 = vals[2], a3 = vals[3];
+            if (needPt && needCt && MatchEdge(a0, ptMin, eps) && MatchEdge(a1, ptMax, eps) &&
+                MatchEdge(a2, ctMin, eps) && MatchEdge(a3, ctMax, eps)) {
+                fillResult(4, 5, -1);
+                break;
+            }
+            if (needCen && needPt && !needCt &&
+                MatchEdge(a0, cenMin, eps) && MatchEdge(a1, cenMax, eps) &&
+                MatchEdge(a2, ptMin, eps) && MatchEdge(a3, ptMax, eps)) {
+                fillResult(4, 5, -1);
+                break;
+            }
+            continue;
+        }
+
+        // (5)/(6): single-dimension bins
+        if (vals.size() >= 4) {
+            const double a0 = vals[0], a1 = vals[1];
+            const int iSig = (vals.size() >= 5) ? 4 : -1;
+            if (needPt && !needCt && !needCen && MatchEdge(a0, ptMin, eps) && MatchEdge(a1, ptMax, eps)) {
+                fillResult(2, 3, iSig);
+                break;
+            }
+            if (needCt && !needPt && !needCen && MatchEdge(a0, ctMin, eps) && MatchEdge(a1, ctMax, eps)) {
+                fillResult(2, 3, iSig);
+                break;
+            }
+        }
+    }
+    return res;
+}
+
 // Look up WP by centrality and pT bin in a file shaped like WorkingPoint_Spectrum*.txt
 // Columns: cenMin cenMax ptMin ptMax best_score best_eff max_significance
 inline WorkingPointResult GetWpForCenPt(const std::string &wpFile,
                                         double cenMin, double cenMax,
                                         double ptMin, double ptMax) {
-    std::ifstream in(wpFile);
-    if (!in.is_open()) {
-        std::cerr << "[GetWpForCenPt] Cannot open WP file: " << wpFile << "\n";
-        return {};
-    }
-    WorkingPointResult res;
-    const double eps = 1e-6;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        auto vals = ParseNumbers(line);
-        if (vals.size() < 7) continue;
-        double cmin = vals[0], cmax = vals[1], pmin = vals[2], pmax = vals[3];
-        if (std::abs(cmin - cenMin) < eps && std::abs(cmax - cenMax) < eps &&
-            std::abs(pmin - ptMin) < eps && std::abs(pmax - ptMax) < eps) {
-            res.score = vals[4];
-            res.eff = vals[5];
-            res.significance = vals[6];
-            res.found = true;
-            break;
-        }
-    }
-    return res;
+    return GetWp(wpFile, cenMin, cenMax, ptMin, ptMax, -1.0, -1.0);
 }
 
 // Look up WP by pT/ct bin (optionally centrality) in a file like WorkingPoint_Crosssection*.txt
@@ -452,45 +866,19 @@ inline WorkingPointResult GetWpForPtCt(const std::string &wpFile,
                                        double ptMin, double ptMax,
                                        double ctMin, double ctMax,
                                        double cenMin = -1.0, double cenMax = -1.0) {
-    std::ifstream in(wpFile);
-    if (!in.is_open()) {
-        std::cerr << "[GetWpForPtCt] Cannot open WP file: " << wpFile << "\n";
-        return {};
-    }
-    WorkingPointResult res;
-    const double eps = 1e-6;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        auto vals = ParseNumbers(line);
-        if (vals.size() == 7) {
-            double pmin = vals[0], pmax = vals[1], cmin = vals[2], cmax = vals[3];
-            if (std::abs(pmin - ptMin) < eps && std::abs(pmax - ptMax) < eps &&
-                std::abs(cmin - ctMin) < eps && std::abs(cmax - ctMax) < eps) {
-                res.score = vals[4];
-                res.eff = vals[5];
-                res.significance = vals[6];
-                res.found = true;
-                break;
-            }
-        } else if (vals.size() == 9) {
-            double cCenMin = vals[0], cCenMax = vals[1];
-            double pmin = vals[2], pmax = vals[3], cmin = vals[4], cmax = vals[5];
-            bool cenMatch = (std::abs(cenMin - (-1.0)) < eps && std::abs(cenMax - (-1.0)) < eps) ||
-                            (std::abs(cCenMin - (-1.0)) < eps && std::abs(cCenMax - (-1.0)) < eps) ||
-                            (std::abs(cCenMin - cenMin) < eps && std::abs(cCenMax - cenMax) < eps);
-            if (cenMatch &&
-                std::abs(pmin - ptMin) < eps && std::abs(pmax - ptMax) < eps &&
-                std::abs(cmin - ctMin) < eps && std::abs(cmax - ctMax) < eps) {
-                res.score = vals[6];
-                res.eff = vals[7];
-                res.significance = vals[8];
-                res.found = true;
-                break;
-            }
-        }
-    }
-    return res;
+    return GetWp(wpFile, cenMin, cenMax, ptMin, ptMax, ctMin, ctMax);
+}
+
+// Look up WP for ct-only bins (ctMin ctMax ...)
+inline WorkingPointResult GetWpForCtSingle(const std::string &wpFile,
+                                           double ctMin, double ctMax) {
+    return GetWp(wpFile, -1.0, -1.0, -1.0, -1.0, ctMin, ctMax);
+}
+
+// Look up WP for pt-only bins (ptMin ptMax ...)
+inline WorkingPointResult GetWpForPtSingle(const std::string &wpFile,
+                                           double ptMin, double ptMax) {
+    return GetWp(wpFile, -1.0, -1.0, ptMin, ptMax, -1.0, -1.0);
 }
 
 

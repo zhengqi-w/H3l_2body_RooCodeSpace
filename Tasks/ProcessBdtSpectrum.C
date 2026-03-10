@@ -330,7 +330,7 @@ std::shared_ptr<ROOT::RDataFrame> MakeSnapshotRdf(const std::string &path, const
     return std::make_shared<ROOT::RDataFrame>(tree, path);
 }
 
-std::vector<BinInput> BuildBins(const Config &cfg, const WPSummaryReader &wpReader,
+std::vector<BinInput> BuildBins(const Config &cfg,
                                 const std::pair<double, double> &cenRange,
                                 const std::vector<double> &ptEdges,
                                 const TH1D *hAcc, const TH1D *hAbso) {
@@ -346,7 +346,13 @@ std::vector<BinInput> BuildBins(const Config &cfg, const WPSummaryReader &wpRead
         bin.ptMax = ptEdges[i + 1];
         bin.dfData = MakeSnapshotRdf(dataPath, cfg.treeNameData);
         bin.dfMc = MakeSnapshotRdf(mcPath, cfg.treeNameMc);
-        bin.wp = wpReader.Lookup(key);
+        const auto wp = GeneralHelper::GetWpForCenPt(cfg.wpFile, cenRange.first, cenRange.second, ptEdges[i], ptEdges[i + 1]);
+        if (!wp.found) {
+            throw std::runtime_error("Working point not found for " + label);
+        }
+        bin.wp.score = wp.score;
+        bin.wp.efficiency = wp.eff;
+        bin.wp.significance = wp.significance;
         bin.acceptance = hAcc ? hAcc->GetBinContent(static_cast<int>(i + 1)) : 1.0;
         bin.absorption = hAbso ? hAbso->GetBinContent(static_cast<int>(i + 1)) : 1.0;
         bin.label = label;
@@ -510,9 +516,9 @@ std::string BuildScoreEffPath(const Config &cfg, const std::string &label) {
 
 } // namespace
 
-int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/configs/bdt_spectrum.json") {
+int ProcessBdtSpectrum(const char *cfgPath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/configs/bdt_spectrum.json") {
     if (!cfgPath) {
-        std::cerr << "Usage: root -l -b -q 'BdtSpectrumExtraction.C(\"config.json\")'\n";
+        std::cerr << "Usage: root -l -b -q 'ProcessBdtSpectrum.C(\"config.json\")'\n";
         return 1;
     }
 
@@ -530,7 +536,6 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
         std::filesystem::remove(mergedCsvPath, ec); // clear previous content if present
     }
 
-    WPSummaryReader wpReader(cfg.wpFile);
     SpectrumCalculator calculator(cfg);
 
     auto saveHistPdf = [](TH1 &h, const std::string &path, const std::string &opt = "HIST") {
@@ -553,7 +558,7 @@ int BdtSpectrumExtraction(const char *cfgPath = "/Users/zhengqingwang/alice/run3
         auto hAcc = BuildAcceptance(cfg, cenRange, ptEdges);
         auto hAbso = BuildAbsorption(cfg, cenRange, ptEdges);
         double nEvents = GetNEvents(cfg, cenRange);
-        auto bins = BuildBins(cfg, wpReader, cenRange, ptEdges, hAcc.get(), hAbso.get());
+        auto bins = BuildBins(cfg, cenRange, ptEdges, hAcc.get(), hAbso.get());
         if (bins.empty()) {
             std::cerr << "[Warn] No bins built for centrality " << cenRange.first << "-" << cenRange.second << std::endl;
             continue;
