@@ -51,8 +51,7 @@ Output layer:
 - `Tools/output/OutputWriter.h/.cxx`
 
 Compatibility wrappers (temporary):
-- `Tasks/ProcessBdtSpectrum.C` calls `ProcessAnalysis` with mode override.
-- Same for topology/ct/ct-single wrappers.
+- Removed in current implementation; `Tasks/ProcessAnalysis.C` is the only task entrypoint.
 
 ## 4. Unified Config Schema
 
@@ -67,7 +66,13 @@ Top-level sections:
 
 ### 4.1 common
 - shared paths/tree names/physics constants
-- reweight and absorption paths
+- absorption paths
+- `spectrum_mc_basic_path`: base directory containing centrality-reweighted MC files for spectrum-mode efficiency.
+
+Reweight policy update:
+- Runtime reweight TF1 usage is removed from the workflow/task layer.
+- Reweighting is treated as a preprocessing stage.
+- Analysis tasks read already reweighted MC inputs.
 
 ### 4.2 execution
 - `mode`: `spectrum | topology_spectrum | crosssection | ct_single`
@@ -79,7 +84,9 @@ Top-level sections:
   - unified dimensions (`cen`, `pt`, `ct`) with optional axes
   - policy controls axis usage by mode
 - `selection`
-  - base selection and optional topology selection arrays
+  - `additional_data_selection_general` (global addition)
+  - per-mode `additional_data_selection`
+  - optional topology selection arrays
 - `working_point`
   - source file and key mapping policy
 - `fit`
@@ -151,6 +158,26 @@ Shared caches:
 - optional pre-fetched vectors for repeated trails,
 - optional merged datasets for checks.
 
+### 6.1 MC Efficiency Input Policy (updated)
+
+- `spectrum` mode must use centrality-specific pre-reweighted MC files resolved from `common.path.spectrum_mc_basic_path`.
+- Engine picks MC input by centrality bin (for example `0_10`, `10_30`, `30_50`, `50_80`, `0_80` naming policy).
+- No in-task spectrum reweighting is applied.
+
+### 6.2 Selection Combination Rule (updated)
+
+For MC efficiency calculation, effective selection must include all of the following:
+- `common.selection.basic_selection_data_for_mc_eff`
+- `analysis.selection.additional_data_selection_general`
+- `analysis.binning.mode_profiles.<mode>.additional_data_selection`
+
+Logical combination:
+- `sel_eff_mc = basic_selection_data_for_mc_eff AND additional_data_selection_general AND mode.additional_data_selection`
+
+Notes:
+- Empty strings are ignored.
+- This rule is mandatory for all modes to keep efficiency definitions consistent.
+
 ## 7. Checks Requirements Integrated
 
 Checks are first-class and run from one checks engine.
@@ -184,6 +211,12 @@ Add configurable data source strategy:
 If snapshot does not include required variable:
 - fallback to rawdata path for that variable only,
 - mark provenance in check output metadata.
+
+Checks selection consistency rule:
+- In checks execution (snapshot or rawdata), use the same selection stack as the analysis path:
+  - `additional_data_selection_general`
+  - mode-specific `additional_data_selection`
+  - and, when relevant, bin-local topology selections.
 
 ### 7.3 MC candidate checks
 

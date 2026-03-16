@@ -93,7 +93,7 @@ static std::string make_desc(bool hasCen, bool hasPt, bool hasCt,
   return out;
 }
 
-void ProcessWP(const char *config_path = "../configs/config_WP.json"){
+void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json"){
   RooMsgService::instance().setGlobalKillBelow(RooFit::FATAL); // suppress RooFit messages
   gStyle->SetOptStat(0); // disable stats boxes on plots
   // read and parse config

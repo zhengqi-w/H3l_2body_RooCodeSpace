@@ -11,9 +11,6 @@ import hipe4ml.plot_utils as pu
 import matplotlib.pyplot as plt
 import xgboost as xgb
 
-import sys
-sys.path.append('/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/H3l_2body_spectrum/utils')
-import utils as utils
 import joblib
 from pathlib import Path
 import uproot
@@ -66,21 +63,22 @@ class BDTPreProcess:
         if isinstance(mix_mode_cfg, bool):
             mix_mode_cfg = 'pt-ct' if mix_mode_cfg else 'pt-ct-single'
         self.mix_mode = str(mix_mode_cfg).lower()
+        self._declare_its_helpers()
 
         # prepare ROOT chains and RDataFrames
         self.chian_data = ROOT.TChain(self.tree_name_data)
         self.chian_mc = ROOT.TChain(self.tree_name_mc)
         self.data_file = ROOT.TFile.Open(self.data_path)
         self.mc_file = ROOT.TFile.Open(self.mc_path)
-        self.data_rdf = utils.load_all_trees_to_chain(self.data_file, self.chian_data, self.tree_name_data)
-        self.mc_rdf = utils.load_all_trees_to_chain(self.mc_file, self.chian_mc, self.tree_name_mc)
-        self.data_rdf = utils.correct_and_convert_df(self.data_rdf, calibrate_he3_pt = False, isMC = False, isH4L = False)
-        self.mc_rdf = utils.correct_and_convert_df(self.mc_rdf, calibrate_he3_pt = False, isMC = True, isH4L = False)
+        self.data_rdf = self._load_all_trees_to_chain(self.data_file, self.chian_data, self.tree_name_data)
+        self.mc_rdf = self._load_all_trees_to_chain(self.mc_file, self.chian_mc, self.tree_name_mc)
+        self.data_rdf = self._correct_and_convert_df(self.data_rdf, calibrate_he3_pt=False, isMC=False, isH4L=False)
+        self.mc_rdf = self._correct_and_convert_df(self.mc_rdf, calibrate_he3_pt=False, isMC=True, isH4L=False)
         if self.basic_selection_data:
             self.data_rdf = self.data_rdf.Filter(self.basic_selection_data)
         spectrum_file = ROOT.TFile.Open("../../../H3l_2body_spectrum/utils/H3L_BwFit.root")
         he3_spectrum = spectrum_file.Get("BlastWave_H3L_10_30")
-        self.mc_rdf_reweighted = utils.reweight_pt_spectrum(self.mc_rdf, "fAbsGenPt", he3_spectrum, is_rdf = True)
+        self.mc_rdf_reweighted = self._reweight_pt_spectrum(self.mc_rdf, "fAbsGenPt", he3_spectrum)
 
         # mass preselections
         # self.data_rdf = self.data_rdf.Filter("(fMassH3L<2.95 || fMassH3L>3.02)")
@@ -94,6 +92,140 @@ class BDTPreProcess:
             self.mc_columns = self.training_variables + self.extra_vars_save_mc
         else:
             self.mc_columns = self.training_variables + ["fAbsGenPt", "fGenCt", "fMassH3L", "fIsMatter"]
+
+    @staticmethod
+    def _declare_its_helpers():
+        if hasattr(ROOT, 'CountITSHits') and hasattr(ROOT, 'AvgITSClusterSize'):
+            return
+        helper_path = Path(__file__).resolve().parents[1] / 'include' / 'its_helpers.cc'
+        if not helper_path.exists():
+            raise FileNotFoundError(f"Missing ITS helper source: {helper_path}")
+        with open(helper_path, 'r') as f:
+            ROOT.gInterpreter.Declare(f.read())
+
+    @staticmethod
+    def _load_all_trees_to_chain(file_handle, chain, treename='O2hypcands'):
+        if not file_handle or file_handle.IsZombie():
+            raise RuntimeError("Cannot open ROOT input file")
+
+        for key in file_handle.GetListOfKeys():
+            name_key = key.GetName()
+            if 'DF_' not in name_key:
+                continue
+            obj = key.ReadObj()
+            if not obj or not obj.InheritsFrom('TDirectory'):
+                continue
+            tree = obj.Get(treename)
+            if tree and tree.InheritsFrom('TTree'):
+                chain.Add(f"{file_handle.GetName()}/{name_key}/{treename}")
+        return ROOT.RDataFrame(chain)
+
+    @staticmethod
+    def _reweight_pt_spectrum(df, var, distribution):
+        dist_global_name = '__rw_pt_reweight'
+        distribution.SetName(dist_global_name)
+        try:
+            ROOT.gDirectory.Add(distribution)
+        except Exception:
+            pass
+
+        max_bw = float(distribution.GetMaximum())
+        if max_bw <= 0:
+            raise ValueError('The provided distribution has non-positive maximum.')
+
+        expr = (
+            '(((gRandom->Uniform()) > ((TF1*)gDirectory->Get("{name}"))->Eval({var})/{max_bw}) ? -1 : 1)'
+        ).format(name=dist_global_name, var=var, max_bw=max_bw)
+        return df.Define('rej', expr)
+
+    @staticmethod
+    def _cut_elements_to_same_range(handler1, handler2, element_names):
+        if isinstance(element_names, str):
+            element_names = [element_names]
+
+        df1 = handler1.get_data_frame()
+        df2 = handler2.get_data_frame()
+
+        for element_name in element_names:
+            cut_min = max(df1[element_name].min(), df2[element_name].min())
+            cut_max = min(df1[element_name].max(), df2[element_name].max())
+            df1 = df1[(df1[element_name] >= cut_min) & (df1[element_name] <= cut_max)]
+            df2 = df2[(df2[element_name] >= cut_min) & (df2[element_name] <= cut_max)]
+            print(f"Applied cut to {element_name}: range [{cut_min}, {cut_max}]")
+
+        handler1.set_data_frame(df1)
+        handler2.set_data_frame(df2)
+
+    @staticmethod
+    def _correct_and_convert_df(df, calibrate_he3_pt=False, isMC=False, isH4L=False):
+        if not isinstance(df, ROOT.RDataFrame):
+            raise TypeError('Only ROOT.RDataFrame input is supported in BDTPreProcess.')
+
+        coloumn_name = list(df.GetColumnNames())
+        print('Columns before correction:', coloumn_name)
+        if 'fFlags' in coloumn_name:
+            df = df.Define('fHePIDHypo', '(int)(fFlags >> 4)') \
+                   .Define('fPiPIDHypo', '(int)(fFlags & 0xF)')
+        if calibrate_he3_pt:
+            df = df.Define(
+                'fPtHe3',
+                '((fHePIDHypo==6) ? (fPtHe3 + (-0.1286 - 0.1269 * fPtHe3 + 0.06 * fPtHe3*fPtHe3)) '
+                ': (fPtHe3 + 2.98019e-02 + 7.66100e-01 * exp(-1.31641e+00 * fPtHe3))))'
+            )
+
+        df = df.Define('fPxHe3', 'fPtHe3 * cos(fPhiHe3)') \
+               .Define('fPyHe3', 'fPtHe3 * sin(fPhiHe3)') \
+               .Define('fPzHe3', 'fPtHe3 * sinh(fEtaHe3)') \
+               .Define('fPHe3', 'fPtHe3 * cosh(fEtaHe3)') \
+               .Define('fEnHe3', 'sqrt(fPHe3*fPHe3 + 2.8083916*2.8083916)') \
+               .Define('fEnHe4', 'sqrt(fPHe3*fPHe3 + 3.7273794*3.7273794)')
+        df = df.Define('fPxPi', 'fPtPi * cos(fPhiPi)') \
+               .Define('fPyPi', 'fPtPi * sin(fPhiPi)') \
+               .Define('fPzPi', 'fPtPi * sinh(fEtaPi)') \
+               .Define('fPPi', 'fPtPi * cosh(fEtaPi)') \
+               .Define('fEnPi', 'sqrt(fPPi*fPPi + 0.139570*0.139570)')
+        df = df.Define('fPx', 'fPxHe3 + fPxPi') \
+               .Define('fPy', 'fPyHe3 + fPyPi') \
+               .Define('fPz', 'fPzHe3 + fPzPi') \
+               .Define('fP', 'sqrt(fPx*fPx + fPy*fPy + fPz*fPz)') \
+               .Define('fEn', 'fEnHe3 + fEnPi') \
+               .Define('fEn4', 'fEnHe4 + fEnPi')
+        df = df.Define('fPt', 'sqrt(fPx*fPx + fPy*fPy)') \
+               .Define('fEta', 'acosh(fP / fPt)') \
+               .Define('fCosLambda', 'fPt / fP') \
+               .Define('fCosLambdaHe', 'fPtHe3 / fPHe3')
+        if not isH4L:
+            df = df.Define('fDecLen', 'sqrt(fXDecVtx*fXDecVtx + fYDecVtx*fYDecVtx + fZDecVtx*fZDecVtx)') \
+                   .Define('fCt', 'fDecLen * 2.99131 / fP')
+        else:
+            df = df.Define('fDecLen', 'sqrt(fXDecVtx*fXDecVtx + fYDecVtx*fYDecVtx + fZDecVtx*fZDecVtx)') \
+                   .Define('fCt', 'fDecLen * 3.922 / fP')
+        df = df.Define('fDecRad', 'sqrt(fXDecVtx*fXDecVtx + fYDecVtx*fYDecVtx)') \
+               .Define('fCosPA', '(fPx * fXDecVtx + fPy * fYDecVtx + fPz * fZDecVtx) / (fP * fDecLen)') \
+               .Define('fMassH3L', 'sqrt(fEn*fEn - fP*fP)') \
+               .Define('fMassH4L', 'sqrt(fEn4*fEn4 - fP*fP)') \
+               .Define('fTPCSignMomHe3', 'fTPCmomHe * (-1 + 2*fIsMatter)') \
+               .Define('fGloSignMomHe3', 'fPHe3 / 2. * (-1 + 2*fIsMatter)')
+        if isMC:
+            df = df.Define('fGenDecLen', 'sqrt(fGenXDecVtx*fGenXDecVtx + fGenYDecVtx*fGenYDecVtx + fGenZDecVtx*fGenZDecVtx)') \
+                   .Define('fGenPz', 'fGenPt * sinh(fGenEta)') \
+                   .Define('fGenP', 'sqrt(fGenPt*fGenPt + fGenPz*fGenPz)') \
+                   .Define('fAbsGenPt', 'abs(fGenPt)')
+            if not isH4L:
+                df = df.Define('fGenCt', 'fGenDecLen * 2.99131 / fGenP')
+            else:
+                df = df.Define('fGenCt', 'fGenDecLen * 3.922 / fGenP')
+
+        if 'fITSclusterSizesHe' in coloumn_name and 'fITSclusterSizesPi' in coloumn_name:
+            df = df.Define('fAvgClusterSizeHe', 'AvgITSClusterSize(fITSclusterSizesHe)') \
+                   .Define('nITSHitsHe', 'CountITSHits(fITSclusterSizesHe)') \
+                   .Define('fAvgClusterSizePi', 'AvgITSClusterSize(fITSclusterSizesPi)') \
+                   .Define('nITSHitsPi', 'CountITSHits(fITSclusterSizesPi)') \
+                   .Define('fAvgClSizeCosLambda', 'fAvgClusterSizeHe * fCosLambdaHe')
+
+        colounm_name_after = list(df.GetColumnNames())
+        print('Columns after correction:', colounm_name_after)
+        return df
 
     def _make_label(self, pt_range=None, ct_range=None, cen_range=None):
         parts = []
@@ -196,7 +328,7 @@ class BDTPreProcess:
         bin_data_hdl.set_data_frame(df_dataH)
 
         try:
-            utils.cut_elements_to_same_range(bin_mc_hdl, bin_data_hdl, self.training_variables)
+            self._cut_elements_to_same_range(bin_mc_hdl, bin_data_hdl, self.training_variables)
             if self.bkg_fraction_max is not None and len(bin_data_hdl) > self.bkg_fraction_max * len(bin_mc_hdl):
                 bin_data_hdl.shuffle_data_frame(size=int(self.bkg_fraction_max * len(bin_mc_hdl)), inplace=True, random_state=self.random_state)
         except Exception as e:

@@ -1,11 +1,10 @@
 # Unified Workflow (single-entry orchestration)
 
-This folder provides a single-entry workflow runner for the three main extraction tasks:
+This folder now runs analysis through one entry macro:
 
-- `bdt_spectrum` -> `Tasks/ProcessBdtSpectrum.C`
-- `topology_spectrum` -> `Tasks/ProcessTopologySpectrum.C`
-- `ct_extraction` -> `Tasks/ProcessCtSpectrum.C`
-- `ct_single` -> `Tasks/ProcessCtSingleSpectrum.C`
+- `Tasks/ProcessAnalysis.C`
+
+The engine executes new unified task code directly.
 
 ## Entry point
 
@@ -24,9 +23,10 @@ bash Workflow/run_workflow.sh configs/general_config.json
 Top-level config is `configs/general_config.json`.
 
 - `common`: global paths/tree names/physics parameters/shared options
-- `bdt_spectrum` / `topology_spectrum` / `ct_extraction` / `ct_single`: task sections
-- optional `workflow.order`: execution order override
-- optional `workflow.stop_on_error`: fail-fast switch
-- optional `workflow.generated_config_dir`: generated task-config output dir
+- `execution`: runtime mode/MT/stop-on-error
+- `analysis`: unified binning/selection/fit/correction/systematics
+- `checks`: check switches and variable list
+- `output`: output controls and compatibility switches
+- optional `workflow.order`: run a list of modes in one workflow call
 
-The orchestrator writes effective configs (for legacy task macros) to `Workflow/generated_configs/` and dispatches all tasks from the single general config.
+No task-level generated effective config indirection is required in the new execution path.

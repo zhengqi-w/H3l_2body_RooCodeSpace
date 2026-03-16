@@ -5,8 +5,14 @@
             "analysis_results_file": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/apass5/AnalysisResults_CustomV0s_HadronPID.root",
             "mc_file_for_acceptance": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/reweighted/AO2D_CustomV0s_0_80_reweighted.root",
             "mc_file_for_absorption": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/AbsorptionTrees/absorption_tree_x1.5.root",
-            "working_point_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/WorkingPoint",
-            "output_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs"
+            "score_efficiency_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/WorkingPoint",
+            "output_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs",
+            "spectrum_mc_files": [
+                "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/reweighted/AO2D_CustomV0s_0_10_reweighted.root",
+                "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/reweighted/AO2D_CustomV0s_10_30_reweighted.root",
+                "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/reweighted/AO2D_CustomV0s_30_50_reweighted.root",
+                "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/reweighted/AO2D_CustomV0s_50_80_reweighted.root"
+            ]
         },
         "tree_names": {
             "data": "O2hypcands",
@@ -15,7 +21,8 @@
         },
         "tags": {
             "collision_system": "Pb--Pb",
-            "collision_energy": "5.36 TeV",
+            "collision_energy": "#sqrt{#it{s_{NN}}} 5.36 TeV",
+            "use_performance": false,
             "performance_label": "ALICE Performance",
             "period": "LHC23_PbPb_pass5",
             "period_mark": "CustomV0s_HadronPID"
@@ -23,40 +30,42 @@
         "parameters": {
             "branching_ratio": 0.25,
             "delta_rap": 2.0,
+            "original_ctao_absorption": 7.6,
             "mass_min": 2.96,
-            "mass_max": 3.04
-        },
-        "others": {
-            "n_events_hist": "hyper-reco-task/hCentFT0C",
-            "enable_implicit_mt": true,
-            "basic_selection_data_for_mc_eff": "fTPCsignalPi<1000 && abs(fNSigmaHe)<5 && fCosPA>0.99 && fAvgClusterSizeHe > 5",
+            "mass_max": 3.04,
             "sigma_range_mc_to_data": [1.0, 1.5],
             "mass_nbins_mc": 80,
-            "mass_nbins_data": 50,
-            "signal_fit_func": "dscb",
-            "bkg_fit_func": "pol2"
+            "mass_nbins_data": 50
+        },
+        "selection": {
+            "basic_selection_data_for_mc_eff": "fTPCsignalPi<1000 && abs(fNSigmaHe)<5 && fCosPA>0.99 && fAvgClusterSizeHe > 5"
+        },
+        "event_hist": {
+            "n_events_hist": "hyper-reco-task/hCentFT0C"
         }
     },
-    "bdt_spectrum": {
-        "additional_data_selection": "",
-        "binnings": {
-            "cen_bins": [0, 10, 30, 50, 80],
-            "pt_bins_by_centrality": [
-              [2, 3, 3.5, 4, 4.5, 5, 6, 8],
-              [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
-              [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
-              [2, 2.5, 3, 3.5, 4, 5, 8] 
-            ]
-        },
-        "switches": {
+    "execution": {
+        "enable": true,
+        "mode": "ct_single",
+        "enable_implicit_mt": true,
+        "stop_on_error": true,
+        "do_systematics": false,
+        "save_results_to_pdf": true
+    },
+    "analysis": {
+        "selection": {
             "is_matter": "both",
-            "add_performance": false,
-            "do_QA_afterward": true,
-            "do_systematics": false
+            "additional_data_selection_general": "",
+            "add_performance": false
         },
+        "fit": {
+            "signal_fit_func": "dscb",
+            "bkg_fit_func": "pol2"
+        },
+        "correction": {},
         "systematics": {
             "random_seed": 40,
-            "syst_ntrails": 200,
+            "syst_ntrails": 50,
             "syst_thrashold_chi2ndf": 2.0,
             "syst_thrashold_significance": 2.5,
             "syst_bdt_score_npoints": 30,
@@ -85,94 +94,241 @@
                 "x4.5",
                 "x5.0"
             ]
+        },
+        "binning": {
+            "mode_profiles": {
+                "bdt_spectrum": {
+                    "dimensions": ["cen", "pt"],
+                    "cen_bins": [0, 10, 30, 50, 80],
+                    "pt_bins_by_centrality": [
+                        [2, 3, 3.5, 4, 4.5, 5, 6, 8],
+                        [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
+                        [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
+                        [2, 2.5, 3, 3.5, 4, 5, 8]
+                    ],
+                    "additional_data_selection": "",
+                    "wp_file": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/WorkingPoint/WorkingPoint_SpectrumTest.txt"
+                },
+                "topology_spectrum": {
+                    "dimensions": ["cen", "pt"],
+                    "cen_bins": [0, 10, 30, 50, 80],
+                    "pt_bins_by_centrality": [
+                        [2, 3, 3.5, 4, 4.5, 5, 6, 8],
+                        [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
+                        [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
+                        [2, 2.5, 3, 3.5, 4, 5, 8]
+                    ],
+                    "data_selection_topology": [
+                        [
+                            "fCosPA > 0.99997 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.9999 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.9997 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.9998 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.045",
+                            "fCosPA > 0.9999 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.9995 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.9992 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04"
+                        ],
+                        [
+                            "fCosPA > 0.99995 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.9997 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.9997 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.9997 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.9995 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.9995 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.9995 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.999 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
+                            "fCosPA > 0.999 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04"
+                        ],
+                        [
+                            "fCosPA > 0.9999 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.045",
+                            "fCosPA > 0.999 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.04",
+                            "fCosPA > 0.993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.04",
+                            "fCosPA > 0.993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
+                            "fCosPA > 0.993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
+                            "fCosPA > 0.993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
+                            "fCosPA > 0.993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
+                            "fCosPA > 0.995 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
+                            "fCosPA > 0.995 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025"
+                        ],
+                        [
+                            "fCosPA > 0.9999 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.035",
+                            "fCosPA > 0.9993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
+                            "fCosPA > 0.999 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
+                            "fCosPA > 0.995 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.02",
+                            "fCosPA > 0.995 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.02",
+                            "fCosPA > 0.992 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.01"
+                        ]
+                    ],
+                    "additional_data_selection": ""
+                },
+                "pt_ct": {
+                    "dimensions": ["pt", "ct"],
+                    "pt_bins": [2, 3, 4, 5.5, 8],
+                    "ct_bins_by_pt": [
+                        [1, 3, 6, 9, 12, 18, 30],
+                        [1, 3, 6, 9, 12, 18, 25],
+                        [1, 3, 6, 9, 15, 25],
+                        [1, 3, 6, 10, 23]
+                    ],
+                    "additional_data_selection": "",
+                    "centrality_selection": "fCentralityFT0C > 0 && fCentralityFT0C < 80",
+                    "add_absorption_correction": true,
+                    "wp_file": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/WorkingPoint/WorkingPoint_Crosssection_CustomV0s.txt"
+                },
+                "ct_single": {
+                    "dimensions": ["ct"],
+                    "ct_bins": [1, 2, 4, 6, 8, 10, 14, 18, 23, 35],
+                    "additional_data_selection": "",
+                    "centrality_selection": "fCentralityFT0C > 0 && fCentralityFT0C < 80",
+                    "wp_file": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/WorkingPoint/WorkingPoint_CtSingle.txt"
+                }
+            }
         }
     },
-    "topology_spectrum": {
-        "additional_data_selection": "",
-        "binnings": {
-            "cen_bins": [0, 10, 30, 50, 80],
-            "pt_bins_by_centrality": [
-              [2, 3, 3.5, 4, 4.5, 5, 6, 8],
-              [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
-              [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
-              [2, 2.5, 3, 3.5, 4, 5, 8] 
+    "checks": {
+        "enabled": true,
+        "save_pdf": true,
+        "general": {
+            "variables": [
+                "fCentralityFT0C",
+                "fNSigmaHe",
+                "fNTPCclusHe",
+                "fNTPCpidClusHe",
+                "fNTPCclusPi",
+                "fNTPCpidClusPi",
+                "fTPCChi2He",
+                "fTPCChi2Pi",
+                "fITSChi2He",
+                "fITSChi2Pi",
+                "fDcaV0Daug",
+                "fDcaHe",
+                "fDcaPi",
+                "fMassH3L",
+                "fPt",
+                "fEta",
+                "fCt",
+                "fCosPA",
+                "fDecRad",
+                "fDecLen",
+                "fAvgClusterSizeHe",
+                "fAvgClusterSizePi",
+                "fAbsGenPt",
+                "fGenCt",
+                "fGenDecRad",
+                "fGenDecLen"
+            ],
+            "axis_pool": {
+                "fCentralityFT0C": {"nbins": 100, "min": 0.0, "max": 100.0, "title": "Centrality (%)"},
+                "fNSigmaHe": {"nbins": 100, "min": -5.0, "max": 5.0, "title": "fNSigmaHe"},
+                "fNTPCclusHe": {"nbins": 160, "min": 0.0, "max": 160.0, "title": "fNTPCclusHe"},
+                "fNTPCpidClusHe": {"nbins": 160, "min": 0.0, "max": 160.0, "title": "fNTPCpidClusHe"},
+                "fNTPCclusPi": {"nbins": 160, "min": 0.0, "max": 160.0, "title": "fNTPCclusPi"},
+                "fNTPCpidClusPi": {"nbins": 160, "min": 0.0, "max": 160.0, "title": "fNTPCpidClusPi"},
+                "fTPCChi2He": {"nbins": 100, "min": 0.0, "max": 10.0, "title": "fTPCChi2He"},
+                "fTPCChi2Pi": {"nbins": 100, "min": 0.0, "max": 10.0, "title": "fTPCChi2Pi"},
+                "fITSChi2He": {"nbins": 160, "min": 0.0, "max": 40.0, "title": "fITSChi2He"},
+                "fITSChi2Pi": {"nbins": 160, "min": 0.0, "max": 40.0, "title": "fITSChi2Pi"},
+                "fDcaV0Daug": {"nbins": 120, "min": 0.0, "max": 1.2, "title": "fDcaV0Daug"},
+                "fDcaHe": {"nbins": 80, "min": -1.0, "max": 1.0, "title": "fDcaHe"},
+                "fDcaPi": {"nbins": 80, "min": -1.0, "max": 1.0, "title": "fDcaPi"},
+                "fMassH3L": {"nbins": 80, "min": 2.96, "max": 3.04, "title": "fMassH3L"},
+                "fPt": {"nbins": 120, "min": 0.0, "max": 12.0, "title": "fPt"},
+                "fEta": {"nbins": 100, "min": -1.0, "max": 1.0, "title": "fEta"},
+                "fCt": {"nbins": 120, "min": 0.0, "max": 40.0, "title": "fCt"},
+                "fCosPA": {"nbins": 100, "min": 0.95, "max": 1.0, "title": "fCosPA"},
+                "fDecRad": {"nbins": 50, "min": 0.0, "max": 5.0, "title": "fDecRad"},
+                "fDecLen": {"nbins": 120, "min": 0.0, "max": 40.0, "title": "fDecLen"},
+                "fAvgClusterSizeHe": {"nbins": 15, "min": 0.0, "max": 15.0, "title": "fAvgClusterSizeHe"},
+                "fAvgClusterSizePi": {"nbins": 15, "min": 0.0, "max": 15.0, "title": "fAvgClusterSizePi"},
+                "fAbsGenPt": {"nbins": 120, "min": 0.0, "max": 12.0, "title": "fAbsGenPt"},
+                "fGenCt": {"nbins": 120, "min": 0.0, "max": 40.0, "title": "fGenCt"},
+                "fGenDecRad": {"nbins": 120, "min": 0.0, "max": 40.0, "title": "fGenDecRad"},
+                "fGenDecLen": {"nbins": 120, "min": 0.0, "max": 40.0, "title": "fGenDecLen"}
+            }
+        },
+        "mc_checks": {
+            "enable": true,
+            "selection": "fCt > 1",
+            "tree": "O2mchypcands",
+            "variables": [
+                "fAbsGenPt",
+                "fAvgClusterSizeHe",
+                "fAvgClusterSizePi",
+                "fNTPCclusHe",
+                "fNTPCpidClusHe",
+                "fNTPCclusPi",
+                "fNTPCpidClusPi",
+                "fNSigmaHe",
+                "fMassH3L",
+                "fDecRad",
+                "fGenDecRad",
+                "fCt",
+                "fGenCt",
+                "fDecLen"
+            ],
+            "hist2d_pairs": [
+                ["fDecLen", "fAvgClusterSizeHe"],
+                ["fDecLen", "fAvgClusterSizePi"],
+                ["fMassH3L", "fCt"],
+                ["fMassH3L", "fGenCt"]
             ]
         },
-        "switches": {
-            "is_matter": "both",
-            "add_performance": false,
-            "do_QA_afterward": true,
-            "do_systematics": false
+        "data_all_checks": {
+            "enable": false,
+            "file": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/apass5/AO2D_CustomV0s_HadronPID.root",
+            "tree": "O2hypcands",
+            "selection": "",
+            "variables": [
+                "fPt",
+                "fCt",
+                "fAvgClusterSizeHe",
+                "fAvgClusterSizePi",
+                "fNTPCclusHe",
+                "fNTPCpidClusHe",
+                "fNTPCclusPi",
+                "fNTPCpidClusPi",
+                "fMassH3L",
+                "fNSigmaHe",
+                "fDecRad",
+                "fDecLen"
+            ],
+            "hist2d_pairs": [
+                ["fDecLen", "fAvgClusterSizeHe"],
+                ["fDecLen", "fAvgClusterSizePi"],
+                ["fNSigmaHe", "fAvgClusterSizeHe"],
+                ["fNTPCpidClusHe", "fAvgClusterSizeHe"],
+                ["fNTPCpidClusPi", "fAvgClusterSizePi"],
+                ["fMassH3L", "fCt"]
+            ]
         },
-        "selections": {
-            "data_selection_topology": [
-                [
-                  "fCosPA > 0.99995 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.9999 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.9997 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.9998 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.045",
-                  "fCosPA > 0.9999 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.9995 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.9992 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04"
-                ],
-                [
-                  "fCosPA > 0.99995 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.9997 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.9997 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.9997 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.9995 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.9995 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.9995 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.999 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04",
-                  "fCosPA > 0.999 && fNSigmaHe > -3 && fDcaV0Daug < 0.8 && fDcaHe > 0.04"
-                ],
-                [
-                  "fCosPA > 0.9999 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.045",
-                  "fCosPA > 0.999 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.04",
-                  "fCosPA > 0.993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.04",
-                  "fCosPA > 0.993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
-                  "fCosPA > 0.993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
-                  "fCosPA > 0.993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
-                  "fCosPA > 0.993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
-                  "fCosPA > 0.995 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
-                  "fCosPA > 0.995 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025"
-                ],
-                [
-                  "fCosPA > 0.9999 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.035",
-                  "fCosPA > 0.9993 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
-                  "fCosPA > 0.999 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.025",
-                  "fCosPA > 0.995 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.02",
-                  "fCosPA > 0.995 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.02",
-                  "fCosPA > 0.992 && fNSigmaHe > -3 && fDcaV0Daug < 1 && fDcaHe > 0.01"
-                ]
+        "hypertriton_onthefly_checks": {
+            "enable": true,
+            "save_hypertriton_qa_tree": true,
+            "nsigmas_mass_window": 3,
+            "selection": "",
+            "variables": [
+                "fPt",
+                "fCt",
+                "fDcaV0Daug",
+                "fDcaHe",
+                "fDcaPi",
+                "fCosPA",
+                "fNSigmaHe",
+                "fDecRad",
+                "fMassH3L",
+                "fAvgClusterSizeHe",
+                "fCentralityFT0C"
+            ],
+            "hist2d_pairs": [
+                ["fPt", "fAvgClusterSizeHe"],
+                ["fDecRad", "fAvgClusterSizeHe"],
+                ["fMassH3L", "fCt"]
             ]
         }
     },
-    "ct_extraction": {
-        "additional_data_selection": "",
-        "binnings": {
-            "pt_bins": [2, 3, 4, 5.5, 8],
-            "ct_bins_by_pt": [
-                [1, 3, 6, 9, 12, 18, 30],
-                [1, 3, 6, 9, 12, 18, 25],
-                [1, 3, 6, 9, 15, 25],
-                [1, 3, 6, 10, 23]
-            ]
-        },
-        "switches": {
-            "is_matter": "both"
-        }
-    },
-    "ct_single": {
-      "additional_data_selection": "fCentralityFT0C > 0 && fCentralityFT0C < 80 && fDecRad > 0.5",
-      "binnings":{
-        "ct_bins": [2, 2.2, 2.4, 2.6, 2.8, 3, 3.2, 3.4, 3.6, 3.8, 4, 4.2, 4.4, 4.6, 4.8, 5, 5.5, 6, 6.5, 7, 8]
-      },
-      "switches":{
-        "is_matter": "both"
-      }
-    },
-    "checks_control":{
-
+    "output": {
+        "root_layout_version": "v1",
+        "write_csv_summary": true,
+        "write_pdf": true
     }
 }

@@ -217,6 +217,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
     const std::vector<double> &centBins1D,
     const std::vector<std::vector<double>> &ptBinsPerCent,
     const std::string &basicSel   = "",
+    const std::vector<std::string> &topologyselection = {},
     const std::string &centVar    = "fCentralityFT0C",
     const std::string &evselCol   = "fIsSurvEvSel",
     const std::string &recoCol    = "fIsReco",
@@ -298,6 +299,34 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         centColUsed = pairCent.second;
     }
 
+    const bool enableTopologyEff = !topologyselection.empty();
+    if (enableTopologyEff && !ptBins1D.empty() && static_cast<int>(topologyselection.size()) != static_cast<int>(ptBins1D.size()) - 1) {
+        throw std::runtime_error("ComputeAcceptanceFlexible: topologyselection size must match nPtBins for scenario 1");
+    }
+
+    std::string topologyFlagColInt = "__acc_topology_flag_int";
+    if (enableTopologyEff && !ptBins1D.empty()) {
+        std::ostringstream topoExpr;
+        topoExpr << "(";
+        for (size_t i = 0; i + 1 < ptBins1D.size(); ++i) {
+            if (i > 0) topoExpr << " || ";
+            const std::string topoSel = (i < topologyselection.size() && !topologyselection[i].empty())
+                ? topologyselection[i]
+                : std::string("1");
+            topoExpr << "((" << genPtColUsed << " >= " << ptBins1D[i] << ") && ("
+                     << genPtColUsed << " < " << ptBins1D[i + 1] << ") && (" << topoSel << "))";
+        }
+        topoExpr << ") ? 1 : 0";
+        auto df_with_topo_flag = df_ready.Define("__acc_topology_flag", topoExpr.str());
+        auto topoPair = ensure_int_flag_column(df_with_topo_flag, "__acc_topology_flag", "__acc_topology_flag_int");
+        df_ready = topoPair.first;
+        topologyFlagColInt = topoPair.second;
+    } else {
+        auto df_with_topo_flag = df_ready.Define("__acc_topology_flag_int", []() -> int { return 1; });
+        df_ready = df_with_topo_flag;
+        topologyFlagColInt = "__acc_topology_flag_int";
+    }
+
     // Scenario 1: acc vs pt (ptBins1D only)
     if (!ptBins1D.empty() && ctBins1D.empty() && ctBinsPerPt.empty() && centBins1D.empty() && ptBinsPerCent.empty()) {
         struct SlotHistPt {
@@ -336,11 +365,12 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genPt, int evselFlag, int recoFlag, int basicFlag, double genMatter) {
+            [&](unsigned slot, double genPt, int evselFlag, int recoFlag, int basicFlag, int topologyFlag, double genMatter) {
                 auto &slotHist = acquire_slot(slot);
                 const bool passEvsel = evselFlag != 0;
                 const bool passBasic = basicFlag != 0;
-                const bool passReco =  passBasic && (recoFlag != 0);
+                const bool passTopo = topologyFlagColInt.empty() ? true : (topologyFlag != 0);
+                const bool passReco =  passBasic && (recoFlag != 0) && passTopo;
                 const bool isMatter = genMatter > 0.0;
                 if (passEvsel) {
                     slotHist.evsel_pt_both->Fill(genPt);
@@ -357,7 +387,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_pt_antimatter->Fill(genPt);
                 }                
             },
-            {genPtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, genMatterColUsed});
+            {genPtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, topologyFlagColInt, genMatterColUsed});
 
         res.evsel_pt_both = MergeSlotHists(slotHists, [](const SlotHistPt &slot) { return slot.evsel_pt_both.get(); }, "h_evsel_pt_both");
         res.reco_pt_both  = MergeSlotHists(slotHists, [](const SlotHistPt &slot) { return slot.reco_pt_both.get(); },  "h_reco_pt_both");
