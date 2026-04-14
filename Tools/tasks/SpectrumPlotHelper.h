@@ -50,7 +50,18 @@ inline std::string BuildDecayString(const std::string &isMatter) {
         return "{}^{3}_{#bar{#Lambda}}#bar{H} #rightarrow ^{3}#bar{He}+#pi^{+}";
     }
     if (isMatter == "both") {
-        return "{}^{3}_{#Lambda}H #rightarrow ^{3}He+#pi";
+        return "{}^{3}_{#Lambda}H + {}^{3}_{#bar{#Lambda}}#bar{H} #rightarrow ^{3}He + #pi^{-} (^{3}#bar{He} + #pi^{+})";
+    }
+    return std::string();
+}
+
+inline std::string BuildCentralityText(const std::string &tag) {
+    if (tag.rfind("cen_", 0) == 0 && tag.size() > 4) {
+        std::string range = tag.substr(4);
+        for (char &ch : range) {
+            if (ch == '_') ch = '-';
+        }
+        return "CentralityFT0C " + range + "%";
     }
     return std::string();
 }
@@ -283,12 +294,14 @@ inline std::unique_ptr<TCanvas> MakeSystematicsCorrDistCanvas(const std::string 
 inline std::unique_ptr<TCanvas> MakeSystematicsDetailCanvas(const std::string &name,
                                                              TH1D *hSel,
                                                              TH1D *hAbso,
+                                                             TH1D *hBr,
                                                              TH1D *hTot) {
     auto c = std::make_unique<TCanvas>(name.c_str(), name.c_str(), 960, 720);
     if (!hSel || !hAbso || !hTot) return c;
 
     hSel->SetStats(false);
     hAbso->SetStats(false);
+    if (hBr) hBr->SetStats(false);
     hTot->SetStats(false);
     hTot->SetLineColor(kBlack);
     hTot->SetLineWidth(3);
@@ -296,18 +309,26 @@ inline std::unique_ptr<TCanvas> MakeSystematicsDetailCanvas(const std::string &n
     hSel->SetLineWidth(2);
     hAbso->SetLineColor(kAzure + 2);
     hAbso->SetLineWidth(2);
+    if (hBr) {
+        hBr->SetLineColor(kGreen + 2);
+        hBr->SetLineWidth(2);
+    }
 
     hTot->Draw("HIST");
     hSel->Draw("HIST SAME");
     hAbso->Draw("HIST SAME");
+    if (hBr) hBr->Draw("HIST SAME");
 
     auto leg = std::make_unique<TLegend>(0.62, 0.70, 0.88, 0.88);
     leg->SetBorderSize(0);
     leg->SetFillStyle(0);
+    leg->SetTextFont(42);
+    leg->SetTextSize(0.035);
     leg->AddEntry(hTot, "Total sys", "l");
     leg->AddEntry(hSel, "Selection sys", "l");
     leg->AddEntry(hAbso, "Absorption sys", "l");
-    leg->Draw();
+    if (hBr) leg->AddEntry(hBr, "BR sys", "l");
+    leg->DrawClone();
     c->SetGrid();
     return c;
 }
@@ -317,7 +338,10 @@ inline std::unique_ptr<TCanvas> MakeFinalSpectrumCanvas(const std::string &name,
                                                         TGraphAsymmErrors *gSys,
                                                         TF1 *fStdFit = nullptr,
                                                         const std::string &xTitle = "",
-                                                        const std::string &extraText = "") {
+                                                        const std::string &extraText = "",
+                                                        const PlotLabelConfig &labelCfg = PlotLabelConfig{},
+                                                        const std::string &isMatter = "",
+                                                        double nEvents = 0.0) {
     auto c = std::make_unique<TCanvas>(name.c_str(), name.c_str(), 960, 720);
     if (!hStat) return c;
 
@@ -327,8 +351,10 @@ inline std::unique_ptr<TCanvas> MakeFinalSpectrumCanvas(const std::string &name,
     c->SetRightMargin(0.05);
     c->SetTopMargin(0.08);
     c->SetTicks(1, 1);
-    c->SetGridy(true);
+    c->SetGridy(false);
     c->SetLogy();
+
+    const bool isPtSpectrum = (extraText.rfind("cen_", 0) == 0);
 
     hStat->SetStats(false);
     hStat->SetMarkerStyle(20);
@@ -337,21 +363,38 @@ inline std::unique_ptr<TCanvas> MakeFinalSpectrumCanvas(const std::string &name,
     hStat->SetLineColor(kBlack);
     hStat->SetLineWidth(2);
     hStat->SetMinimum(std::max(1e-12, hStat->GetMinimum(1) * 0.5));
-    hStat->SetTitle(extraText.empty() ? "Final spectrum" : extraText.c_str());
+    hStat->SetTitle("");
     hStat->GetXaxis()->SetTitle(xTitle.empty() ? "x" : xTitle.c_str());
-    hStat->GetYaxis()->SetTitle("Corrected counts");
+    hStat->GetYaxis()->SetTitle(isPtSpectrum ? "#frac{1}{N_{ev}} #frac{d^{2}N}{d#it{p}_{T}d#it{y}} ((GeV/#it{c})^{-1})"
+                                             : "Corrected counts");
     hStat->GetXaxis()->SetTitleSize(0.05);
     hStat->GetYaxis()->SetTitleSize(0.05);
     hStat->GetYaxis()->SetTitleOffset(1.35);
-    hStat->Draw("E1");
+    if (isPtSpectrum) {
+        hStat->GetXaxis()->SetRangeUser(0.0, hStat->GetXaxis()->GetXmax());
+    }
+    hStat->Draw("E1 X0");
 
     if (gSys) {
-        gSys->SetFillStyle(3004);
-        gSys->SetFillColor(kBlue - 9);
-        gSys->SetLineColor(kBlue + 2);
-        gSys->SetLineWidth(2);
-        gSys->SetLineStyle(kSolid);
-        gSys->Draw("2 SAME");
+        const int n = gSys->GetN();
+        for (int i = 0; i < n; ++i) {
+            double x = 0.0;
+            double y = 0.0;
+            gSys->GetPoint(i, x, y);
+            const double exl = gSys->GetErrorXlow(i);
+            const double exh = gSys->GetErrorXhigh(i);
+            const double eyl = gSys->GetErrorYlow(i);
+            const double eyh = gSys->GetErrorYhigh(i);
+            if (!std::isfinite(x) || !std::isfinite(y)) continue;
+            const double yMin = std::max(1e-20, y - eyl);
+            const double yMax = std::max(yMin, y + eyh);
+            TBox box(x - exl, yMin, x + exh, yMax);
+            box.SetFillStyle(0);
+            box.SetLineColor(kBlue + 2);
+            box.SetLineWidth(2);
+            box.SetLineStyle(kDashed);
+            box.DrawClone("l");
+        }
     }
 
     if (fStdFit) {
@@ -360,14 +403,117 @@ inline std::unique_ptr<TCanvas> MakeFinalSpectrumCanvas(const std::string &name,
         fStdFit->Draw("SAME");
     }
 
-    auto leg = std::make_unique<TLegend>(0.60, 0.72, 0.90, 0.90);
+    // Draw all text info at bottom left
+    TLatex latex;
+    latex.SetNDC();
+    latex.SetTextFont(42);
+    latex.SetTextSize(0.035);
+    latex.SetTextAlign(11);
+    double textY = 0.33;
+    const auto expLines = BuildExperimentLines(labelCfg);
+    for (const auto &line : expLines) {
+        latex.DrawLatex(0.16, textY, line.c_str());
+        textY -= 0.045;
+    }
+    const std::string decay = BuildDecayString(isMatter);
+    if (!decay.empty()) {
+        latex.DrawLatex(0.16, textY, decay.c_str());
+        textY -= 0.045;
+    }
+    const std::string cenText = BuildCentralityText(extraText);
+    if (!cenText.empty()) {
+        latex.DrawLatex(0.16, textY, cenText.c_str());
+        textY -= 0.045;
+    }
+    latex.DrawLatex(0.16, textY, BuildEventLine(nEvents).c_str());
+
+    // Draw Legend above text block
+    TLegend *leg = new TLegend(0.16, 0.40, 0.50, 0.58);
     leg->SetBorderSize(0);
     leg->SetFillStyle(0);
-    leg->AddEntry(hStat, "Stat.", "lep");
-    if (gSys) leg->AddEntry(gSys, "Sys.", "f");
-    if (fStdFit) leg->AddEntry(fStdFit, "Std fit", "l");
+    leg->SetTextFont(42);
+    leg->SetTextSize(0.035);
+    leg->AddEntry(hStat, "Data points", "p");
+    if (gSys) {
+        TLine *sysLine = new TLine();
+        sysLine->SetLineColor(kBlue + 2);
+        sysLine->SetLineStyle(kDashed);
+        sysLine->SetLineWidth(2);
+        leg->AddEntry(sysLine, "Sys. box", "l");
+    }
+    if (fStdFit) {
+        leg->AddEntry(fStdFit, isPtSpectrum ? "Blast-Wave fit" : "Std fit", "l");
+    }
     leg->Draw();
 
+    return c;
+}
+
+inline std::unique_ptr<TH1D> MakeRawOverNevtsHist(const std::string &name,
+                                                  double rawSum,
+                                                  double rawErr,
+                                                  double nEvents,
+                                                  const std::string &label) {
+    auto h = std::make_unique<TH1D>(name.c_str(), ";bin;N_{raw}/N_{ev}", 1, 0.5, 1.5);
+    h->SetDirectory(nullptr);
+    h->SetStats(false);
+    const double val = (nEvents > 0.0) ? rawSum / nEvents : 0.0;
+    const double err = (nEvents > 0.0) ? rawErr / nEvents : 0.0;
+    h->SetBinContent(1, val);
+    h->SetBinError(1, err);
+    h->GetXaxis()->SetBinLabel(1, label.c_str());
+    return h;
+}
+
+inline std::unique_ptr<TCanvas> MakeRawOverNevtsCanvas(const std::string &name,
+                                                       TH1D *hist,
+                                                       double rawSum,
+                                                       double rawErr,
+                                                       double nEvents,
+                                                       const std::string &label,
+                                                       const std::string &periodTag) {
+    if (!hist) return nullptr;
+    auto c = std::make_unique<TCanvas>(name.c_str(), name.c_str(), 900, 700);
+    c->cd();
+    c->SetLeftMargin(0.14);
+    c->SetBottomMargin(0.12);
+    c->SetTicks(1, 1);
+    hist->SetMarkerStyle(20);
+    hist->SetMarkerColor(kBlue + 1);
+    hist->SetLineColor(kBlue + 1);
+    hist->GetYaxis()->SetTitleOffset(1.4);
+    hist->Draw("E1");
+
+    const double x = 0.20;
+    double y = 0.80;
+    auto addLine = [&](const std::string &text, double yPos) {
+        auto *t = new TLatex(x, yPos, text.c_str());
+        t->SetNDC();
+        t->SetTextSize(0.04);
+        t->SetTextFont(42);
+        t->Draw();
+    };
+    addLine(label, y);
+    y -= 0.06;
+    if (!periodTag.empty()) {
+        addLine(periodTag, y);
+        y -= 0.06;
+    }
+    std::ostringstream os;
+    os << "N_{ev} = " << nEvents;
+    addLine(os.str(), y);
+    y -= 0.06;
+    os.str("");
+    os << "#Sigma raw = " << rawSum;
+    addLine(os.str(), y);
+    y -= 0.06;
+    os.str("");
+    const double ratio = (nEvents > 0.0) ? rawSum / nEvents : 0.0;
+    const double ratioErr = (nEvents > 0.0) ? rawErr / nEvents : 0.0;
+    os << "N_{raw}/N_{ev} = " << ratio << " #pm " << ratioErr;
+    addLine(os.str(), y);
+    c->Modified();
+    c->Update();
     return c;
 }
 

@@ -1,11 +1,11 @@
-data_path: "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/apass5/AO2D_CustomV0s_HadronPID.root"
-mc_path: "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/AO2D_CustomV0s.root"
+data_path: "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/apass5/NCrossedRows/AO2D_CustomV0s_HadronPID.root"
+mc_path: "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/NCrossedRows/reweighted/AO2D_CustomV0s_combined_reweighted.root"
 tree_name_data: "O2hypcands"
 tree_name_mc: "O2mchypcands"
-snapshot_dir: "../../SnapShotsData/LHC23_PbPb_pass5_CustomV0s_HadronPID"
-model_dir: "../../Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/TrainedModels"
-QA_dir: "../../Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/QAPlots"
-WP_dir: "../../Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID/WorkingPoint"
+snapshot_dir: "../../SnapShotsData/LHC23_PbPb_pass5_CustomV0s_HadronPID_NcrossedRows"
+model_dir: "../../Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID_NcrossedRows/TrainedModels"
+QA_dir: "../../Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID_NcrossedRows/QAPlots"
+WP_dir: "../../Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID_NcrossedRows/WorkingPoint"
 Mix_mode: "ct-single"  # options: pt-ct, cen-pt, pt-ct-single, pt-single, ct-single
 side_band_edges: [2.95, 3.02]
 
@@ -14,23 +14,31 @@ ct_bins: [[1, 3, 6, 9, 12, 18, 30],
           [1, 3, 6, 9, 12, 18, 25],
           [1, 3, 6, 9, 15, 25],
           [1, 3, 6, 10, 23]]
-ct_bins_single: [1, 2, 4, 6, 8, 10, 14, 18, 23, 35]    # [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2, 3] --for inside the beam pipe
-pt_bins_single: [2, 3, 4, 5, 6, 8]
-# centrality-dependent pT binning (used when Mix_mode is "cen-pt")
-# cen_bins: [0, 10, 30, 50, 80]
-# pt_bins_by_centrality: [
-#   [2, 3, 3.5, 4, 4.5, 5, 6, 8],    # 0-10%
-#   [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],  # 10-30%
-#   [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],  # 30-50%
-#   [2, 2.5, 3, 3.5, 4, 5, 8]     # 50-80%
+# pt_bins: [2, 3, 4, 5.5, 8]
+# ct_bins: [
+#   [1, 3, 6, 10, 23],    # for pt 2-3
+#   [1, 3, 6, 10, 23],    # for pt 3-4
+#   [1, 3, 6, 10, 23],    # for pt 4-5.5
+#   [1, 3, 6, 10, 23]     # for pt 5.5-8
 # ]
-cen_bins: [0, 80]
-pt_bins_by_centrality: [[2, 2.2, 2.4, 2.6, 2.8, 3, 3.2, 3.4, 3.6, 3.8, 4, 4.2, 4.4, 4.6, 4.8, 5, 5.5, 6, 6.5, 7, 8]]  
-#training_preselections_data: "fTPCsignalPi<1000 and abs(fNSigmaHe)<5 and fCosPA>0.99" #after basic sel save snapshot data first then do training 
-basic_selection_data: "fTPCsignalPi<1000 && fCosPA>0.99 && fAvgClusterSizeHe > 5 && fCentralityFT0C > 0 && fCentralityFT0C < 80" #be careful to add the same cut in mc efficiency for later calcualtion
-training_variables: ['fDcaV0Daug', 'fDcaHe', 'fDcaPi', 'fCosPA', 'fNSigmaHe', 'fCt']
-extra_vars_save_data: ['fCentralityFT0C', 'fDecRad', 'fAvgClusterSizeHe', 'fPt', 'fMassH3L', 'fIsMatter']
-extra_vars_save_mc: ['fCentralityFT0C', 'fDecRad', 'fAvgClusterSizeHe', 'fAbsGenPt', 'fGenCt', 'fMassH3L', 'fIsMatter']
+ct_bins_single: [1, 3, 5, 7, 9, 11, 13, 15, 17, 21, 27, 33]    # [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2, 3] --for inside the beam pipe
+# ct_bins_single: [0.8, 1, 1.2, 1.4, 1.6, 1.8]
+pt_bins_single: [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8]
+# centrality-dependent pT binning (used when Mix_mode is "cen-pt")
+cen_bins: [0, 10, 30, 50, 80]
+pt_bins_by_centrality: [
+  [2, 3, 3.5, 4, 4.5, 5, 6, 8],    # 0-10%
+  [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],  # 10-30%
+  [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],  # 30-50%
+  [2, 2.5, 3, 3.5, 4, 5, 8]     # 50-80%
+]
+# cen_bins: [0, 80]
+# pt_bins_by_centrality: [[2, 2.2, 2.4, 2.6, 2.8, 3, 3.2, 3.4, 3.6, 3.8, 4, 4.2, 4.4, 4.6, 4.8, 5, 5.5, 6, 6.5, 7, 8]]  
+# basic_selection_data: "fTPCsignalPi<1000 && fCosPA>0.99 && fAvgClusterSizeHe > 5" #be careful to add the same cut in mc efficiency for later calcualtion
+basic_selection_data: "fAvgClusterSizeHe > 5 && fDecRad > 0.8 && fCentralityFT0C > 0 && fCentralityFT0C < 90" #be careful to add the same cut in mc efficiency for later calcualtion
+training_variables: ['fDcaV0Daug', 'fDcaHe', 'fDcaPi', 'fCosPA', 'fNSigmaHe']
+extra_vars_save_data: ['fCentralityFT0C', 'fDecRad', 'fAvgClusterSizeHe', 'fPt', 'fMassH3L', 'fIsMatter', 'fCt']
+extra_vars_save_mc: ['fCentralityFT0C', 'fDecRad', 'fAvgClusterSizeHe', 'fAbsGenPt', 'fGenCt', 'fMassH3L', 'fIsMatter', 'fCt']
 test_set_size: 0.5
 bkg_fraction_max: 6
 random_state: 42

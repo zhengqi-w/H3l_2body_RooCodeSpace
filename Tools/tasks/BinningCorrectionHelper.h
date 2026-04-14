@@ -29,6 +29,8 @@ struct BinningCorrectionConfig {
     std::string mcFileForAbsorption;
     std::string mcEfficiencySelection;
     double originalCtaoAbsorption{7.6};
+    std::vector<double> cenBins;
+    std::vector<std::vector<double>> ptBinsByCentrality;
     std::vector<double> ptBins;
     std::vector<std::vector<double>> ctBinsByPt;
 };
@@ -48,6 +50,13 @@ struct PtCtAbsorptionCache {
 struct BinValueWithError {
     double value{1.0};
     double error{0.0};
+};
+
+struct SpectrumAcceptanceCache {
+    bool ready{false};
+    std::vector<double> cenBins;
+    std::vector<std::vector<double>> ptBinsByCentrality;
+    std::vector<std::vector<BinValueWithError>> valuesByCentrality;
 };
 
 inline std::unique_ptr<TChain> MakeChainFromFileForCorrection(const std::string &file, const std::string &tree) {
@@ -72,6 +81,15 @@ inline int FindPtIndex(const std::vector<double> &ptBins, double ptMin, double p
     for (size_t ipt = 0; ipt + 1 < ptBins.size(); ++ipt) {
         if (std::abs(ptBins[ipt] - ptMin) < 1e-6 && std::abs(ptBins[ipt + 1] - ptMax) < 1e-6) {
             return static_cast<int>(ipt);
+        }
+    }
+    return -1;
+}
+
+inline int FindCentralityIndex(const std::vector<double> &cenBins, double cenMin, double cenMax) {
+    for (size_t ic = 0; ic + 1 < cenBins.size(); ++ic) {
+        if (std::abs(cenBins[ic] - cenMin) < 1e-6 && std::abs(cenBins[ic + 1] - cenMax) < 1e-6) {
+            return static_cast<int>(ic);
         }
     }
     return -1;
@@ -149,11 +167,62 @@ inline PtCtAbsorptionCache BuildPtCtAbsorptionCache(const BinningCorrectionConfi
     return cache;
 }
 
+inline SpectrumAcceptanceCache BuildSpectrumAcceptanceCache(const BinningCorrectionConfig &cfg,
+                                                            const std::string &mcFileForAcceptance) {
+    SpectrumAcceptanceCache cache;
+    if (!(cfg.mode == "bdt_spectrum" || cfg.mode == "topology_spectrum")) return cache;
+    if (mcFileForAcceptance.empty()) return cache;
+    if (cfg.cenBins.size() < 2) return cache;
+    if (cfg.ptBinsByCentrality.size() != cfg.cenBins.size() - 1) return cache;
+
+    auto mcChain = MakeChainFromFileForCorrection(mcFileForAcceptance, cfg.mcTree);
+    ROOT::RDataFrame rdf(*mcChain);
+    auto mcReady = GeneralHelper::CorrectAndConvertRDF(rdf, false, true, false);
+    ROOT::RDF::RNode mcNode(mcReady);
+
+    auto accRes = AcceptanceHelper::ComputeAcceptanceFlexible(
+        mcNode,
+        std::vector<double>{},
+        std::vector<double>{},
+        std::vector<std::vector<double>>{},
+        cfg.cenBins,
+        cfg.ptBinsByCentrality,
+        cfg.mcEfficiencySelection);
+
+    const auto &hVec = (cfg.isMatter == "matter") ? accRes.acc_pt_per_cent_matter
+                      : (cfg.isMatter == "antimatter") ? accRes.acc_pt_per_cent_antimatter
+                      : accRes.acc_pt_per_cent;
+
+    cache.cenBins = cfg.cenBins;
+    cache.ptBinsByCentrality = cfg.ptBinsByCentrality;
+    cache.valuesByCentrality.assign(cfg.ptBinsByCentrality.size(), std::vector<BinValueWithError>{});
+
+    for (size_t ic = 0; ic < cfg.ptBinsByCentrality.size(); ++ic) {
+        const auto &ptEdges = cfg.ptBinsByCentrality[ic];
+        if (ptEdges.size() < 2) continue;
+        cache.valuesByCentrality[ic].assign(ptEdges.size() - 1, BinValueWithError{});
+        if (ic < hVec.size() && hVec[ic]) {
+            for (size_t ip = 0; ip + 1 < ptEdges.size(); ++ip) {
+                const int bin = static_cast<int>(ip + 1);
+                double v = hVec[ic]->GetBinContent(bin);
+                double e = hVec[ic]->GetBinError(bin);
+                if (v <= 0.0) v = 1.0;
+                cache.valuesByCentrality[ic][ip] = BinValueWithError{v, e};
+            }
+        }
+    }
+
+    cache.ready = true;
+    accRes.Clear();
+    return cache;
+}
+
 inline std::vector<BinValueWithError> ComputeAcceptancePerBinWithErrors(const BinningCorrectionConfig &cfg,
                                                                         const std::vector<BinPlanItem> &items,
                                                                         const std::vector<double> &edges,
                                                                         const std::string &mcFileForAcceptance,
-                                                                        const PtCtAcceptanceCache *ptCtCache = nullptr) {
+                                                                        const PtCtAcceptanceCache *ptCtCache = nullptr,
+                                                                        const SpectrumAcceptanceCache *spectrumCache = nullptr) {
     std::vector<BinValueWithError> out(items.size(), BinValueWithError{});
     if (edges.size() < 2 || items.empty() || mcFileForAcceptance.empty()) return out;
 
@@ -164,6 +233,24 @@ inline std::vector<BinValueWithError> ComputeAcceptancePerBinWithErrors(const Bi
             for (size_t i = 0; i < items.size() && i < vals.size(); ++i) {
                 out[i].value = vals[i] > 0.0 ? vals[i] : 1.0;
                 out[i].error = 0.0;
+            }
+            return out;
+        }
+    }
+
+    if ((cfg.mode == "bdt_spectrum" || cfg.mode == "topology_spectrum") &&
+        spectrumCache && spectrumCache->ready && !items.empty()) {
+        const int cenIdx = FindCentralityIndex(spectrumCache->cenBins, items.front().cenMin, items.front().cenMax);
+        if (cenIdx >= 0 && static_cast<size_t>(cenIdx) < spectrumCache->ptBinsByCentrality.size() &&
+            static_cast<size_t>(cenIdx) < spectrumCache->valuesByCentrality.size()) {
+            const auto &ptEdges = spectrumCache->ptBinsByCentrality[static_cast<size_t>(cenIdx)];
+            const auto &vals = spectrumCache->valuesByCentrality[static_cast<size_t>(cenIdx)];
+            for (size_t i = 0; i < items.size(); ++i) {
+                const int ptIdx = FindPtIndex(ptEdges, items[i].ptMin, items[i].ptMax);
+                if (ptIdx >= 0 && static_cast<size_t>(ptIdx) < vals.size()) {
+                    out[i] = vals[static_cast<size_t>(ptIdx)];
+                    if (out[i].value <= 0.0) out[i].value = 1.0;
+                }
             }
             return out;
         }
@@ -251,8 +338,9 @@ inline std::vector<double> ComputeAcceptancePerBin(const BinningCorrectionConfig
                                                    const std::vector<BinPlanItem> &items,
                                                    const std::vector<double> &edges,
                                                    const std::string &mcFileForAcceptance,
-                                                   const PtCtAcceptanceCache *ptCtCache = nullptr) {
-    const auto withErr = ComputeAcceptancePerBinWithErrors(cfg, items, edges, mcFileForAcceptance, ptCtCache);
+                                                   const PtCtAcceptanceCache *ptCtCache = nullptr,
+                                                   const SpectrumAcceptanceCache *spectrumCache = nullptr) {
+    const auto withErr = ComputeAcceptancePerBinWithErrors(cfg, items, edges, mcFileForAcceptance, ptCtCache, spectrumCache);
     std::vector<double> out;
     out.reserve(withErr.size());
     for (const auto &v : withErr) out.push_back(v.value);

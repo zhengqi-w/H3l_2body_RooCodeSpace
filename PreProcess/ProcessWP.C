@@ -14,6 +14,7 @@
 #include <TGraph.h>
 #include <TPaveText.h>
 #include <TLegend.h>
+#include <TLine.h>
 #include <TStyle.h>
 #include <iostream>
 #include <fstream>
@@ -37,9 +38,11 @@
 #include "RooPlot.h"
 #include "RooMsgService.h"
 #include "../Tools/GeneralHelper.hpp"
+#include "../Tools/AcceptanceHelper.h"
 
 using json = nlohmann::json;
 using namespace GeneralHelper;
+using namespace AcceptanceHelper;
 
 // tiny helper
 static std::string read_file_to_string(const std::string &path) {
@@ -138,9 +141,13 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
   int mass_nbins = cfg.value("mass_nbins", 50);
   std::vector<double> side_low  = cfg.value("sideband_low", std::vector<double>{2.96, 2.98});
   std::vector<double> side_high = cfg.value("sideband_high", std::vector<double>{3.005, 3.04});
+  std::string analysis_results_file = cfg.value("analysis_results_file", std::string(""));
+  std::string n_events_hist = cfg.value("n_events_hist", std::string(""));
+  std::string spectrum_file = cfg.value("spectrum_file", std::string(""));
+  std::string mc_file_for_acceptance = cfg.value("mc_file_for_acceptance", std::string(""));
+  std::string basic_selection_data_for_mc_eff = cfg.value("basic_selection_data_for_mc_eff", std::string(""));
   double signal_sigma_mult = cfg.value("signal_window_sigma", 3.0);
   int min_entries_for_fit   = cfg.value("min_entries_for_fit", 50);
-  double fixed_signal_yield = cfg.value("fixed_signal_yield", 100.0);
   double max_chi2_ndf       = cfg.value("max_chi2_ndf", 5.0);
   double max_sideband_rel_diff = cfg.value("max_sideband_rel_diff", 0.5);
   bool aliceperformance    = cfg.value("performance", false);
@@ -153,6 +160,61 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
   bool enable_mt = cfg.value("enable_implicit_mt", false);
 
   if(enable_mt) EnableImplicitMTWithPreferredThreads();
+
+  std::unique_ptr<TFile> fAnalysis;
+  std::unique_ptr<TFile> fSpectrum;
+  TH1 *hEvents = nullptr;
+  std::vector<TH1D*> hMcEffPtPerCent;
+  if(mix_mode == "cen-pt"){
+    if(!analysis_results_file.empty()){
+      fAnalysis.reset(TFile::Open(analysis_results_file.c_str(), "READ"));
+      if(fAnalysis && !fAnalysis->IsZombie() && !n_events_hist.empty()){
+        hEvents = dynamic_cast<TH1*>(fAnalysis->Get(n_events_hist.c_str()));
+      }
+      if(!hEvents){
+        printf("[Warn] Cannot load n_events_hist: %s from %s\n", n_events_hist.c_str(), analysis_results_file.c_str());
+      }
+    }
+    if(!spectrum_file.empty()){
+      fSpectrum.reset(TFile::Open(spectrum_file.c_str(), "READ"));
+      if(!fSpectrum || fSpectrum->IsZombie()){
+        printf("[Warn] Cannot open spectrum_file: %s\n", spectrum_file.c_str());
+      }
+    }
+    if(!mc_file_for_acceptance.empty()){
+      TChain mcChain(tree_name_mc.c_str());
+      std::unique_ptr<TFile> fMC(TFile::Open(mc_file_for_acceptance.c_str(), "READ"));
+      if(fMC && !fMC->IsZombie()){
+        fillChainFromAO2D(mcChain, fMC.get());
+        if(mcChain.GetEntries() > 0){
+          ROOT::RDataFrame rdfMc(mcChain);
+          auto readyMc = CorrectAndConvertRDF(rdfMc, false, true, false);
+          auto resPtPerCent = ComputeAcceptanceFlexible(
+              readyMc,
+              std::vector<double>{},
+              std::vector<double>{},
+              std::vector<std::vector<double>>{},
+              cen_bins,
+              pt_bins_by_centrality,
+              basic_selection_data_for_mc_eff);
+          hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent;
+          if(hMcEffPtPerCent.empty()){
+            hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent_matter;
+          }
+          if(hMcEffPtPerCent.empty()){
+            hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent_antimatter;
+          }
+          if(hMcEffPtPerCent.empty()){
+            printf("[Warn] MC efficiency histograms for cen-pt are empty from %s\n", mc_file_for_acceptance.c_str());
+          }
+        } else {
+          printf("[Warn] No entries in MC chain for %s\n", mc_file_for_acceptance.c_str());
+        }
+      } else {
+        printf("[Warn] Cannot open mc_file_for_acceptance: %s\n", mc_file_for_acceptance.c_str());
+      }
+    }
+  }
 
 
   gSystem->mkdir(out_dir.c_str(), true);
@@ -317,6 +379,66 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
       double tail_alphaR = 1.5;
       double tail_nR = 2.0;
 
+      double expected_signal_base = 0.0;
+      if(mix_mode == "cen-pt" && ctx.hasCen && ctx.hasPt && fSpectrum && !fSpectrum->IsZombie() && hEvents){
+        constexpr double kBranchingRatio = 0.25;
+        constexpr double kDeltaY = 2.0;
+        constexpr double kMatterAntiFactor = 2.0;
+        auto edge_to_token = [](double x){
+          if(std::fabs(x - std::round(x)) < 1e-6) return std::to_string((int)std::llround(x));
+          char buf[32]; snprintf(buf, sizeof(buf), "%g", x); return std::string(buf);
+        };
+        std::string bw_name = std::string("BlastWave_") + edge_to_token(ctx.cenmin) + "_" + edge_to_token(ctx.cenmax);
+        TF1 *bwFunc = dynamic_cast<TF1*>(fSpectrum->Get(bw_name.c_str()));
+        if(!bwFunc && std::fabs(ctx.cenmin - 50.0) < 1e-6 && std::fabs(ctx.cenmax - 80.0) < 1e-6){
+          const std::string bw_fallback = "BlastWave_50_90";
+          bwFunc = dynamic_cast<TF1*>(fSpectrum->Get(bw_fallback.c_str()));
+          if(bwFunc){
+            printf("  [Info] Missing %s, fallback to %s\n", bw_name.c_str(), bw_fallback.c_str());
+          }
+        }
+        if(!bwFunc){
+          printf("  [Warn] Missing BW function %s in %s\n", bw_name.c_str(), spectrum_file.c_str());
+        } else {
+          int binMin = hEvents->GetXaxis()->FindBin(ctx.cenmin + 1e-6);
+          int binMax = hEvents->GetXaxis()->FindBin(ctx.cenmax - 1e-6);
+          double nEv = hEvents->Integral(binMin, binMax);
+          double bwInt = bwFunc->Integral(ctx.ptmin, ctx.ptmax);
+          double mcEff = 1.0;
+          int cenIdx = -1;
+          for(size_t ic=0; ic+1<cen_bins.size(); ++ic){
+            if(std::fabs(cen_bins[ic]-ctx.cenmin)<1e-6 && std::fabs(cen_bins[ic+1]-ctx.cenmax)<1e-6){
+              cenIdx = static_cast<int>(ic);
+              break;
+            }
+          }
+          if(cenIdx >= 0 && cenIdx < (int)hMcEffPtPerCent.size() && hMcEffPtPerCent[cenIdx]){
+            const auto &ptEdges = (cenIdx < (int)pt_bins_by_centrality.size()) ? pt_bins_by_centrality[cenIdx] : std::vector<double>{};
+            int ptIdx = -1;
+            for(size_t ip=0; ip+1<ptEdges.size(); ++ip){
+              if(std::fabs(ptEdges[ip]-ctx.ptmin)<1e-6 && std::fabs(ptEdges[ip+1]-ctx.ptmax)<1e-6){
+                ptIdx = static_cast<int>(ip);
+                break;
+              }
+            }
+            if(ptIdx >= 0){
+              int binEff = ptIdx + 1;
+              double val = hMcEffPtPerCent[cenIdx]->GetBinContent(binEff);
+              if(std::isfinite(val) && val > 0.0) mcEff = val;
+            }
+          }
+
+          double extYield = bwInt * nEv * mcEff * kBranchingRatio * kDeltaY * kMatterAntiFactor;
+          if(std::isfinite(extYield) && extYield > 0.0){
+            expected_signal_base = extYield;
+            printf("  [Info] expected_signal_base from BW: N_ev=%.0f, Int(BW)=%.6g, eff=%.6g, BR=%.2f, dy=%.1f, M+A=%.1f, S=%.6g\n",
+                   nEv, bwInt, mcEff, kBranchingRatio, kDeltaY, kMatterAntiFactor, extYield);
+          } else {
+            printf("  [Warn] Non-positive BW expected yield\n");
+          }
+        }
+      }
+
       if(has_mc_snapshot){
         ROOT::RDataFrame df_mc(tree_name_mc.c_str(), snap_path_mc.c_str(), {"fMassH3L"});
         auto mcMasses = df_mc.Take<double>("fMassH3L");
@@ -377,6 +499,9 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
       std::vector<double> sideband_diff_vals(scores.size(), 999.0); // fitted signal yield
       std::vector<double> s3_over_eff_vals(scores.size(), 0.0);   // S(3σ) / ε(BDT)
       std::vector<double> s3_over_eff_vals_err(scores.size(), 0.0); // propagated error
+      // store S3 and B3 per score for later expected-significance calculation
+      std::vector<double> S3_vals(scores.size(), 0.0);
+      std::vector<double> B3_vals(scores.size(), 0.0);
 
       // 预取该 bin 全部事件的质量与分数，避免每个 score 阈值重复扫描树
       // 使用 ForeachSlot 收集每个 slot 的局部向量，减少锁开销，再合并并按分数降序一次排序
@@ -487,8 +612,11 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         std::unique_ptr<RooAbsReal> intBkg3(bkg.createIntegral(RooArgSet(m_global), RooArgSet(m_global), "sigwin3"));
         std::unique_ptr<RooAbsReal> intSig3(signal.createIntegral(RooArgSet(m_global), RooArgSet(m_global), "sigwin3"));
         double B3 = intBkg3 ? nbkg.getVal() * intBkg3->getVal() : 0.0;
-        double Sfixed = fixed_signal_yield;
         double S3 = intSig3 ? nsig.getVal() * intSig3->getVal() : 0.0;
+        // store S3 and B3 for later expected-significance computation
+        S3_vals[original_index] = S3;
+        B3_vals[original_index] = B3;
+        double Sfixed = (mix_mode == "cen-pt") ? expected_signal_base : S3;
         double S3_err = intSig3 ? nsig.getError() * intSig3->getVal() : 0.0;
         double base_signif3 = (Sfixed+B3>0) ? Sfixed/std::sqrt(Sfixed+B3) : 0.0;
         double eff_here = (original_index < (int)effs.size() ? effs[original_index] : 1.0);
@@ -534,7 +662,8 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         if (aliceperformance) ptInfo->AddText("ALICE Performance");
         else ptInfo->AddText(period_text.c_str()); 
         if(!additional_text.empty()) ptInfo->AddText(additional_text.c_str());
-        ptInfo->AddText(Form("Fixed S = %.0f", Sfixed));
+        if(mix_mode == "cen-pt") ptInfo->AddText(Form("S_{base}(BW) = %.1f", Sfixed));
+        else ptInfo->AddText(Form("S_{base}(data) = %.1f", Sfixed));
         ptInfo->AddText(Form("S(3#sigma)=%.1f", S3));
         ptInfo->AddText(Form("B(3#sigma)=%.1f", B3));
         ptInfo->AddText(Form("S/#sqrt{(S+B)} = %.2f", signifi_org));
@@ -567,6 +696,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
       std::vector<double> passSig4;   passSig4.reserve(scores.size());
       std::vector<double> passS3OverEff;  passS3OverEff.reserve(scores.size());
       std::vector<double> passSig3Err; passSig3Err.reserve(scores.size());
+      std::vector<int> passOrigIdx;   passOrigIdx.reserve(scores.size());
       for(size_t i=0;i<scores.size();++i){
         if(sig_vals[i] >= 0.0 && chi2_ndf_vals[i] <= max_chi2_ndf && sideband_diff_vals[i] <= max_sideband_rel_diff){
           passScores.push_back(scores[i]);
@@ -576,6 +706,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
           passSig4.push_back(sig_vals_4sigma[i]);
           passS3OverEff.push_back(s3_over_eff_vals[i]);
           passSig3Err.push_back(s3_over_eff_vals_err[i]);
+          passOrigIdx.push_back((int)i);
         }
       }
 
@@ -612,15 +743,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         band.SetLineColor(kAzure+2);
         band.Write();
 
-        // best point（本身就来源于通过点集合）
-        TGraph grBest(1);
-        grBest.SetPoint(0, bestScore, bestSig);
-        grBest.SetName("gr_best_point");
-        grBest.SetTitle(Form("Best point: score=%.3f, eff=%.3f, sig=%.2f", bestScore, bestEff, bestSig));
-        grBest.SetMarkerStyle(29);
-        grBest.SetMarkerSize(2.0);
-        grBest.SetMarkerColor(kRed+1);
-        grBest.Write();
+        // expected-significance (fit-based) will be computed after fitting h_s3overeff histogram below
         TGraph grSigEff((int)passEffs.size());
         for(int i=0;i<(int)passEffs.size();++i){ grSigEff.SetPoint(i, passEffs[i], passSig3[i]); }
         grSigEff.SetName("gr_significance_vs_efficiency");
@@ -652,28 +775,96 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         hYieldEff.SetLineColor(kMagenta+1);
         hYieldEff.SetMarkerStyle(20);
         hYieldEff.SetMarkerColor(kMagenta+1);
+        // Always fit pol0 on S(3σ)/eff for display; only non-cen-pt uses it for expected significance.
+        const bool use_bw_expected = (mix_mode == "cen-pt");
+        std::unique_ptr<TF1> fpol0 = std::make_unique<TF1>("fpol0","pol0");
+        hYieldEff.Fit(fpol0.get(), "QS"); // quiet, store result
+        double fit_c0 = fpol0->GetParameter(0);
+        double fit_c0_err = fpol0->GetParError(0);
+        double fit_chi2 = fpol0->GetChisquare();
+        double fit_ndf = fpol0->GetNDF();
+        double fit_chi2ndf = (fit_ndf>0) ? (fit_chi2/fit_ndf) : -1.0;
+
+        // draw fit/annotation on histogram and write it
         hYieldEff.Write();
+        dSigs->cd();
+        TPaveText *ptFit = new TPaveText(0.55,0.3,0.9,0.58,"NDC");
+        ptFit->SetBorderSize(0); ptFit->SetFillStyle(0); ptFit->SetTextFont(42); ptFit->SetTextAlign(11);
+        fpol0->SetLineColor(kRed+1);
+        fpol0->SetLineWidth(2);
+        fpol0->Write();
+        if(!use_bw_expected){
+          ptFit->AddText(Form("pol0 c0 = %.3f #pm %.3f", fit_c0, fit_c0_err));
+          if(fit_chi2ndf>=0) ptFit->AddText(Form("#chi^{2}/ndf = %.2f", fit_chi2ndf));
+        } else {
+          ptFit->AddText(Form("pol0 c0 = %.3f #pm %.3f", fit_c0, fit_c0_err));
+          if(fit_chi2ndf>=0) ptFit->AddText(Form("#chi^{2}/ndf = %.2f", fit_chi2ndf));
+          ptFit->AddText(Form("Use BW expected S_{base} = %.3f", expected_signal_base));
+          ptFit->AddText("Expected S = S_{base} #times #epsilon(#it{BDT})");
+        }
+        ptFit->Write();
+        // compute expected significance per pass point
+        std::vector<double> expSigVals(passScores.size(), 0.0);
+        for(int i=0;i<(int)passScores.size();++i){
+          double eff_val = passEffs[i];
+          int orig_idx = (i < (int)passOrigIdx.size()) ? passOrigIdx[i] : -1;
+          double B3_here = (orig_idx>=0) ? B3_vals[orig_idx] : 0.0;
+          double expected_signal = use_bw_expected ? (expected_signal_base * eff_val) : (fit_c0 * eff_val);
+          double expSig = (expected_signal + B3_here>0) ? expected_signal / sqrt(expected_signal + B3_here) : 0.0;
+          expSigVals[i] = expSig;
+        }
+        // best point based on expected significance
+        int bestExpIdx = -1; double bestExpSig = -1.0; double bestScoreExp = 0.0; double bestEffExp = 0.0;
+        for(int i=0;i<(int)expSigVals.size();++i){
+          int orig_idx = (i < (int)passOrigIdx.size()) ? passOrigIdx[i] : -1;
+          if(expSigVals[i] >= 0.0 && orig_idx >= 0 && chi2_ndf_vals[orig_idx] <= max_chi2_ndf && sideband_diff_vals[orig_idx] <= max_sideband_rel_diff){
+            if(expSigVals[i] > bestExpSig){ bestExpSig = expSigVals[i]; bestExpIdx = i; }
+          }
+        }
+        if(bestExpIdx >= 0){
+          bestScoreExp = passScores[bestExpIdx];
+          bestEffExp = passEffs[bestExpIdx];
+        }
+        TGraph grBest(1);
+        grBest.SetPoint(0, bestScoreExp, bestExpSig);
+        grBest.SetName("gr_best_point");
+        grBest.SetTitle(Form("Best point (expected): score=%.3f, eff=%.3f, expSig=%.2f", bestScoreExp, bestEffExp, bestExpSig));
+        grBest.SetMarkerStyle(29);
+        grBest.SetMarkerSize(2.0);
+        grBest.SetMarkerColor(kRed+1);
+        grBest.Write();
         fout.Close();
 
         // PDF rendering 仅在有通过点时绘制
         TCanvas c("c_sig","c_sig",900,650);
         c.SetLeftMargin(0.12); c.SetRightMargin(0.04); c.SetBottomMargin(0.12); c.SetTopMargin(0.08);
-        c.SetGridx(); c.SetGridy();
+        c.SetGridx(0); c.SetGridy(0);
         band.SetTitle((ctx.desc + ";BDT score;Expected significance (3#sigma) #times eff").c_str());
+        double yMaxScore = 0.0;
+        for(double y : passSig2) yMaxScore = std::max(yMaxScore, y);
+        if(yMaxScore <= 0.0) yMaxScore = 1.0;
+        band.SetMinimum(0.0);
+        band.SetMaximum(1.15 * yMaxScore);
         band.Draw("AF");
         grPass.Draw("L");
         TGraph grBestDraw(1); grBestDraw.SetPoint(0, bestScore, bestSig);
         grBestDraw.SetMarkerStyle(29); grBestDraw.SetMarkerSize(2.0); grBestDraw.SetMarkerColor(kRed+1);
         grBestDraw.Draw("P");
+        TLine lineWPScore(bestScore, 0.0, bestScore, 1.15 * yMaxScore);
+        lineWPScore.SetLineStyle(2);
+        lineWPScore.SetLineWidth(2);
+        lineWPScore.SetLineColor(kRed+1);
+        lineWPScore.Draw("SAME");
         // Legend
-        TLegend leg(0.25,0.72,0.55,0.92);
+        TLegend leg(0.52,0.16,0.86,0.34);
         leg.SetBorderSize(0); leg.SetFillStyle(0); leg.SetTextFont(42);
         leg.AddEntry(&grPass, "3#sigma curve", "l");
         leg.AddEntry(&band,  "#pm1#sigma band", "f");
         leg.AddEntry(&grBestDraw, "Best WP", "p");
+        leg.AddEntry(&lineWPScore, "WP vertical line", "l");
         leg.Draw("SAME");
         // WP box
-        auto ptWP = std::make_unique<TPaveText>(0.55, 0.68, 0.9, 0.92, "NDC");
+        auto ptWP = std::make_unique<TPaveText>(0.15, 0.16, 0.49, 0.34, "NDC");
         ptWP->SetFillStyle(0);
         ptWP->SetBorderSize(0);
         ptWP->SetTextFont(42);
@@ -686,23 +877,35 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         c.SaveAs((out_dir+"/sig_vs_score_"+label+".pdf").c_str());
         TCanvas cEff("c_sig_eff","c_sig_eff",900,650);
         cEff.SetLeftMargin(0.12); cEff.SetRightMargin(0.04); cEff.SetBottomMargin(0.12); cEff.SetTopMargin(0.08);
-        cEff.SetGridx(); cEff.SetGridy();
+        cEff.SetGridx(0); cEff.SetGridy(0);
+        double yMaxEff = 0.0;
+        for(double y : passSig2) yMaxEff = std::max(yMaxEff, y);
+        if(yMaxEff <= 0.0) yMaxEff = 1.0;
+        bandEff.SetMinimum(0.0);
+        bandEff.SetMaximum(1.15 * yMaxEff);
         bandEff.Draw("AF");
         grSigEff.Draw("L");
         TGraph grBestEff(1); grBestEff.SetPoint(0, bestEff, bestSig);
         grBestEff.SetMarkerStyle(29); grBestEff.SetMarkerSize(2.0); grBestEff.SetMarkerColor(kRed+1);
         grBestEff.Draw("P");
-        TLegend legEff(0.25,0.72,0.55,0.92);
+        TLine lineWPEff(bestEff, 0.0, bestEff, 1.15 * yMaxEff);
+        lineWPEff.SetLineStyle(2);
+        lineWPEff.SetLineWidth(2);
+        lineWPEff.SetLineColor(kRed+1);
+        lineWPEff.Draw("SAME");
+        TLegend legEff(0.52,0.16,0.86,0.34);
         legEff.SetBorderSize(0); legEff.SetFillStyle(0); legEff.SetTextFont(42);
         legEff.AddEntry(&grSigEff, "3#sigma curve", "l");
         legEff.AddEntry(&bandEff,  "#pm1#sigma band", "f");
         legEff.AddEntry(&grBestEff, "Best WP", "p");
+        legEff.AddEntry(&lineWPEff, "WP vertical line", "l");
         legEff.Draw("SAME");
-        auto ptEff = std::make_unique<TPaveText>(0.6, 0.68, 0.9, 0.92, "NDC");
+        auto ptEff = std::make_unique<TPaveText>(0.15, 0.16, 0.49, 0.34, "NDC");
         ptEff->SetFillStyle(0);
         ptEff->SetBorderSize(0);
         ptEff->SetTextFont(42);
         ptEff->SetTextAlign(11);
+        ptEff->AddText(Form("WP score = %.3f", bestScore));
         ptEff->AddText(Form("#epsilon(#it{BDT}) = %.3f", bestEff));
         ptEff->AddText(Form("N_{s}/#sqrt{(N_{s}+N_{B})} #times #epsilon(#it{BDT}) = %.2f", bestSig));
         ptEff->Draw();

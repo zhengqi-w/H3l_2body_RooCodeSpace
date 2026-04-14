@@ -148,8 +148,8 @@ struct RunConfig {
     std::string sigFunc;
     std::string isMatter;
     std::string mcFileForAcceptance;
-    std::vector<std::string> spectrumMcFiles;
     std::vector<double> cenBins;
+    std::vector<std::vector<double>> ptBinsByCentrality;
     std::string mcFileForAbsorption;
     double originalCtaoAbsorption{7.6};
     std::string absorptionTree;
@@ -159,7 +159,6 @@ struct RunConfig {
     std::string additionalDataSelection;
     std::string centralitySelection;
     bool enableOneBinQa{false};
-    bool saveHypertritonQaTree{false};
     bool onTheFlyChecksEnabled{false};
     bool saveChecksPdf{false};
     bool saveResultsToPdf{false};
@@ -170,7 +169,6 @@ struct RunConfig {
     std::unordered_map<std::string, AxisSpec> oneBinQaAxisPool;
     std::string onTheFlyChecksRoot;
     std::string onTheFlyChecksPdfDir;
-    std::string hypertritonQaTreeRoot;
     std::vector<double> ptBins;
     std::vector<std::vector<double>> ctBinsByPt;
     bool addAbsorptionCorrectionPtCt{false};
@@ -178,6 +176,7 @@ struct RunConfig {
     bool doSystematics{false};
     int randomSeed{40};
     int systNtrails{200};
+    int nBinsForFit{100};
     int systBdtScoreNPoints{20};
     double systThrChi2Ndf{2.0};
     double systThrSignificance{2.5};
@@ -187,6 +186,7 @@ struct RunConfig {
     std::vector<std::string> systAbsorptionFileLabels;
 
     double branchingRatio{0.25};
+    double branchingRatioFractionalUncertainty{0.0};
     double deltaRap{2.0};
 
     GeneralHelper::MassFitConfig fitCfg;
@@ -242,9 +242,8 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     out.additionalDataSelection = GetS(profile, "additional_data_selection", "");
     out.centralitySelection = GetS(profile, "centrality_selection", "");
     const bool checksEnabled = checks.value("enabled", false);
-    out.saveHypertritonQaTree = onFlyChecks.value("save_hypertriton_qa_tree", false);
     out.onTheFlyChecksEnabled = checksEnabled && onFlyChecks.value("enable", false);
-    out.enableOneBinQa = out.saveHypertritonQaTree || out.onTheFlyChecksEnabled;
+    out.enableOneBinQa = out.onTheFlyChecksEnabled;
     out.saveChecksPdf = checks.value("save_pdf", false);
     out.saveResultsToPdf = execution.value("save_results_to_pdf", false);
     out.onTheFlyMassWindowNSigmas = onFlyChecks.value("nsigmas_mass_window", 0.0);
@@ -290,11 +289,11 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     }
     out.addAbsorptionCorrectionPtCt = profile.value("add_absorption_correction", false);
     out.mcFileForAcceptance = GetS(path, "mc_file_for_acceptance", "");
-    if (path.contains("spectrum_mc_files") && path["spectrum_mc_files"].is_array()) {
-        out.spectrumMcFiles = path["spectrum_mc_files"].get<std::vector<std::string>>();
-    }
     if (profile.contains("cen_bins") && profile["cen_bins"].is_array()) {
         out.cenBins = profile["cen_bins"].get<std::vector<double>>();
+    }
+    if (profile.contains("pt_bins_by_centrality") && profile["pt_bins_by_centrality"].is_array()) {
+        out.ptBinsByCentrality = profile["pt_bins_by_centrality"].get<std::vector<std::vector<double>>>();
     }
     out.mcFileForAbsorption = GetS(path, "mc_file_for_absorption", "");
     out.originalCtaoAbsorption = GetD(params, "original_ctao_absorption", out.originalCtaoAbsorption);
@@ -303,6 +302,7 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     out.doSystematics = doSystExec && mode != "topology_spectrum";
     out.randomSeed = GetI(syst, "random_seed", out.randomSeed);
     out.systNtrails = GetI(syst, "syst_ntrails", out.systNtrails);
+    out.nBinsForFit = GetI(syst, "n_bins_for_fit", out.nBinsForFit);
     out.systBdtScoreNPoints = GetI(syst, "syst_bdt_score_npoints", out.systBdtScoreNPoints);
     out.systThrChi2Ndf = GetD(syst, "syst_thrashold_chi2ndf", out.systThrChi2Ndf);
     out.systThrSignificance = GetD(syst, "syst_thrashold_significance", out.systThrSignificance);
@@ -319,6 +319,9 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
         out.systAbsorptionFileLabels = syst["syst_absorption_file_labels"].get<std::vector<std::string>>();
     }
     out.branchingRatio = GetD(params, "branching_ratio", out.branchingRatio);
+    out.branchingRatioFractionalUncertainty =
+        GetD(params, "branching_ratio_fractional_uncertainty",
+             GetD(syst, "branching_ratio_fractional_uncertainty", out.branchingRatioFractionalUncertainty));
     out.deltaRap = GetD(params, "delta_rap", out.deltaRap);
 
     out.fitCfg.massMin = GetD(params, "mass_min", 2.96);
@@ -341,7 +344,6 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     out.outputRoot = outputDir + "/spectrum.root";
     out.onTheFlyChecksRoot = outputDir + "/Checks_hypertriton/checks_hypertriton.root";
     out.onTheFlyChecksPdfDir = outputDir + "/Checks_hypertriton";
-    out.hypertritonQaTreeRoot = outputDir + "/Checks_hypertriton/hypertriton_qa_tree.root";
 
     if (out.onTheFlyVariables.empty()) {
         out.onTheFlyVariables = out.oneBinQaColumns;
@@ -355,32 +357,16 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     return out;
 }
 
-std::string ResolveAcceptanceMcFileForGroup(const RunConfig &runCfg, const GroupContext &group) {
-    // Only spectrum-like modes require centrality-specific acceptance MC selection.
-    if (!(runCfg.mode == "bdt_spectrum" || runCfg.mode == "topology_spectrum")) {
-        return runCfg.mcFileForAcceptance;
-    }
-    if (group.items.empty()) return runCfg.mcFileForAcceptance;
-    if (runCfg.spectrumMcFiles.empty() || runCfg.cenBins.size() < 2) {
-        return runCfg.mcFileForAcceptance;
-    }
-
-    const double cmin = group.items.front().cenMin;
-    const double cmax = group.items.front().cenMax;
-    constexpr double kTol = 1e-6;
-
-    for (std::size_t i = 0; i + 1 < runCfg.cenBins.size(); ++i) {
-        if (std::abs(runCfg.cenBins[i] - cmin) > kTol) continue;
-        if (std::abs(runCfg.cenBins[i + 1] - cmax) > kTol) continue;
-
-        if (i < runCfg.spectrumMcFiles.size() && !runCfg.spectrumMcFiles[i].empty()) {
-            const std::filesystem::path p(runCfg.spectrumMcFiles[i]);
-            if (std::filesystem::exists(p)) return p.string();
-        }
-        return runCfg.mcFileForAcceptance;
-    }
-
+std::string ResolveAcceptanceMcFileForGroup(const RunConfig &runCfg, const GroupContext &) {
     return runCfg.mcFileForAcceptance;
+}
+
+bool IsAbsorptionCorrectionEnabled(const RunConfig &runCfg) {
+    // add_absorption_correction switch is currently defined for pt_ct/ct_single profiles.
+    if (runCfg.mode == "pt_ct" || runCfg.mode == "ct_single") {
+        return runCfg.addAbsorptionCorrectionPtCt;
+    }
+    return true;
 }
 
 std::vector<GroupContext> BuildGroups(const std::string &mode, const BinPlan &plan) {
@@ -507,10 +493,12 @@ CorrectedCountsResult ComputeCorrectedCounts(const std::string &mode,
         return out;
     } else if (mode == "ct_single") {
         const double binWidth = item.ctMax - item.ctMin;
-        const double base = raw / accVal / absoVal / eff;
-        const double baseErr = rawErr / accVal / absoVal / eff;
+        const double absoFactor = addAbsorptionCorrectionPtCt ? absoVal : 1.0;
+        const double base = raw / accVal / absoFactor / eff;
+        const double baseErr = rawErr / accVal / absoFactor / eff;
         out.value = base / std::max(1e-12, binWidth);
         out.error = baseErr / std::max(1e-12, binWidth);
+        out.absorption = absoFactor;
         out.binWidth = std::max(1e-12, binWidth);
         return out;
     } else if (mode == "pt_ct") {
@@ -600,6 +588,19 @@ void ExportRootObjectsToPdf(TDirectory *dir,
         if (inStdDir && obj->InheritsFrom(TH1::Class())) {
             auto *h = dynamic_cast<TH1 *>(obj);
             if (!h) continue;
+            const std::string hname = h->GetName();
+            if (hname.rfind("h_raw_over_nevents", 0) == 0) {
+                std::string cname = hname;
+                cname[0] = 'c';
+                TObject *cObj = dir->Get(cname.c_str());
+                auto *cFromDir = dynamic_cast<TCanvas *>(cObj);
+                if (cFromDir) {
+                    const std::string outName = BuildPdfNameWithSuffix(hname, relPath, usedNames);
+                    const std::filesystem::path outFile = outRoot / (outName + ".pdf");
+                    cFromDir->SaveAs(outFile.string().c_str());
+                    continue;
+                }
+            }
             TCanvas cTmp((std::string("c_pdf_") + h->GetName()).c_str(), h->GetName(), 900, 700);
             cTmp.cd();
             if (h->InheritsFrom(TH2::Class())) h->Draw("COLZ");
@@ -708,13 +709,15 @@ BinningCorrectionConfig BuildCorrectionConfig(const RunConfig &runCfg) {
     cfg.absorptionTree = runCfg.absorptionTree;
     cfg.mcFileForAcceptance = runCfg.mcFileForAcceptance;
     cfg.mcFileForAbsorption = runCfg.mcFileForAbsorption;
-    if (runCfg.mode == "pt_ct" && !runCfg.addAbsorptionCorrectionPtCt) {
+    if (!IsAbsorptionCorrectionEnabled(runCfg)) {
         cfg.mcFileForAbsorption.clear();
     }
     cfg.mcEfficiencySelection = JoinSelectionParts({runCfg.basicSelectionDataForMcEff,
                                                     runCfg.additionalDataSelectionGeneral,
                                                     runCfg.additionalDataSelection});
     cfg.originalCtaoAbsorption = runCfg.originalCtaoAbsorption;
+    cfg.cenBins = runCfg.cenBins;
+    cfg.ptBinsByCentrality = runCfg.ptBinsByCentrality;
     cfg.ptBins = runCfg.ptBins;
     cfg.ctBinsByPt = runCfg.ctBinsByPt;
     return cfg;
@@ -727,6 +730,7 @@ struct SysBinArtifacts {
     std::unique_ptr<TH1D> hCorrVsAbso;
     std::vector<std::unique_ptr<RooPlot>> trailFrames;
     std::unique_ptr<TCanvas> cCorrDist;
+    std::unique_ptr<TCanvas> cCorrVsAbso;
     double selectionRms{0.0};
     double absorptionRms{0.0};
 };
@@ -774,8 +778,11 @@ void WriteGroupOutput(TFile &fout,
                       TH1D *hFitSigma,
                       TH1D *hFitMean,
                       TH1D *hFitChi2,
+                      TH1D *hRawOverNevts,
+                      TCanvas *cRawOverNevts,
                       TH1D *hSysSelection,
                       TH1D *hSysAbsorption,
+                      TH1D *hSysBranching,
                       TH1D *hSysTotal,
                       TH1D *hFinalStat,
                       TGraphAsymmErrors *gFinalSys,
@@ -787,6 +794,9 @@ void WriteGroupOutput(TFile &fout,
                       TF1 *finalStdFit = nullptr,
                       const std::string &finalXAxisTitle = "",
                       const std::string &finalExtraText = "",
+                      const PlotLabelConfig *finalLabelCfg = nullptr,
+                      const std::string &finalIsMatter = "",
+                      double finalNEvents = 0.0,
                       TH1D *tauPerPt = nullptr) {
     // Keep the file content from other groups/modes and rewrite only this first-level group.
     if (fout.GetDirectory(dirName.c_str())) {
@@ -809,6 +819,8 @@ void WriteGroupOutput(TFile &fout,
         if (hFitSigma) hFitSigma->Write("h_fit_sigma", TObject::kOverwrite);
         if (hFitMean) hFitMean->Write("h_fit_mean", TObject::kOverwrite);
         if (hFitChi2) hFitChi2->Write("h_fit_chi2ndf", TObject::kOverwrite);
+        if (hRawOverNevts) hRawOverNevts->Write("h_raw_over_nevents", TObject::kOverwrite);
+        if (cRawOverNevts) cRawOverNevts->Write("c_raw_over_nevents", TObject::kOverwrite);
         if (shapeFits) {
             for (const auto &fn : *shapeFits) {
                 if (fn) fn->Write(fn->GetName(), TObject::kOverwrite);
@@ -868,6 +880,7 @@ void WriteGroupOutput(TFile &fout,
             // Ensure corr-dist canvas is stored directly under sys/subbin, not in trails_FitFrames.
             subDir->cd();
             if (art.cCorrDist) art.cCorrDist->Write(art.cCorrDist->GetName(), TObject::kOverwrite);
+            if (art.cCorrVsAbso) art.cCorrVsAbso->Write(art.cCorrVsAbso->GetName(), TObject::kOverwrite);
         }
     }
 
@@ -876,18 +889,23 @@ void WriteGroupOutput(TFile &fout,
     if (gFinalSys) gFinalSys->Write("g_final_spectrum_sys", TObject::kOverwrite);
     if (hSysSelection) hSysSelection->Write("h_sys_selection", TObject::kOverwrite);
     if (hSysAbsorption) hSysAbsorption->Write("h_sys_absorption", TObject::kOverwrite);
+    if (hSysBranching) hSysBranching->Write("h_sys_branching_ratio", TObject::kOverwrite);
     if (hSysTotal) hSysTotal->Write("h_sys_total", TObject::kOverwrite);
 
-    auto cSys = MakeSystematicsDetailCanvas("c_sys_details", hSysSelection, hSysAbsorption, hSysTotal);
+    auto cSys = MakeSystematicsDetailCanvas("c_sys_details", hSysSelection, hSysAbsorption, hSysBranching, hSysTotal);
     if (cSys) cSys->Write("c_sys_details", TObject::kOverwrite);
     auto cFinal = MakeFinalSpectrumCanvas("c_final_spectrum",
                                           hFinalStat,
                                           gFinalSys,
                                           finalStdFit,
                                           finalXAxisTitle,
-                                          finalExtraText);
+                                          finalExtraText,
+                                          finalLabelCfg ? *finalLabelCfg : PlotLabelConfig{},
+                                          finalIsMatter,
+                                          finalNEvents);
     if (cFinal) cFinal->Write("c_final_spectrum", TObject::kOverwrite);
 }
+
 
 void AppendCorrectionsCsv(const std::string &csvPath,
                           const std::string &mode,
@@ -926,9 +944,19 @@ void WriteOnTheFlyChecksOutput(const std::string &rootFilePath,
                                const std::unordered_map<std::string, AxisSpec> &axisPool,
                                bool savePdf,
                                const std::string &pdfBaseDir) {
-    if (qaColumns.empty() || qaCandidates.empty() || variables.empty()) return;
+    if (qaColumns.empty()) return;
 
-    std::filesystem::create_directories(std::filesystem::path(rootFilePath).parent_path());
+    const std::filesystem::path baseDir = std::filesystem::path(rootFilePath).parent_path();
+    std::filesystem::path pdfDir;
+    if (savePdf) {
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path(pdfBaseDir), ec);
+        pdfDir = std::filesystem::path(pdfBaseDir);
+    }
+
+    std::filesystem::create_directories(baseDir);
+    if (savePdf) std::filesystem::create_directories(pdfDir);
+
     TFile checksFile(rootFilePath.c_str(), "RECREATE");
     if (checksFile.IsZombie()) {
         std::cerr << "[on_the_fly_checks] cannot open output ROOT: " << rootFilePath << std::endl;
@@ -950,14 +978,6 @@ void WriteOnTheFlyChecksOutput(const std::string &rootFilePath,
     groupDir->cd();
     std::unordered_map<std::string, size_t> colIndex;
     for (size_t i = 0; i < qaColumns.size(); ++i) colIndex[qaColumns[i]] = i;
-
-    std::filesystem::path pdfDir;
-    if (savePdf) {
-        std::error_code ec;
-        std::filesystem::remove_all(std::filesystem::path(pdfBaseDir), ec);
-        pdfDir = std::filesystem::path(pdfBaseDir);
-        std::filesystem::create_directories(pdfDir);
-    }
 
     for (const auto &var : variables) {
         auto it = colIndex.find(var);
@@ -1005,21 +1025,8 @@ void WriteOnTheFlyChecksOutput(const std::string &rootFilePath,
         }
     }
 
-    checksFile.Close();
-}
-
-void WriteHypertritonQATreeOutput(const std::string &rootFilePath,
-                                  const std::vector<std::string> &qaColumns,
-                                  const std::vector<ProcessOneBinResult::H3lQAVars> &qaCandidates) {
-    if (qaColumns.empty() || qaCandidates.empty()) return;
-
-    std::filesystem::create_directories(std::filesystem::path(rootFilePath).parent_path());
-    TFile outFile(rootFilePath.c_str(), "RECREATE");
-    if (outFile.IsZombie()) {
-        std::cerr << "[hypertriton_qa_tree] cannot open output ROOT: " << rootFilePath << std::endl;
-        return;
-    }
-
+    // Also persist the filtered QA candidates as a tree in the same output file.
+    groupDir->cd();
     TTree tree("hypertriton_qa_all", "hypertriton_qa_all");
     std::vector<double> scalars(qaColumns.size(), 0.0);
     for (size_t ic = 0; ic < qaColumns.size(); ++ic) {
@@ -1032,9 +1039,9 @@ void WriteHypertritonQATreeOutput(const std::string &rootFilePath,
         for (size_t ic = n; ic < scalars.size(); ++ic) scalars[ic] = 0.0;
         tree.Fill();
     }
-
     tree.Write("", TObject::kOverwrite);
-    outFile.Close();
+
+    checksFile.Close();
 }
 
 SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
@@ -1076,7 +1083,8 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
     std::shuffle(combos.begin(), combos.end(), rng);
     const size_t nUse = std::min(combos.size(), static_cast<size_t>(std::max(1, runCfg.systNtrails)));
 
-    out.hCorrDist = std::make_unique<TH1D>(("h_corr_syst_" + item.label).c_str(), ";Corrected counts;Entries", 100,
+    const int nBinsCorrDist = std::max(10, runCfg.nBinsForFit);
+    out.hCorrDist = std::make_unique<TH1D>(("h_corr_syst_" + item.label).c_str(), ";Corrected counts;Entries", nBinsCorrDist,
                                            stdCorr - 5.0 * std::max(1e-12, stdCorrErr),
                                            stdCorr + 5.0 * std::max(1e-12, stdCorrErr));
     out.hCorrDist->SetDirectory(nullptr);
@@ -1257,6 +1265,27 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
         var /= static_cast<double>(corrVariants.size());
         out.absorptionRms = std::sqrt(std::max(0.0, var));
     }
+
+    if (out.hCorrVsAbso) {
+        const std::string cName = "c_absorption_source_" + item.label;
+        out.cCorrVsAbso = std::make_unique<TCanvas>(cName.c_str(), cName.c_str(), 960, 720);
+        out.cCorrVsAbso->cd();
+        out.cCorrVsAbso->SetLeftMargin(0.14);
+        out.cCorrVsAbso->SetBottomMargin(0.18);
+        out.cCorrVsAbso->SetRightMargin(0.05);
+        out.cCorrVsAbso->SetTopMargin(0.08);
+        out.cCorrVsAbso->SetTicks(1, 1);
+
+        out.hCorrVsAbso->SetLineWidth(2);
+        out.hCorrVsAbso->SetLineColor(kBlue + 1);
+        out.hCorrVsAbso->GetXaxis()->LabelsOption("v");
+        out.hCorrVsAbso->GetXaxis()->SetLabelSize(0.04);
+        out.hCorrVsAbso->GetYaxis()->SetTitleOffset(1.35);
+        out.hCorrVsAbso->Draw("HIST");
+
+        out.cCorrVsAbso->Modified();
+        out.cCorrVsAbso->Update();
+    }
     return out;
 }
 
@@ -1373,6 +1402,22 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
     const std::vector<GroupContext> groups = BuildGroups(modeName, plan);
     const std::string csvPath = std::filesystem::path(runCfg.outputRoot).parent_path().string() + "/corrections_all.csv";
 
+    // Clear previous CSV before appending new rows for this run.
+    {
+        std::error_code ec;
+        std::filesystem::remove(csvPath, ec);
+    }
+
+    const bool isSpectrumMode = (modeName == "bdt_spectrum" || modeName == "topology_spectrum");
+    const bool isLifetimeMode = (modeName == "ct_single" || modeName == "pt_ct");
+    const bool applyBrSystematic = runCfg.doSystematics &&
+                                   (isSpectrumMode || isLifetimeMode) &&
+                                   runCfg.branchingRatioFractionalUncertainty > 0.0;
+    const std::string periodTag = runCfg.plotLabels.period + "_" + runCfg.plotLabels.periodMark;
+    double totalRawOverNevts = 0.0;
+    double totalEventsOverNevts = 0.0;
+    double totalRawErr2OverNevts = 0.0;
+
     std::filesystem::create_directories(std::filesystem::path(runCfg.outputRoot).parent_path());
     TFile fout(runCfg.outputRoot.c_str(), "UPDATE");
     if (fout.IsZombie()) {
@@ -1381,18 +1426,20 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
 
     PtCtAcceptanceCache ptCtAccCache;
     PtCtAbsorptionCache ptCtAbsoCache;
+    SpectrumAcceptanceCache spectrumAccCache;
     if (modeName == "pt_ct") {
         ptCtAccCache = BuildPtCtAcceptanceCache(corrCfg, runCfg.mcFileForAcceptance);
         if (runCfg.addAbsorptionCorrectionPtCt) {
             ptCtAbsoCache = BuildPtCtAbsorptionCache(corrCfg, runCfg.mcFileForAbsorption);
         }
+    } else if (isSpectrumMode) {
+        const std::string mcFileForAccSpectrum = ResolveAcceptanceMcFileForGroup(runCfg, GroupContext{});
+        spectrumAccCache = BuildSpectrumAcceptanceCache(corrCfg, mcFileForAccSpectrum);
     }
 
     std::unordered_map<std::string, std::shared_ptr<ROOT::RDataFrame>> rdfCache;
     std::vector<std::string> onTheFlyQaColumns = runCfg.oneBinQaColumns;
     std::vector<ProcessOneBinResult::H3lQAVars> onTheFlyQaCandidates;
-    std::vector<std::string> qaTreeColumns = runCfg.oneBinQaColumns;
-    std::vector<ProcessOneBinResult::H3lQAVars> qaTreeCandidates;
 
     std::ofstream trailLog;
     if (runCfg.doSystematics) {
@@ -1419,6 +1466,9 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         const auto edges = BuildAxisEdges(modeName, group.items);
         if (edges.size() < 2) continue;
 
+        double rawSumGroup = 0.0;
+        double rawSumGroupErr2 = 0.0;
+
         const bool useCtAxis = (modeName == "ct_single" || modeName == "pt_ct");
         auto hRaw = std::make_unique<TH1D>("h_raw_counts", useCtAxis ? ";ct;N_{raw}" : ";p_{T};N_{raw}",
                                            static_cast<int>(edges.size() - 1), edges.data());
@@ -1440,6 +1490,8 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                                static_cast<int>(edges.size() - 1), edges.data());
         auto hSysAbsorption = std::make_unique<TH1D>("h_sys_absorption", useCtAxis ? ";ct;#sigma_{syst}^{abso}" : ";p_{T};#sigma_{syst}^{abso}",
                             static_cast<int>(edges.size() - 1), edges.data());
+        auto hSysBranching = std::make_unique<TH1D>("h_sys_branching_ratio", useCtAxis ? ";ct;#sigma_{syst}^{BR}" : ";p_{T};#sigma_{syst}^{BR}",
+                    static_cast<int>(edges.size() - 1), edges.data());
         auto hSysTotal = std::make_unique<TH1D>("h_sys_total", useCtAxis ? ";ct;#sigma_{syst}^{total}" : ";p_{T};#sigma_{syst}^{total}",
                              static_cast<int>(edges.size() - 1), edges.data());
         hRaw->SetDirectory(nullptr);
@@ -1463,6 +1515,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         hFitChi2->SetStats(false);
         hSysSelection->SetStats(false);
         hSysAbsorption->SetStats(false);
+        hSysBranching->SetStats(false);
         hSysTotal->SetStats(false);
         std::vector<std::unique_ptr<RooPlot>> fitFrames;
         std::vector<std::unique_ptr<TCanvas>> stdDataFitCanvases;
@@ -1471,14 +1524,20 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         std::vector<SysBinArtifacts> sysArtifacts;
 
         const std::string mcFileForAccGroup = ResolveAcceptanceMcFileForGroup(runCfg, group);
-        const auto accVec = ComputeAcceptancePerBinWithErrors(corrCfg, group.items, edges, mcFileForAccGroup, &ptCtAccCache);
+        const auto accVec = ComputeAcceptancePerBinWithErrors(corrCfg,
+                                      group.items,
+                                      edges,
+                                      mcFileForAccGroup,
+                                      &ptCtAccCache,
+                                      &spectrumAccCache);
+        const bool applyAbsorptionCorrection = IsAbsorptionCorrectionEnabled(runCfg);
         std::vector<BinValueWithError> absoVec(group.items.size(), BinValueWithError{});
-        if (!(modeName == "pt_ct" && !runCfg.addAbsorptionCorrectionPtCt)) {
+        if (applyAbsorptionCorrection) {
             absoVec = ComputeAbsorptionPerBinWithErrors(corrCfg, group.items, edges, "", &ptCtAbsoCache);
         }
 
         std::map<std::string, std::vector<double>> absoVecByFile;
-        const bool enableAbsorptionSystematic = !(modeName == "pt_ct" && !runCfg.addAbsorptionCorrectionPtCt);
+        const bool enableAbsorptionSystematic = applyAbsorptionCorrection;
         if (runCfg.doSystematics && enableAbsorptionSystematic) {
             std::vector<std::string> absoFiles = runCfg.systAbsorptionFiles;
             if (absoFiles.empty() && !runCfg.mcFileForAbsorption.empty()) {
@@ -1565,52 +1624,6 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             }
 
             if (runCfg.enableOneBinQa && !oneBinRes.qaCandidates.empty()) {
-                if (runCfg.saveHypertritonQaTree) {
-                    if (qaTreeColumns.empty()) {
-                        qaTreeColumns = oneBinRes.qaColumns;
-                    }
-                    std::unordered_map<std::string, size_t> srcIndexTree;
-                    for (size_t i = 0; i < oneBinRes.qaColumns.size(); ++i) {
-                        srcIndexTree[oneBinRes.qaColumns[i]] = i;
-                    }
-                    const bool applyMassWindowForTree =
-                        runCfg.onTheFlyMassWindowNSigmas > 0.0 && oneBinRes.massFit.sigmaData > 0.0;
-                    double massMinTree = -std::numeric_limits<double>::infinity();
-                    double massMaxTree = std::numeric_limits<double>::infinity();
-                    if (applyMassWindowForTree) {
-                        massMinTree = oneBinRes.massFit.meanData -
-                                      runCfg.onTheFlyMassWindowNSigmas * oneBinRes.massFit.sigmaData;
-                        massMaxTree = oneBinRes.massFit.meanData +
-                                      runCfg.onTheFlyMassWindowNSigmas * oneBinRes.massFit.sigmaData;
-                    }
-                    const auto itMassTree = srcIndexTree.find("fMassH3L");
-                    const auto itPtTree = srcIndexTree.find("fPt");
-
-                    for (const auto &srcRow : oneBinRes.qaCandidates) {
-                        if (applyMassWindowForTree && itMassTree != srcIndexTree.end()) {
-                            if (itMassTree->second >= srcRow.values.size()) continue;
-                            const double m = srcRow.values[itMassTree->second];
-                            if (m < massMinTree || m > massMaxTree) continue;
-                        }
-                        // Keep QA tree rows strictly in the current bin's pT range.
-                        if ((modeName == "bdt_spectrum" || modeName == "topology_spectrum") &&
-                            itPtTree != srcIndexTree.end()) {
-                            if (itPtTree->second >= srcRow.values.size()) continue;
-                            const double pt = srcRow.values[itPtTree->second];
-                            if (pt < item.ptMin || pt >= item.ptMax) continue;
-                        }
-
-                        ProcessOneBinResult::H3lQAVars dstRow;
-                        dstRow.values.assign(qaTreeColumns.size(), 0.0);
-                        for (size_t ic = 0; ic < qaTreeColumns.size(); ++ic) {
-                            auto it = srcIndexTree.find(qaTreeColumns[ic]);
-                            if (it != srcIndexTree.end() && it->second < srcRow.values.size()) {
-                                dstRow.values[ic] = srcRow.values[it->second];
-                            }
-                        }
-                        qaTreeCandidates.push_back(std::move(dstRow));
-                    }
-                }
                 if (runCfg.onTheFlyChecksEnabled) {
                     if (onTheFlyQaColumns.empty()) {
                         onTheFlyQaColumns = oneBinRes.qaColumns;
@@ -1682,6 +1695,8 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
 
             hRaw->SetBinContent(ib, fitRes.signal);
             hRaw->SetBinError(ib, fitRes.signalErr);
+            rawSumGroup += fitRes.signal;
+            rawSumGroupErr2 += fitRes.signalErr * fitRes.signalErr;
             hCorr->SetBinContent(ib, corr);
             hCorr->SetBinError(ib, corrRes.error);
             hBdtEff->SetBinContent(ib, bdtEff);
@@ -1695,6 +1710,11 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             hFitMean->SetBinContent(ib, fitRes.meanData);
             hFitMean->SetBinError(ib, fitRes.meanDataErr);
             hFitChi2->SetBinContent(ib, fitRes.chi2Data);
+            if (applyBrSystematic) {
+                hSysBranching->SetBinContent(ib, std::abs(corr) * runCfg.branchingRatioFractionalUncertainty);
+            } else {
+                hSysBranching->SetBinContent(ib, 0.0);
+            }
 
             AppendCorrectionsCsv(csvPath, modeName, group.dirName, item, fitRes, corrRes);
 
@@ -1715,12 +1735,11 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             }
         }
 
-        if (runCfg.doSystematics) {
-            for (int ib = 1; ib <= hSysTotal->GetNbinsX(); ++ib) {
-                const double fitV = hSysSelection->GetBinContent(ib);
-                const double absoV = hSysAbsorption->GetBinContent(ib);
-                hSysTotal->SetBinContent(ib, std::sqrt(fitV * fitV + absoV * absoV));
-            }
+        for (int ib = 1; ib <= hSysTotal->GetNbinsX(); ++ib) {
+            const double fitV = hSysSelection->GetBinContent(ib);
+            const double absoV = hSysAbsorption->GetBinContent(ib);
+            const double brV = hSysBranching->GetBinContent(ib);
+            hSysTotal->SetBinContent(ib, std::sqrt(fitV * fitV + absoV * absoV + brV * brV));
         }
 
         auto hFinalStat = std::unique_ptr<TH1D>(static_cast<TH1D *>(hCorr->Clone("h_final_spectrum_stat")));
@@ -1770,6 +1789,17 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             if (expoOut.canvas) shapeFitCanvases.push_back(std::move(expoOut.canvas));
         }
 
+        std::unique_ptr<TH1D> hRawOverNevts;
+        std::unique_ptr<TCanvas> cRawOverNevts;
+        if (isSpectrumMode) {
+            const double rawErrGroup = std::sqrt(std::max(0.0, rawSumGroupErr2));
+            hRawOverNevts = MakeRawOverNevtsHist("h_raw_over_nevents", rawSumGroup, rawErrGroup, groupNEvents, group.dirName);
+            cRawOverNevts = MakeRawOverNevtsCanvas("c_raw_over_nevents", hRawOverNevts.get(), rawSumGroup, rawErrGroup, groupNEvents, group.dirName, periodTag);
+            totalRawOverNevts += rawSumGroup;
+            totalEventsOverNevts += groupNEvents;
+            totalRawErr2OverNevts += rawSumGroupErr2;
+        }
+
         TF1 *finalStdFit = shapeFits.empty() ? nullptr : shapeFits.front().get();
         const std::string finalXAxisTitle = useCtAxis ? "#it{c}t (cm)" : "#it{p}_{T} (GeV/#it{c})";
         const std::string finalExtraText = group.dirName;
@@ -1784,11 +1814,14 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                          hFitSigma.get(),
                          hFitMean.get(),
                          hFitChi2.get(),
-                         runCfg.doSystematics ? hSysSelection.get() : nullptr,
-                         runCfg.doSystematics ? hSysAbsorption.get() : nullptr,
-                         runCfg.doSystematics ? hSysTotal.get() : nullptr,
+                         hRawOverNevts.get(),
+                         cRawOverNevts.get(),
+                         hSysSelection.get(),
+                         hSysAbsorption.get(),
+                         hSysBranching.get(),
+                         hSysTotal.get(),
                          hFinalStat.get(),
-                         runCfg.doSystematics ? gFinalSys.get() : nullptr,
+                         gFinalSys.get(),
                          runCfg.doSystematics ? &sysArtifacts : nullptr,
                          &fitFrames,
                          &stdDataFitCanvases,
@@ -1796,8 +1829,43 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                          &shapeFitCanvases,
                          finalStdFit,
                          finalXAxisTitle,
-                         finalExtraText);
+                         finalExtraText,
+                         &runCfg.plotLabels,
+                         runCfg.isMatter,
+                         groupNEvents);
 
+    }
+
+    if (isSpectrumMode && totalEventsOverNevts > 0.0) {
+        const double rawErrAll = std::sqrt(std::max(0.0, totalRawErr2OverNevts));
+        auto hAll = MakeRawOverNevtsHist("h_raw_over_nevents_all",
+                                         totalRawOverNevts,
+                                         rawErrAll,
+                                         totalEventsOverNevts,
+                                         "all_centralities");
+        auto cAll = MakeRawOverNevtsCanvas("c_raw_over_nevents_all",
+                                           hAll.get(),
+                                           totalRawOverNevts,
+                                           rawErrAll,
+                                           totalEventsOverNevts,
+                                           "all_centralities",
+                                           periodTag);
+        TDirectory *summaryDir = fout.GetDirectory("summary");
+        if (summaryDir) {
+            fout.cd();
+            fout.Delete("summary;*");
+        }
+        summaryDir = fout.GetDirectory("summary");
+        if (!summaryDir) summaryDir = fout.mkdir("summary");
+        if (summaryDir) {
+            TDirectory *stdDir = summaryDir->GetDirectory("std");
+            if (!stdDir) stdDir = summaryDir->mkdir("std");
+            if (stdDir) {
+                stdDir->cd();
+                if (hAll) hAll->Write("h_raw_over_nevents_all", TObject::kOverwrite);
+                if (cAll) cAll->Write("c_raw_over_nevents_all", TObject::kOverwrite);
+            }
+        }
     }
 
     if (modeName == "pt_ct" && hTauPerPt) {
@@ -1815,7 +1883,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         cTau->Write("c_tau_per_ptbin", TObject::kOverwrite);
     }
 
-    if (runCfg.onTheFlyChecksEnabled && !onTheFlyQaCandidates.empty()) {
+    if (runCfg.onTheFlyChecksEnabled) {
         WriteOnTheFlyChecksOutput(runCfg.onTheFlyChecksRoot,
                                   onTheFlyQaColumns,
                                   onTheFlyQaCandidates,
@@ -1824,12 +1892,6 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                                   runCfg.oneBinQaAxisPool,
                                   runCfg.saveChecksPdf,
                                   runCfg.onTheFlyChecksPdfDir);
-    }
-
-    if (runCfg.saveHypertritonQaTree && !qaTreeCandidates.empty()) {
-        WriteHypertritonQATreeOutput(runCfg.hypertritonQaTreeRoot,
-                                     qaTreeColumns,
-                                     qaTreeCandidates);
     }
 
     fout.Close();

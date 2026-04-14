@@ -38,7 +38,6 @@ class BDTPreProcess:
         self.ct_bins_single = config.get('ct_bins_single', None)
         self.pt_bin = config.get('pt_bin', None)   # for separate mode optional
         self.ct_bin = config.get('ct_bin', None)   # for separate mode optional
-        #self.training_preselections_data = config['training_preselections_data']
         self.basic_selection_data = config.get('basic_selection_data', None)
         self.training_variables = config['training_variables']
         self.extra_vars_save_data = config.get('extra_vars_save_data', [])
@@ -76,14 +75,7 @@ class BDTPreProcess:
         self.mc_rdf = self._correct_and_convert_df(self.mc_rdf, calibrate_he3_pt=False, isMC=True, isH4L=False)
         if self.basic_selection_data:
             self.data_rdf = self.data_rdf.Filter(self.basic_selection_data)
-        spectrum_file = ROOT.TFile.Open("../../../H3l_2body_spectrum/utils/H3L_BwFit.root")
-        he3_spectrum = spectrum_file.Get("BlastWave_H3L_10_30")
-        self.mc_rdf_reweighted = self._reweight_pt_spectrum(self.mc_rdf, "fAbsGenPt", he3_spectrum)
-
-        # mass preselections
-        # self.data_rdf = self.data_rdf.Filter("(fMassH3L<2.95 || fMassH3L>3.02)")
-        # self.mc_rdf_reweighted = self.mc_rdf_reweighted.Filter("(fMassH3L>2.95 && fMassH3L<3.02)")
-        
+            self.mc_rdf = self.mc_rdf.Filter(self.basic_selection_data) # Ensure to synchronize the basic selection on MC        
         if self.extra_vars_save_data:
             self.data_columns = self.training_variables + self.extra_vars_save_data
         else:
@@ -149,9 +141,15 @@ class BDTPreProcess:
         for element_name in element_names:
             cut_min = max(df1[element_name].min(), df2[element_name].min())
             cut_max = min(df1[element_name].max(), df2[element_name].max())
+
             df1 = df1[(df1[element_name] >= cut_min) & (df1[element_name] <= cut_max)]
             df2 = df2[(df2[element_name] >= cut_min) & (df2[element_name] <= cut_max)]
             print(f"Applied cut to {element_name}: range [{cut_min}, {cut_max}]")
+
+        if 'fCt' in df1.columns and 'fCt' in df2.columns:
+            df1 = df1[df1['fCt'] < 50]
+            df2 = df2[df2['fCt'] < 50]
+            print("Applied additional cut: fCt < 50")
 
         handler1.set_data_frame(df1)
         handler2.set_data_frame(df2)
@@ -275,7 +273,7 @@ class BDTPreProcess:
 
         sel_data = " && ".join(sel_data_parts) if sel_data_parts else "1"
         sel_mc = " && ".join(sel_mc_parts) if sel_mc_parts else "1"
-        sel_mc = sel_mc + " && fMassH3L>2.95 && fMassH3L<3.02"
+        sel_mc = sel_mc + " && fIsReco == 1"  # ensure only reconstructed MC is used for training
 
         data_root = self.snapshot_dir / f"data_{label}.root"
         mc_root   = self.snapshot_dir / f"mc_{label}.root"
@@ -291,7 +289,7 @@ class BDTPreProcess:
         try:
             if mc_root.exists():
                 mc_root.unlink()
-            self.mc_rdf_reweighted.Filter(sel_mc).Snapshot(self.tree_name_mc, str(mc_root), self.mc_columns)
+            self.mc_rdf.Filter(sel_mc).Snapshot(self.tree_name_mc, str(mc_root), self.mc_columns)
             print(f"Saved MC snapshot: {mc_root}")
         except Exception as e:
             print(f"Warning: MC snapshot failed for {label}: {e}")
@@ -349,7 +347,7 @@ class BDTPreProcess:
         test_features = train_test_data[2]
         test_labels = train_test_data[3]
 
-        distr = pu.plot_distr([bin_mc_hdl, bin_data_hdl], self.training_variables + ["fMassH3L"], bins=100, labels=['Signal',"Background"],colors=["blue","red"], log=True, density=True, figsize=(18, 13), alpha=0.5, grid=False)
+        distr = pu.plot_distr([bin_mc_hdl, bin_data_hdl], self.training_variables + ["fMassH3L"], bins=100, labels=['Signal',"Background"],colors=["red","blue"], log=True, density=True, figsize=(18, 13), alpha=0.5, grid=False)
         plt.subplots_adjust(left=0.06, bottom=0.06, right=0.99, top=0.96, hspace=0.55, wspace=0.55)
         plt.savefig(f"{self.QA_dir}/features_distributions_{label}.pdf", bbox_inches='tight')
         plt.close("all")
@@ -366,7 +364,7 @@ class BDTPreProcess:
             print(f"Training failed for {pretty_label}: {e}")
             return
 
-        bdt_out_plot = pu.plot_output_train_test(model_hdl, train_test_data, 100, True, ["Signal", "Background"], True, density=True)
+        bdt_out_plot = pu.plot_output_train_test(model_hdl, train_test_data, 100, True, ["Background", "Signal"], True, density=True)
         bdt_out_plot.savefig(f"{self.QA_dir}/bdt_output_{label}.pdf")
         plt.close("all")
 
@@ -530,8 +528,6 @@ class BDTPreProcess:
         side_band_sel_mc = f"(fMassH3L>{self.side_band_edges[0]} and fMassH3L<{self.side_band_edges[1]})"
         bin_data_hdl.apply_preselections(side_band_sel_data)
         bin_mc_hdl.apply_preselections(side_band_sel_mc)
-        #if self.training_preselections_data:
-            #bin_data_hdl.apply_preselections(self.training_preselections_data)
         bin_mc_hdl, bin_data_hdl = self._balance_and_prepare(bin_mc_hdl, bin_data_hdl)
         print(f"Training set sizes after balancing: MC={len(bin_mc_hdl)}, Data={len(bin_data_hdl)}")
 

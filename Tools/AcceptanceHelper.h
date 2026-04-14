@@ -601,7 +601,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         return res;
     }
 
-    // Scenario 4: acc vs pt per centrality bin
+    // Scenario 4: acc vs pt per centrality bin (centBins1D + ptBinsPerCent)
     if (!centBins1D.empty() && !ptBinsPerCent.empty() && ptBinsPerCent.size() == centBins1D.size() - 1 && ptBins1D.empty() && ctBins1D.empty() && ctBinsPerPt.empty()) {
         const int nCent = static_cast<int>(centBins1D.size()) - 1;
         res.evsel_pt_per_cent.assign(nCent, nullptr);
@@ -663,14 +663,15 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genPt, double cent, int evselFlag, int recoFlag, int basicFlag, double genMatter) {
+            [&](unsigned slot, double genPt, double cent, int evselFlag, int recoFlag, int basicFlag, int topologyFlag, double genMatter) {
                 const int centIdx = FindBin(centBins1D, cent);
                 if (centIdx < 0)
                     return;
                 auto &slotHist = acquire_slot(slot);
                 const bool passEvsel = evselFlag != 0;
                 const bool passBasic = basicFlag != 0;
-                const bool passReco = passBasic && (recoFlag != 0);
+                const bool passTopo = topologyFlagColInt.empty() ? true : (topologyFlag != 0);
+                const bool passReco = passBasic && (recoFlag != 0) && passTopo;
                 const bool isMatter = genMatter > 0.0;
                 if (passEvsel) {
                     slotHist.evsel_pt_both[centIdx]->Fill(genPt);
@@ -687,7 +688,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_pt_antimatter[centIdx]->Fill(genPt);
                 }
             },
-            {genPtColUsed, centColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, genMatterColUsed});
+            {genPtColUsed, centColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, topologyFlagColInt, genMatterColUsed});
 
         auto merge_per_cent = [&](auto accessor, const std::string &namePrefix, std::vector<TH1D*> &target) {
             for (int i = 0; i < nCent; ++i) {
