@@ -278,7 +278,8 @@ void ReweightMCAO2D(
     "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/Ploting_scrips/ReweightFunc.root",
     const std::string &outputDir =
         "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/NCrossedRows/reweighted",
-    const std::string &treeName = "O2mchypcands") {
+    const std::string &treeName = "O2mchypcands",
+    bool onlyTwobody = false) {
   if (ROOT::IsImplicitMTEnabled()) {
     ROOT::DisableImplicitMT();
   }
@@ -357,8 +358,16 @@ void ReweightMCAO2D(
             auto originalColumns = GetBranchNames(inTree);
             ROOT::RDataFrame rdfInput(*inTree);
             auto rdfReady = GeneralHelper::CorrectAndConvertRDF(rdfInput, false, true, false);
+            ROOT::RDF::RNode rdfSelected = rdfReady;
+            if (onlyTwobody) {
+              const auto cols = rdfReady.GetColumnNames();
+              if (std::find(cols.begin(), cols.end(), "fIsTwoBodyDecay") == cols.end()) {
+                throw std::runtime_error("Missing required column 'fIsTwoBodyDecay' for onlyTwobody=true");
+              }
+              rdfSelected = rdfReady.Filter([](bool isTwoBody) { return isTwoBody == true; }, {"fIsTwoBodyDecay"});
+            }
 
-            auto hCent = rdfReady.Histo1D(
+            auto hCent = rdfSelected.Histo1D(
                 {"hCent_tmp", ";fCentralityFT0C;counts", 120, 0.0, 120.0}, "fCentralityFT0C");
             hCentAll.Add(&hCent.GetValue());
 
@@ -366,7 +375,7 @@ void ReweightMCAO2D(
               const float cmin = combinedBins[i].minCen;
               const float cmax = combinedBins[i].maxCen;
               const bool isLast = (i + 1 == combinedBins.size());
-              auto byCen = rdfReady.Filter(
+              auto byCen = rdfSelected.Filter(
                   [cmin, cmax, isLast](float cen) {
                     if (isLast) return cen >= cmin;
                     return cen >= cmin && cen < cmax;
@@ -383,7 +392,7 @@ void ReweightMCAO2D(
               hAfterByCen[i].Add(&hAfter.GetValue());
             }
 
-            auto weighted = rdfReady
+            auto weighted = rdfSelected
                                 .Define(
                                     "rej",
                                     [f0, f1, f2, f3, max0, max1, max2, max3](float pt, float cen) {

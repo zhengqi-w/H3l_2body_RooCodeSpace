@@ -1,5 +1,6 @@
 // ProcessWP.C (rewrite per config_WP.json)
 // Usage: root -l -b -q 'ProcessWP.C("config_WP.json")'
+//    or: root -l -b -q 'ProcessWP.C("configs/general_config.json", "ct_single")'
 
 #include <TFile.h>
 #include <TTree.h>
@@ -65,6 +66,91 @@ static void read_score_eff_file(const std::string &path, std::vector<double> &sc
   }
 }
 
+static std::string NormalizeMixMode(std::string mode) {
+  std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+  std::replace(mode.begin(), mode.end(), '-', '_');
+  if (mode == "ptct") return "pt_ct";
+  if (mode == "cenpt") return "cen_pt";
+  if (mode == "ptctsingle") return "pt_ct_single";
+  if (mode == "ptsingle") return "pt_single";
+  if (mode == "ctsingle") return "ct_single";
+  return mode;
+}
+
+static std::string NormalizeWpFilename(std::string name) {
+  const std::string kPrefix = "WorkingPoint_";
+  const std::string kDoublePrefix = kPrefix + kPrefix;
+  while (name.rfind(kDoublePrefix, 0) == 0) {
+    name.erase(0, kPrefix.size());
+  }
+  if (!name.empty() && !(name.size() > 4 && name.substr(name.size() - 4) == ".txt")) {
+    name += ".txt";
+  }
+  return name;
+}
+
+static json ResolveWpConfig(const json &raw_cfg) {
+  if (!raw_cfg.is_object()) return raw_cfg;
+  if (raw_cfg.contains("preprocess") && raw_cfg["preprocess"].is_object() &&
+      raw_cfg["preprocess"].contains("wp") && raw_cfg["preprocess"]["wp"].is_object()) {
+    json cfg = raw_cfg["preprocess"]["wp"];
+
+    const json common = raw_cfg.value("common", json::object());
+    const json paths = common.value("path", json::object());
+    const json binning = common.value("binning", json::object());
+    const json selection = common.value("selection", json::object());
+    const json treeNames = common.value("tree_names", json::object());
+    const json eventHist = common.value("event_hist", json::object());
+    const json params = common.value("parameters", json::object());
+
+    auto set_if_missing = [&](const char *targetKey, const std::vector<std::string> &sourceKeys) {
+      if (cfg.contains(targetKey)) return;
+      for (const auto &k : sourceKeys) {
+        if (paths.contains(k) && !paths[k].is_null()) {
+          cfg[targetKey] = paths[k];
+          return;
+        }
+      }
+    };
+
+    set_if_missing("trained_data_dir", {"snapshot_dir"});
+    set_if_missing("analysisresults_path", {"analysisresults_path"});
+    set_if_missing("mc_path", {"mc_path"});
+    set_if_missing("score_eff_dir", {"wp_dir"});
+    set_if_missing("out_dir", {"wp_dir"});
+    set_if_missing("spectrum_file", {"spectrum_file"});
+
+    if (!cfg.contains("tree_name") && treeNames.contains("data")) cfg["tree_name"] = treeNames["data"];
+    if (!cfg.contains("tree_name_mc") && treeNames.contains("mc")) cfg["tree_name_mc"] = treeNames["mc"];
+    if (!cfg.contains("n_events_hist") && eventHist.contains("n_events_hist")) cfg["n_events_hist"] = eventHist["n_events_hist"];
+    if (!cfg.contains("basic_selection_data") && selection.contains("basic_selection_data")) {
+      cfg["basic_selection_data"] = selection.value("basic_selection_data", "");
+    }
+
+    auto copy_binning = [&](const char *key) {
+      if (!cfg.contains(key) && binning.contains(key)) cfg[key] = binning[key];
+    };
+    copy_binning("cen_bins");
+    copy_binning("pt_bins_by_centrality");
+    copy_binning("pt_bins");
+    copy_binning("ct_bins_single");
+    copy_binning("pt_bins_single");
+    if (!cfg.contains("ct_bins") && binning.contains("ct_bins_by_pt")) {
+      cfg["ct_bins"] = binning["ct_bins_by_pt"];
+    }
+
+    if (!cfg.contains("mix_mode") &&
+        raw_cfg.contains("execution") && raw_cfg["execution"].is_object()) {
+      const auto &execution = raw_cfg["execution"];
+      if (execution.contains("wp_mode")) {
+        cfg["mix_mode"] = execution.value("wp_mode", std::string("pt_ct"));
+      }
+    }
+    return cfg;
+  }
+  return raw_cfg;
+}
+
 // format helper: avoid trailing decimals in filenames
 static std::string fmt_edge(double x){
   char buf[64];
@@ -96,13 +182,16 @@ static std::string make_desc(bool hasCen, bool hasPt, bool hasCt,
   return out;
 }
 
-void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json"){
+void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json", const char *mix_mode_override = ""){
   RooMsgService::instance().setGlobalKillBelow(RooFit::FATAL); // suppress RooFit messages
   gStyle->SetOptStat(0); // disable stats boxes on plots
   // read and parse config
   std::string cfg_text = read_file_to_string(config_path);
   if(cfg_text.empty()){ printf("Failed to read config: %s\n", config_path); return; }
-  json cfg; try{ cfg = json::parse(cfg_text);} catch(...){ printf("Invalid JSON config.\n"); return; }
+  json raw_cfg;
+  try { raw_cfg = json::parse(cfg_text); }
+  catch(...) { printf("Invalid JSON config.\n"); return; }
+  json cfg = ResolveWpConfig(raw_cfg);
 
   // required fields
   std::string trained_data_dir = cfg.value("trained_data_dir", std::string(""));
@@ -110,15 +199,29 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
   std::string tree_name_mc    = cfg.value("tree_name_mc", std::string("O2mchypcands"));
   std::string score_eff_dir   = cfg.value("score_eff_dir", std::string(""));
   std::string out_dir         = cfg.value("out_dir", std::string("WP_output"));
-  std::string name_suffix         = cfg.value("name_suffix", std::string("Crosssection_Customvertex"));
-  std::string mix_mode_cfg        = cfg.value("Mix_mode", cfg.value("Mix_Mode", std::string("pt-ct")));
-  // compatibility with legacy boolean MIXMode
-  if(cfg.contains("MIXMode")){
-    bool legacy = cfg.value("MIXMode", true);
-    mix_mode_cfg = legacy ? std::string("pt-ct") : std::string("cen-pt");
+  std::string mix_mode_cfg    = cfg.value("mix_mode", std::string("pt_ct"));
+  if (mix_mode_override && std::string(mix_mode_override).size() > 0) {
+    mix_mode_cfg = std::string(mix_mode_override);
   }
-  std::string mix_mode = mix_mode_cfg;
-  std::transform(mix_mode.begin(), mix_mode.end(), mix_mode.begin(), ::tolower);
+  std::string mix_mode = NormalizeMixMode(mix_mode_cfg);
+  std::string name_suffix = std::string("mode_") + mix_mode;
+  std::string wp_output_filename;
+  auto wp_mode_to_profile_key = [](const std::string &m){
+    if(m == "cen_pt") return std::string("bdt_spectrum");
+    if(m == "pt_ct" || m == "pt_ct_single") return std::string("pt_ct");
+    if(m == "ct_single") return std::string("ct_single");
+    return std::string();
+  };
+
+  if (raw_cfg.contains("common") && raw_cfg["common"].is_object()) {
+    const auto &common = raw_cfg["common"];
+    if (common.contains("wp_files") && common["wp_files"].is_object()) {
+      const std::string profileKey = wp_mode_to_profile_key(mix_mode);
+      if (!profileKey.empty() && common["wp_files"].contains(profileKey) && common["wp_files"][profileKey].is_string()) {
+        wp_output_filename = NormalizeWpFilename(common["wp_files"][profileKey].get<std::string>());
+      }
+    }
+  }
   std::vector<double> pt_bins = cfg.value("pt_bins", std::vector<double>{});
   std::vector<std::vector<double>> ct_bins;
   if(cfg.contains("ct_bins")){
@@ -137,15 +240,18 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
   std::vector<double> cen_bins = cfg.value("cen_bins", std::vector<double>{});
   std::vector<std::vector<double>> pt_bins_by_centrality = cfg.value("pt_bins_by_centrality", std::vector<std::vector<double>>{});
   std::vector<double> pt_bins_single = cfg.value("pt_bins_single", std::vector<double>{});
-  std::vector<double> mass_range = cfg.value("mass_range", std::vector<double>{2.96, 3.04});
-  int mass_nbins = cfg.value("mass_nbins", 50);
+  const json common = raw_cfg.value("common", json::object());
+  const json params = common.value("parameters", json::object());
+  double mass_min = params.value("mass_min", 2.96);
+  double mass_max = params.value("mass_max", 3.04);
+  int mass_nbins = params.value("mass_nbins_data", 50);
   std::vector<double> side_low  = cfg.value("sideband_low", std::vector<double>{2.96, 2.98});
   std::vector<double> side_high = cfg.value("sideband_high", std::vector<double>{3.005, 3.04});
-  std::string analysis_results_file = cfg.value("analysis_results_file", std::string(""));
+  std::string analysisresults_path = cfg.value("analysisresults_path", std::string(""));
   std::string n_events_hist = cfg.value("n_events_hist", std::string(""));
   std::string spectrum_file = cfg.value("spectrum_file", std::string(""));
-  std::string mc_file_for_acceptance = cfg.value("mc_file_for_acceptance", std::string(""));
-  std::string basic_selection_data_for_mc_eff = cfg.value("basic_selection_data_for_mc_eff", std::string(""));
+  std::string mc_path = cfg.value("mc_path", std::string(""));
+  std::string basic_selection_data = cfg.value("basic_selection_data", std::string(""));
   double signal_sigma_mult = cfg.value("signal_window_sigma", 3.0);
   int min_entries_for_fit   = cfg.value("min_entries_for_fit", 50);
   double max_chi2_ndf       = cfg.value("max_chi2_ndf", 5.0);
@@ -165,14 +271,14 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
   std::unique_ptr<TFile> fSpectrum;
   TH1 *hEvents = nullptr;
   std::vector<TH1D*> hMcEffPtPerCent;
-  if(mix_mode == "cen-pt"){
-    if(!analysis_results_file.empty()){
-      fAnalysis.reset(TFile::Open(analysis_results_file.c_str(), "READ"));
+  if(mix_mode == "cen_pt"){
+    if(!analysisresults_path.empty()){
+      fAnalysis.reset(TFile::Open(analysisresults_path.c_str(), "READ"));
       if(fAnalysis && !fAnalysis->IsZombie() && !n_events_hist.empty()){
         hEvents = dynamic_cast<TH1*>(fAnalysis->Get(n_events_hist.c_str()));
       }
       if(!hEvents){
-        printf("[Warn] Cannot load n_events_hist: %s from %s\n", n_events_hist.c_str(), analysis_results_file.c_str());
+        printf("[Warn] Cannot load n_events_hist: %s from %s\n", n_events_hist.c_str(), analysisresults_path.c_str());
       }
     }
     if(!spectrum_file.empty()){
@@ -181,9 +287,9 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         printf("[Warn] Cannot open spectrum_file: %s\n", spectrum_file.c_str());
       }
     }
-    if(!mc_file_for_acceptance.empty()){
+    if(!mc_path.empty()){
       TChain mcChain(tree_name_mc.c_str());
-      std::unique_ptr<TFile> fMC(TFile::Open(mc_file_for_acceptance.c_str(), "READ"));
+      std::unique_ptr<TFile> fMC(TFile::Open(mc_path.c_str(), "READ"));
       if(fMC && !fMC->IsZombie()){
         fillChainFromAO2D(mcChain, fMC.get());
         if(mcChain.GetEntries() > 0){
@@ -196,7 +302,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
               std::vector<std::vector<double>>{},
               cen_bins,
               pt_bins_by_centrality,
-              basic_selection_data_for_mc_eff);
+              basic_selection_data);
           hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent;
           if(hMcEffPtPerCent.empty()){
             hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent_matter;
@@ -205,13 +311,13 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
             hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent_antimatter;
           }
           if(hMcEffPtPerCent.empty()){
-            printf("[Warn] MC efficiency histograms for cen-pt are empty from %s\n", mc_file_for_acceptance.c_str());
+            printf("[Warn] MC efficiency histograms for cen_pt are empty from %s\n", mc_path.c_str());
           }
         } else {
-          printf("[Warn] No entries in MC chain for %s\n", mc_file_for_acceptance.c_str());
+          printf("[Warn] No entries in MC chain for %s\n", mc_path.c_str());
         }
       } else {
-        printf("[Warn] Cannot open mc_file_for_acceptance: %s\n", mc_file_for_acceptance.c_str());
+        printf("[Warn] Cannot open mc_path: %s\n", mc_path.c_str());
       }
     }
   }
@@ -220,15 +326,20 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
   gSystem->mkdir(out_dir.c_str(), true);
   
   // working point summary file (always rewritten)
-  std::string wp_txt = out_dir + "/WorkingPoint_" + name_suffix + ".txt";
+  std::string wp_txt;
+  if (!wp_output_filename.empty()) {
+    wp_txt = out_dir + "/" + wp_output_filename;
+  } else {
+    wp_txt = out_dir + "/WorkingPoint_" + name_suffix + ".txt";
+  }
   std::vector<std::string> wp_lines; // start empty; will be rebuilt for current run
 
   enum class WPFormat { Full, CenPt, PtCt, PtOnly, CtOnly };
   auto format_from_mix = [](const std::string &mode){
-    if(mode == "cen-pt") return WPFormat::CenPt;
-    if(mode == "pt-ct" || mode == "pt-ct-single") return WPFormat::PtCt;
-    if(mode == "pt-single") return WPFormat::PtOnly;
-    if(mode == "ct-single") return WPFormat::CtOnly;
+    if(mode == "cen_pt") return WPFormat::CenPt;
+    if(mode == "pt_ct" || mode == "pt_ct_single") return WPFormat::PtCt;
+    if(mode == "pt_single") return WPFormat::PtOnly;
+    if(mode == "ct_single") return WPFormat::CtOnly;
     return WPFormat::Full; // fallback keeps legacy 6-column boundaries
   };
   WPFormat wp_format = format_from_mix(mix_mode);
@@ -368,8 +479,8 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
       TDirectory *dSigs = fout.mkdir("Graphs");
 
       // mass variable and ranges
-      double mmin = mass_range.size()>0 ? mass_range[0] : 2.96;
-      double mmax = mass_range.size()>1 ? mass_range[1] : 3.04;
+      double mmin = mass_min;
+      double mmax = mass_max;
       RooRealVar m_global("m","mass", mmin, mmax);
 
       double init_mean = 2.991;
@@ -380,7 +491,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
       double tail_nR = 2.0;
 
       double expected_signal_base = 0.0;
-      if(mix_mode == "cen-pt" && ctx.hasCen && ctx.hasPt && fSpectrum && !fSpectrum->IsZombie() && hEvents){
+      if(mix_mode == "cen_pt" && ctx.hasCen && ctx.hasPt && fSpectrum && !fSpectrum->IsZombie() && hEvents){
         constexpr double kBranchingRatio = 0.25;
         constexpr double kDeltaY = 2.0;
         constexpr double kMatterAntiFactor = 2.0;
@@ -616,7 +727,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         // store S3 and B3 for later expected-significance computation
         S3_vals[original_index] = S3;
         B3_vals[original_index] = B3;
-        double Sfixed = (mix_mode == "cen-pt") ? expected_signal_base : S3;
+        double Sfixed = (mix_mode == "cen_pt") ? expected_signal_base : S3;
         double S3_err = intSig3 ? nsig.getError() * intSig3->getVal() : 0.0;
         double base_signif3 = (Sfixed+B3>0) ? Sfixed/std::sqrt(Sfixed+B3) : 0.0;
         double eff_here = (original_index < (int)effs.size() ? effs[original_index] : 1.0);
@@ -662,7 +773,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         if (aliceperformance) ptInfo->AddText("ALICE Performance");
         else ptInfo->AddText(period_text.c_str()); 
         if(!additional_text.empty()) ptInfo->AddText(additional_text.c_str());
-        if(mix_mode == "cen-pt") ptInfo->AddText(Form("S_{base}(BW) = %.1f", Sfixed));
+        if(mix_mode == "cen_pt") ptInfo->AddText(Form("S_{base}(BW) = %.1f", Sfixed));
         else ptInfo->AddText(Form("S_{base}(data) = %.1f", Sfixed));
         ptInfo->AddText(Form("S(3#sigma)=%.1f", S3));
         ptInfo->AddText(Form("B(3#sigma)=%.1f", B3));
@@ -776,7 +887,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         hYieldEff.SetMarkerStyle(20);
         hYieldEff.SetMarkerColor(kMagenta+1);
         // Always fit pol0 on S(3σ)/eff for display; only non-cen-pt uses it for expected significance.
-        const bool use_bw_expected = (mix_mode == "cen-pt");
+        const bool use_bw_expected = (mix_mode == "cen_pt");
         std::unique_ptr<TF1> fpol0 = std::make_unique<TF1>("fpol0","pol0");
         hYieldEff.Fit(fpol0.get(), "QS"); // quiet, store result
         double fit_c0 = fpol0->GetParameter(0);
@@ -959,7 +1070,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
 
   // iterate bins per mix_mode 语义
   bool did_any = false;
-  if(mix_mode == "pt-ct"){
+  if(mix_mode == "pt_ct"){
     for(size_t i_pt=0; i_pt+1<pt_bins.size(); ++i_pt){
       double ptmin = pt_bins[i_pt];
       double ptmax = pt_bins[i_pt+1];
@@ -983,8 +1094,8 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
           printf("  failed processing pt %g-%g ct %g-%g with error type: %d \n", ptmin, ptmax, ctmin, ctmax, status);}
       }
     }
-  } else if(mix_mode == "cen-pt"){
-    if(cen_bins.size()<2){ printf("cen-pt mode requires cen_bins.\n"); }
+  } else if(mix_mode == "cen_pt"){
+    if(cen_bins.size()<2){ printf("cen_pt mode requires cen_bins.\n"); }
     const auto &pt_by_cen = (!pt_bins_by_centrality.empty()) ? pt_bins_by_centrality : std::vector<std::vector<double>>{};
     for(size_t i_c=0; i_c+1<cen_bins.size(); ++i_c){
       double cenmin = cen_bins[i_c];
@@ -1013,9 +1124,9 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         }
       }
     }
-  } else if(mix_mode == "pt-ct-single"){
+  } else if(mix_mode == "pt_ct_single"){
     if(target_pt_range.size()!=2 || target_ct_range.size()!=2){
-      printf("pt-ct-single mode requires target_pt_range and target_ct_range (len=2).\n");
+      printf("pt_ct_single mode requires target_pt_range and target_ct_range (len=2).\n");
     } else {
       BinContext ctx; ctx.hasPt=true; ctx.hasCt=true; ctx.mode=4;
       ctx.ptmin=target_pt_range[0]; ctx.ptmax=target_pt_range[1];
@@ -1025,7 +1136,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
       int status = process_one_bin(ctx); did_any = true;
       if (status < 1){ printf("  failed processing single pt-ct bin with error type: %d \n", status); }
     }
-  } else if(mix_mode == "pt-single"){
+  } else if(mix_mode == "pt_single"){
     if(target_pt_range.size()==2){
       BinContext ctx; ctx.hasPt=true; ctx.hasCt=false; ctx.mode=1; ctx.ptmin=target_pt_range[0]; ctx.ptmax=target_pt_range[1];
       ctx.label = make_label(false,true,false,0,0,ctx.ptmin,ctx.ptmax,0,0);
@@ -1044,7 +1155,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         if (status < 1){ printf("  failed processing pt %g-%g (pt-only) with error type: %d \n", ptmin, ptmax, status); }
       }
     }
-  } else if(mix_mode == "ct-single"){
+  } else if(mix_mode == "ct_single"){
     // pt filter optional via target_pt_range (keeps label consistent if provided)
     auto run_ct_bin = [&](double ctmin, double ctmax){
       BinContext ctx; ctx.hasCt=true; ctx.hasPt = (target_pt_range.size()==2); ctx.mode=2;
@@ -1065,10 +1176,10 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json")
         run_ct_bin(ct_bins_single[i_ct], ct_bins_single[i_ct+1]);
       }
     } else {
-      printf("ct-single mode requires target_ct_range (len=2) or ct_bins_single edges.\n");
+      printf("ct_single mode requires target_ct_range (len=2) or ct_bins_single edges.\n");
     }
   } else {
-    printf("Unsupported Mix_mode: %s\n", mix_mode.c_str());
+    printf("Unsupported mix_mode: %s\n", mix_mode.c_str());
   }
 
   if(!did_any){

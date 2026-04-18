@@ -37,3 +37,31 @@
 "basic_selection_data_beampipe": "fDecRad > 0.8 && fDecRad < 2.1 fCentralityFT0C > 0 && fCentralityFT0C < 80",
 "basic_selection_data_lifetime": "fDecRad > 0.8 && fCentralityFT0C > 0 && fCentralityFT0C < 80"
 ```
+
+# Pass config
+## pass5
+``` json
+"data_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/apass5/NCrossedRows/AO2D_CustomV0s_HadronPID.root",
+"analysisresults_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/apass5/NCrossedRows/AnalysisResults_CustomV0s_HadronPID.root",
+"mc_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/NCrossedRows/reweighted/AO2D_CustomV0s_combined_reweighted.root",
+"snapshot_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/SnapShotsData/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows",
+"wp_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/WorkingPoint",
+"model_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/TrainedModels",
+"qa_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/QAPlots",
+"mc_file_for_absorption": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/AbsorptionTrees/absorption_tree_x1.5.root",
+"spectrum_file": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/Ploting_scrips/ReweightFunc.root",
+"output_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs"
+```
+## pass4
+``` json
+"data_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/pass4/NCrossedRows/AO2D_CustomV0s_HadronPID.root",
+"analysisresults_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/pass4/NCrossedRows/AnalysisResults_CustomV0s_HadronPID.root",
+"mc_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass4/NCrossedRows/reweighted/AO2D_CustomV0s_combined_reweighted.root",
+"snapshot_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/SnapShotsData/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows",
+"wp_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/WorkingPoint",
+"model_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/TrainedModels",
+"qa_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/QAPlots",
+"mc_file_for_absorption": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/AbsorptionTrees/absorption_tree_x1.5.root",
+"spectrum_file": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/Ploting_scrips/ReweightFunc.root",
+"output_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs"
+```

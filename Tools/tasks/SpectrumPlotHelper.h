@@ -55,6 +55,16 @@ inline std::string BuildDecayString(const std::string &isMatter) {
     return std::string();
 }
 
+inline std::string BuildMassXAxisTitle(const std::string &isMatter) {
+    if (isMatter == "matter") {
+        return "M(^{3}He+#pi^{-}) (GeV/c^{2})";
+    }
+    if (isMatter == "antimatter") {
+        return "M(^{3}#bar{He}+#pi^{+}) (GeV/c^{2})";
+    }
+    return "M(^{3}He+#pi^{-}, ^{3}#bar{He}+#pi^{+}) (GeV/c^{2})";
+}
+
 inline std::string BuildCentralityText(const std::string &tag) {
     if (tag.rfind("cen_", 0) == 0 && tag.size() > 4) {
         std::string range = tag.substr(4);
@@ -184,6 +194,9 @@ inline std::unique_ptr<TCanvas> MakeDecoratedFitCanvas(const std::string &name,
 
     c->cd();
     c->SetTicks(1, 1);
+    if (frame->GetXaxis()) {
+        frame->GetXaxis()->SetTitle(BuildMassXAxisTitle(isMatter).c_str());
+    }
     frame->Draw();
     auto legend = MakeFitLegend(frame, isMc);
     if (legend) legend->DrawClone();

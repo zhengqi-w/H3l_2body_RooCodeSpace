@@ -3,6 +3,7 @@ ROOT.ROOT.EnableImplicitMT()
 import os
 import numpy as np
 import argparse
+import json
 import yaml
 from hipe4ml.model_handler import ModelHandler
 from hipe4ml.tree_handler import TreeHandler
@@ -16,14 +17,84 @@ from pathlib import Path
 import uproot
 
 
+def normalize_mix_mode(mode_raw, default_mode='pt_ct'):
+    if isinstance(mode_raw, bool):
+        mode_raw = 'pt_ct' if mode_raw else 'pt_ct_single'
+    mode = str(mode_raw if mode_raw is not None else default_mode).strip().lower().replace('-', '_')
+    aliases = {
+        'ptct': 'pt_ct',
+        'cenpt': 'cen_pt',
+        'ptctsingle': 'pt_ct_single',
+        'ptsingle': 'pt_single',
+        'ctsingle': 'ct_single',
+    }
+    return aliases.get(mode, mode)
+
+
+def resolve_bdt_config(raw_config):
+    if not isinstance(raw_config, dict):
+        raise ValueError('Configuration root must be a mapping object.')
+
+    preprocess = raw_config.get('preprocess', None)
+    if not isinstance(preprocess, dict) or not isinstance(preprocess.get('bdt', None), dict):
+        return raw_config
+
+    cfg = dict(preprocess['bdt'])
+    common = raw_config.get('common', {}) if isinstance(raw_config.get('common', {}), dict) else {}
+    paths = common.get('path', {}) if isinstance(common.get('path', {}), dict) else {}
+    binning = common.get('binning', {}) if isinstance(common.get('binning', {}), dict) else {}
+    selection = common.get('selection', {}) if isinstance(common.get('selection', {}), dict) else {}
+    tree_names = common.get('tree_names', {}) if isinstance(common.get('tree_names', {}), dict) else {}
+
+    path_map = {
+        'data_path': ['data_path'],
+        'mc_path': ['mc_path'],
+        'snapshot_dir': ['snapshot_dir'],
+        'model_dir': ['model_dir'],
+        'QA_dir': ['qa_dir'],
+        'WP_dir': ['wp_dir'],
+    }
+    for target, keys in path_map.items():
+        if target in cfg:
+            continue
+        for key in keys:
+            val = paths.get(key, None)
+            if val not in (None, ''):
+                cfg[target] = val
+                break
+
+    if 'tree_name_data' not in cfg and tree_names.get('data', None):
+        cfg['tree_name_data'] = tree_names['data']
+    if 'tree_name_mc' not in cfg and tree_names.get('mc', None):
+        cfg['tree_name_mc'] = tree_names['mc']
+
+    if 'basic_selection_data' not in cfg:
+        basic_sel = selection.get('basic_selection_data', None)
+        if basic_sel:
+            cfg['basic_selection_data'] = basic_sel
+
+    for key in ['cen_bins', 'pt_bins_by_centrality', 'pt_bins', 'ct_bins_single', 'pt_bins_single']:
+        if key not in cfg and key in binning:
+            cfg[key] = binning[key]
+    if 'ct_bins' not in cfg and 'ct_bins_by_pt' in binning:
+        cfg['ct_bins'] = binning['ct_bins_by_pt']
+
+    execution = raw_config.get('execution', {})
+    if 'mix_mode' not in cfg and isinstance(execution, dict):
+        training_mode = execution.get('training_mode', None)
+        if training_mode is not None:
+            cfg['mix_mode'] = training_mode
+    return cfg
+
+
 class BDTPreProcess:
     """
     可配置的训练模式：
-      - Mix_mode = "pt-ct"        : 原始行为，pt_bins 为 1D，ct_bins 为与 pt 对应的 2D 边界列表。
-      - Mix_mode = "cen-pt"       : 新增模式，cen_bins 为 1D，pt_bins(或 pt_bins_by_centrality) 为随 centrality 变化的 2D 边界列表。
-      - Mix_mode = "pt-ct-single" : 单一 pt、ct 区间训练（兼容旧版 Mix_Mode=False）。
-      - Mix_mode = "pt-single"    : 仅按单一 pt 区间训练（ct 不切分）。
-      - Mix_mode = "ct-single"    : 仅按单一 ct 区间训练（pt 可选过滤）。
+            - mix_mode = "pt_ct"        : 原始行为，pt_bins 为 1D，ct_bins 为与 pt 对应的 2D 边界列表。
+            - mix_mode = "cen_pt"       : 新增模式，cen_bins 为 1D，pt_bins(或 pt_bins_by_centrality) 为随 centrality 变化的 2D 边界列表。
+            - mix_mode = "pt_ct_single" : 单一 pt、ct 区间训练。
+            - mix_mode = "pt_single"    : 仅按单一 pt 区间训练（ct 不切分）。
+            - mix_mode = "ct_single"    : 仅按单一 ct 区间训练（pt 可选过滤）。
     """
 
     def __init__(self, config):
@@ -58,10 +129,8 @@ class BDTPreProcess:
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.QA_dir.mkdir(parents=True, exist_ok=True)
         self.WP_dir.mkdir(parents=True, exist_ok=True)
-        mix_mode_cfg = config.get('Mix_mode', config.get('Mix_Mode', 'pt-ct'))
-        if isinstance(mix_mode_cfg, bool):
-            mix_mode_cfg = 'pt-ct' if mix_mode_cfg else 'pt-ct-single'
-        self.mix_mode = str(mix_mode_cfg).lower()
+        mix_mode_cfg = config.get('mix_mode', 'pt_ct')
+        self.mix_mode = normalize_mix_mode(mix_mode_cfg, 'pt_ct')
         self._declare_its_helpers()
 
         # prepare ROOT chains and RDataFrames
@@ -542,11 +611,11 @@ class BDTPreProcess:
     def run(self):
         print("Using snapshot dir:", self.snapshot_dir)
         print("Using models dir:", self.models_dir)
-        print("Mix_mode:", self.mix_mode)
+        print("mix_mode:", self.mix_mode)
 
-        if self.mix_mode == 'pt-ct':
+        if self.mix_mode == 'pt_ct':
             if self.pt_bins is None or self.ct_bins is None:
-                raise ValueError("Mix_mode 'pt-ct' requires 'pt_bins' (1D edges) and 'ct_bins' (list of ct edges per pt).")
+                raise ValueError("mix_mode 'pt_ct' requires 'pt_bins' (1D edges) and 'ct_bins' (list of ct edges per pt).")
             for i_pt, (pt_min, pt_max) in enumerate(zip(self.pt_bins[:-1], self.pt_bins[1:])):
                 if i_pt >= len(self.ct_bins):
                     print(f"Warning: ct_bins 缺少第 {i_pt} 个元素，跳过该 pt bin")
@@ -554,12 +623,12 @@ class BDTPreProcess:
                 for ct_min, ct_max in zip(self.ct_bins[i_pt][:-1], self.ct_bins[i_pt][1:]):
                     self._process_training_unit((pt_min, pt_max), (ct_min, ct_max), None)
 
-        elif self.mix_mode == 'cen-pt':
+        elif self.mix_mode == 'cen_pt':
             if self.cen_bins is None:
-                raise ValueError("Mix_mode 'cen-pt' requires 'cen_bins'.")
+                raise ValueError("mix_mode 'cen_pt' requires 'cen_bins'.")
             pt_by_cen = self.pt_bins_by_centrality if self.pt_bins_by_centrality is not None else self.pt_bins
             if pt_by_cen is None:
-                raise ValueError("Mix_mode 'cen-pt' requires 'pt_bins' or 'pt_bins_by_centrality'.")
+                raise ValueError("mix_mode 'cen_pt' requires 'pt_bins' or 'pt_bins_by_centrality'.")
             if len(self.cen_bins) < 2:
                 raise ValueError("cen_bins must contain at least two edges.")
             for i_cen, (cen_min, cen_max) in enumerate(zip(self.cen_bins[:-1], self.cen_bins[1:])):
@@ -573,12 +642,12 @@ class BDTPreProcess:
                 for pt_min, pt_max in zip(pt_edges[:-1], pt_edges[1:]):
                     self._process_training_unit((pt_min, pt_max), None, (cen_min, cen_max))
 
-        elif self.mix_mode == 'pt-ct-single':
+        elif self.mix_mode == 'pt_ct_single':
             pt_range = self.pt_bin if self.pt_bin is not None else self._ensure_range(self.pt_bins, 'pt_bins')
             ct_range = self.ct_bin if self.ct_bin is not None else self._ensure_range(self.ct_bins, 'ct_bins')
             self._process_training_unit(pt_range, ct_range, None)
 
-        elif self.mix_mode == 'pt-single':
+        elif self.mix_mode == 'pt_single':
             pt_ranges = []
             if self.pt_bin is not None:
                 pt_ranges = [self._ensure_range(self.pt_bin, 'pt_bin')]
@@ -591,12 +660,12 @@ class BDTPreProcess:
                     raise ValueError("pt_bins must contain at least two edges for pt-single mode.")
                 pt_ranges = list(zip(self.pt_bins[:-1], self.pt_bins[1:]))
             else:
-                raise ValueError("Mix_mode 'pt-single' requires 'pt_bin', 'pt_bins_single' or 'pt_bins'.")
+                raise ValueError("mix_mode 'pt_single' requires 'pt_bin', 'pt_bins_single' or 'pt_bins'.")
 
             for pt_range in pt_ranges:
                 self._process_training_unit(pt_range, None, None)
 
-        elif self.mix_mode == 'ct-single':
+        elif self.mix_mode == 'ct_single':
             # optional pt filter for all ct bins
             pt_range = None
             if self.pt_bin is not None:
@@ -619,23 +688,33 @@ class BDTPreProcess:
                 if not ct_ranges:
                     raise ValueError("ct_bins must be a 1D edge list for ct-single mode; use ct_bins_single for multiple bins.")
             else:
-                raise ValueError("Mix_mode 'ct-single' requires 'ct_bin', 'ct_bins_single' or 1D 'ct_bins'.")
+                raise ValueError("mix_mode 'ct_single' requires 'ct_bin', 'ct_bins_single' or 1D 'ct_bins'.")
 
             for ct_range in ct_ranges:
                 self._process_training_unit(pt_range, ct_range, None)
 
         else:
-            raise ValueError(f"Unsupported Mix_mode '{self.mix_mode}'.")
+            raise ValueError(f"Unsupported mix_mode '{self.mix_mode}'.")
 
         print("***All Training done.***")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='BDT Preprocessing for H3l analysis')
-    parser.add_argument('--config-file', type=str, required=True, help='Path to the configuration YAML file')
+    parser.add_argument('--config-file', type=str, required=True, help='Path to the configuration file (YAML/JSON)')
+    parser.add_argument('--mix-mode', type=str, default='', help='Optional training mode override, e.g. cen_pt')
     args = parser.parse_args()
-    with open(args.config_file, 'r') as config_file:
-        config = yaml.safe_load(config_file)
+
+    config_path = Path(args.config_file)
+    with open(config_path, 'r') as config_file:
+        if config_path.suffix.lower() == '.json':
+            raw_config = json.load(config_file)
+        else:
+            raw_config = yaml.safe_load(config_file)
+
+    config = resolve_bdt_config(raw_config)
+    if args.mix_mode:
+        config['mix_mode'] = args.mix_mode
 
     proc = BDTPreProcess(config)
     proc.run()

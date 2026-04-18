@@ -218,6 +218,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
     const std::vector<std::vector<double>> &ptBinsPerCent,
     const std::string &basicSel   = "",
     const std::vector<std::string> &topologyselection = {},
+    const bool selTwoBody = true,
     const std::string &centVar    = "fCentralityFT0C",
     const std::string &evselCol   = "fIsSurvEvSel",
     const std::string &recoCol    = "fIsReco",
@@ -269,13 +270,21 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
     auto [df_flags_evsel_int, evselFlagColInt] = ensure_int_flag_column(df_ready_flags, evselFlagCol, "__acc_evsel_flag_int");
     auto [df_ready_flags_int, recoFlagColInt] = ensure_int_flag_column(df_flags_evsel_int, recoFlagCol, "__acc_reco_flag_int");
 
-    auto df_with_basic_flag = df_ready_flags_int;
-    const std::string basicSelFlagName = "__acc_basic_flag";
-    if (!basicSel.empty())
-        df_with_basic_flag = df_with_basic_flag.Define(basicSelFlagName, basicSel);
-    else
-        df_with_basic_flag = df_with_basic_flag.Define(basicSelFlagName, []() -> int { return 1; });
-    auto [df_basic_int, basicSelFlagColInt] = ensure_int_flag_column(df_with_basic_flag, basicSelFlagName, "__acc_basic_flag_int");
+    ROOT::RDF::RNode df_with_fundamental = df_ready_flags_int;
+    if (selTwoBody) {
+        if (!HasColumn(rdf, "fIsTwoBodyDecay")) {
+            throw std::runtime_error("ComputeAcceptanceFlexible: missing column 'fIsTwoBodyDecay' required by selTwoBody=true");
+        }
+        const std::string fundamentalSel = "(fIsTwoBodyDecay > 0)";
+        df_with_fundamental = df_ready_flags_int.Define("__acc_fundamental_flag_int", "(" + fundamentalSel + ") ? 1 : 0");
+    } else {
+        df_with_fundamental = df_ready_flags_int.Define("__acc_fundamental_flag_int", []() -> int { return 1; });
+    }
+
+    std::string mergedBasicSelExpr = basicSel.empty() ? std::string("1") : basicSel;
+    auto df_basic_int = df_with_fundamental.Define("__acc_basic_flag_int", "(" + mergedBasicSelExpr + ") ? 1 : 0");
+    const std::string basicSelFlagColInt = "__acc_basic_flag_int";
+    const std::string fundamentalSelFlagColInt = "__acc_fundamental_flag_int";
 
     auto ensure_double_column = [](ROOT::RDF::RNode node,
                                    const std::string &colName,
@@ -365,12 +374,13 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genPt, int evselFlag, int recoFlag, int basicFlag, int topologyFlag, double genMatter) {
+            [&](unsigned slot, double genPt, int evselFlag, int recoFlag, int basicFlag, int fundamentalFlag, int topologyFlag, double genMatter) {
                 auto &slotHist = acquire_slot(slot);
-                const bool passEvsel = evselFlag != 0;
+                const bool passFundamental = fundamentalFlag != 0;
+                const bool passEvsel = passFundamental && (evselFlag != 0);
                 const bool passBasic = basicFlag != 0;
                 const bool passTopo = topologyFlagColInt.empty() ? true : (topologyFlag != 0);
-                const bool passReco =  passBasic && (recoFlag != 0) && passTopo;
+                const bool passReco = passFundamental && passBasic && (recoFlag != 0) && passTopo;
                 const bool isMatter = genMatter > 0.0;
                 if (passEvsel) {
                     slotHist.evsel_pt_both->Fill(genPt);
@@ -387,7 +397,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_pt_antimatter->Fill(genPt);
                 }                
             },
-            {genPtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, topologyFlagColInt, genMatterColUsed});
+            {genPtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, topologyFlagColInt, genMatterColUsed});
 
         res.evsel_pt_both = MergeSlotHists(slotHists, [](const SlotHistPt &slot) { return slot.evsel_pt_both.get(); }, "h_evsel_pt_both");
         res.reco_pt_both  = MergeSlotHists(slotHists, [](const SlotHistPt &slot) { return slot.reco_pt_both.get(); },  "h_reco_pt_both");
@@ -439,11 +449,12 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genCt, int evselFlag, int recoFlag, int basicFlag, double genMatter) {
+            [&](unsigned slot, double genCt, int evselFlag, int recoFlag, int basicFlag, int fundamentalFlag, double genMatter) {
                 auto &slotHist = acquire_slot(slot);
-                const bool passEvsel = evselFlag != 0;
+                const bool passFundamental = fundamentalFlag != 0;
+                const bool passEvsel = passFundamental && (evselFlag != 0);
                 const bool passBasic = basicFlag != 0;
-                const bool passReco =  passBasic && (recoFlag != 0);
+                const bool passReco = passFundamental && passBasic && (recoFlag != 0);
                 const bool isMatter = genMatter > 0.0;
                 if (passEvsel) {
                     slotHist.evsel_ct_both->Fill(genCt);
@@ -460,7 +471,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_ct_antimatter->Fill(genCt);
                 }
             },
-            {genCtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, genMatterColUsed});
+            {genCtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, genMatterColUsed});
 
         res.evsel_ct_both = MergeSlotHists(slotHists, [](const SlotHistCt &slot) { return slot.evsel_ct_both.get(); }, "h_evsel_ct_both");
         res.reco_ct_both  = MergeSlotHists(slotHists, [](const SlotHistCt &slot) { return slot.reco_ct_both.get(); },  "h_reco_ct_both");
@@ -536,14 +547,15 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genPt, double genCt, int evselFlag, int recoFlag, int basicFlag, double genMatter) {
+            [&](unsigned slot, double genPt, double genCt, int evselFlag, int recoFlag, int basicFlag, int fundamentalFlag, double genMatter) {
                 const int ptIdx = FindBin(ptBins1D, genPt);
                 if (ptIdx < 0)
                     return;
                 auto &slotHist = acquire_slot(slot);
-                const bool passEvsel = evselFlag != 0;
+                const bool passFundamental = fundamentalFlag != 0;
+                const bool passEvsel = passFundamental && (evselFlag != 0);
                 const bool passBasic = basicFlag != 0;
-                const bool passReco = passBasic && (recoFlag != 0);
+                const bool passReco = passFundamental && passBasic && (recoFlag != 0);
                 const bool isMatter = genMatter > 0.0;
                 if (passEvsel) {
                     slotHist.evsel_ct_both[ptIdx]->Fill(genCt);
@@ -560,7 +572,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_ct_antimatter[ptIdx]->Fill(genCt);
                 }
             },
-            {genPtColUsed, genCtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, genMatterColUsed});
+            {genPtColUsed, genCtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, genMatterColUsed});
 
         auto merge_per_pt = [&](auto accessor, const std::string &namePrefix, std::vector<TH1D*> &target) {
             for (int i = 0; i < nPt; ++i) {
@@ -663,15 +675,16 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genPt, double cent, int evselFlag, int recoFlag, int basicFlag, int topologyFlag, double genMatter) {
+            [&](unsigned slot, double genPt, double cent, int evselFlag, int recoFlag, int basicFlag, int fundamentalFlag, int topologyFlag, double genMatter) {
                 const int centIdx = FindBin(centBins1D, cent);
                 if (centIdx < 0)
                     return;
                 auto &slotHist = acquire_slot(slot);
-                const bool passEvsel = evselFlag != 0;
+                const bool passFundamental = fundamentalFlag != 0;
+                const bool passEvsel = passFundamental && (evselFlag != 0);
                 const bool passBasic = basicFlag != 0;
                 const bool passTopo = topologyFlagColInt.empty() ? true : (topologyFlag != 0);
-                const bool passReco = passBasic && (recoFlag != 0) && passTopo;
+                const bool passReco = passFundamental && passBasic && (recoFlag != 0) && passTopo;
                 const bool isMatter = genMatter > 0.0;
                 if (passEvsel) {
                     slotHist.evsel_pt_both[centIdx]->Fill(genPt);
@@ -688,7 +701,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_pt_antimatter[centIdx]->Fill(genPt);
                 }
             },
-            {genPtColUsed, centColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, topologyFlagColInt, genMatterColUsed});
+            {genPtColUsed, centColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, topologyFlagColInt, genMatterColUsed});
 
         auto merge_per_cent = [&](auto accessor, const std::string &namePrefix, std::vector<TH1D*> &target) {
             for (int i = 0; i < nCent; ++i) {

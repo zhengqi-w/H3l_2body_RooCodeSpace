@@ -17,6 +17,8 @@
 #include <TH1D.h>
 #include <TH2D.h>
 #include <TKey.h>
+#include <TMath.h>
+#include <TLatex.h>
 #include <TTree.h>
 
 #include "../../include/AliPWGFunc.h"
@@ -28,6 +30,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -69,20 +72,91 @@ std::string BuildRangeLabel(const std::string &prefix, double v1, double v2) {
     return os.str();
 }
 
-std::string ResolveWpFile(const GeneralHelper::Json &cfg, const std::string &mode) {
-    const auto analysis = cfg.value("analysis", GeneralHelper::Json::object());
-    const auto binning = analysis.value("binning", GeneralHelper::Json::object());
-    const auto profiles = binning.value("mode_profiles", GeneralHelper::Json::object());
-    const auto profile = profiles.value(mode, GeneralHelper::Json::object());
-    const std::string wpFromProfile = GetS(profile, "wp_file", "");
-    if (!wpFromProfile.empty()) return wpFromProfile;
+std::string FormatTitleNumber(double v) {
+    std::ostringstream os;
+    os << std::setprecision(6) << std::defaultfloat << v;
+    return os.str();
+}
 
+std::string BuildSimpleBinTitle(const BinPlanItem &item) {
+    std::vector<std::string> parts;
+    if (item.hasCen) {
+        parts.push_back("Centrality " + FormatTitleNumber(item.cenMin) + "-" + FormatTitleNumber(item.cenMax) + "%");
+    }
+    if (item.hasPt) {
+        parts.push_back("p_{T} " + FormatTitleNumber(item.ptMin) + "-" + FormatTitleNumber(item.ptMax) + " GeV/c");
+    }
+    if (item.hasCt) {
+        parts.push_back("ct " + FormatTitleNumber(item.ctMin) + "-" + FormatTitleNumber(item.ctMax) + " cm");
+    }
+    if (parts.empty()) return item.label;
+
+    std::string out;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i) out += " ";
+        out += parts[i];
+    }
+    return out;
+}
+
+std::string BuildSimpleGroupTitle(const std::vector<BinPlanItem> &items,
+                                  const std::string &fallbackLabel) {
+    if (items.empty()) return fallbackLabel;
+    if (items.size() == 1) return BuildSimpleBinTitle(items.front());
+
+    const auto &first = items.front();
+    bool sameCen = first.hasCen;
+    bool samePt = first.hasPt;
+    bool sameCt = first.hasCt;
+    for (size_t i = 1; i < items.size(); ++i) {
+        const auto &it = items[i];
+        sameCen = sameCen && it.hasCen && it.cenMin == first.cenMin && it.cenMax == first.cenMax;
+        samePt = samePt && it.hasPt && it.ptMin == first.ptMin && it.ptMax == first.ptMax;
+        sameCt = sameCt && it.hasCt && it.ctMin == first.ctMin && it.ctMax == first.ctMax;
+    }
+
+    BinPlanItem fixed;
+    fixed.label = fallbackLabel;
+    fixed.hasCen = sameCen;
+    fixed.hasPt = samePt;
+    fixed.hasCt = sameCt;
+    fixed.cenMin = first.cenMin;
+    fixed.cenMax = first.cenMax;
+    fixed.ptMin = first.ptMin;
+    fixed.ptMax = first.ptMax;
+    fixed.ctMin = first.ctMin;
+    fixed.ctMax = first.ctMax;
+
+    const std::string title = BuildSimpleBinTitle(fixed);
+    if (!title.empty() && title != fallbackLabel) return title;
+    return BuildSimpleBinTitle(first);
+}
+
+std::string NormalizeWpFilename(std::string name) {
+    const std::string kPrefix = "WorkingPoint_";
+    const std::string kDoublePrefix = kPrefix + kPrefix;
+    while (name.rfind(kDoublePrefix, 0) == 0) {
+        name.erase(0, kPrefix.size());
+    }
+    if (!name.empty() && !(name.size() > 4 && name.substr(name.size() - 4) == ".txt")) {
+        name += ".txt";
+    }
+    return name;
+}
+
+std::string ResolveWpFile(const GeneralHelper::Json &cfg, const std::string &mode) {
     const auto common = cfg.value("common", GeneralHelper::Json::object());
     const auto path = common.value("path", GeneralHelper::Json::object());
-    const std::string wpDir = GetS(path, "working_point_dir", "");
+    const auto wpFiles = common.value("wp_files", GeneralHelper::Json::object());
+    const std::string wpDir = GetS(path, "wp_dir", "");
     if (wpDir.empty()) return std::string();
 
-    if (mode == "bdt_spectrum" || mode == "topology_spectrum") {
+    const std::string wpFilename = NormalizeWpFilename(GetS(wpFiles, mode.c_str(), ""));
+    if (!wpFilename.empty()) {
+        return (std::filesystem::path(wpDir) / wpFilename).string();
+    }
+
+    if (mode == "bdt_spectrum") {
         const std::filesystem::path testPath = std::filesystem::path(wpDir) / "WorkingPoint_SpectrumTest.txt";
         const std::filesystem::path allPath = std::filesystem::path(wpDir) / "WorkingPoint_Spectrum_AllCent.txt";
         return std::filesystem::exists(testPath) ? testPath.string() : allPath.string();
@@ -97,29 +171,17 @@ std::string ResolveWpFile(const GeneralHelper::Json &cfg, const std::string &mod
 }
 
 std::string ResolveScoreEffDir(const GeneralHelper::Json &cfg, const std::string &mode) {
-    const auto analysis = cfg.value("analysis", GeneralHelper::Json::object());
-    const auto binning = analysis.value("binning", GeneralHelper::Json::object());
-    const auto profiles = binning.value("mode_profiles", GeneralHelper::Json::object());
-    const auto profile = profiles.value(mode, GeneralHelper::Json::object());
-
-    std::string dir = GetS(profile, "score_efficiency_dir", "");
-    if (!dir.empty()) return dir;
-
+    (void)mode;
     const auto common = cfg.value("common", GeneralHelper::Json::object());
     const auto path = common.value("path", GeneralHelper::Json::object());
-    dir = GetS(path, "score_efficiency_dir", "");
-    if (!dir.empty()) return dir;
-
-    const auto syst = analysis.value("systematics", GeneralHelper::Json::object());
-    dir = GetS(syst, "syst_efficiency_array_path", "");
-    return dir;
+    return GetS(path, "wp_dir", "");
 }
 
 double GetNEvents(const GeneralHelper::Json &cfg, double cenMin, double cenMax) {
     const auto common = cfg.value("common", GeneralHelper::Json::object());
     const auto path = common.value("path", GeneralHelper::Json::object());
     const auto eventHist = common.value("event_hist", GeneralHelper::Json::object());
-    const std::string filePath = GetS(path, "analysis_results_file", "");
+    const std::string filePath = GetS(path, "analysisresults_path", "");
     const std::string histPath = GetS(eventHist, "n_events_hist", "");
     if (filePath.empty() || histPath.empty()) return 0.0;
 
@@ -223,11 +285,10 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     const auto onFlyChecks = checks.value("hypertriton_onthefly_checks", GeneralHelper::Json::object());
     const auto fit = analysis.value("fit", GeneralHelper::Json::object());
     const auto selection = analysis.value("selection", GeneralHelper::Json::object());
-    const auto correction = analysis.value("correction", GeneralHelper::Json::object());
     const auto syst = analysis.value("systematics", GeneralHelper::Json::object());
-    const auto binning = analysis.value("binning", GeneralHelper::Json::object());
-    const auto profiles = binning.value("mode_profiles", GeneralHelper::Json::object());
-    const auto profile = profiles.value(mode, GeneralHelper::Json::object());
+    const auto modeProfiles = analysis.value("mode_profiles", GeneralHelper::Json::object());
+    const auto profile = modeProfiles.value(mode, GeneralHelper::Json::object());
+    const auto commonBinning = common.value("binning", GeneralHelper::Json::object());
 
     out.dataTree = GetS(trees, "data", "O2hypcands");
     out.mcTree = GetS(trees, "mc", "O2mchypcands");
@@ -237,7 +298,7 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     out.bkgFunc = GetS(fit, "bkg_fit_func", "pol2");
     out.sigFunc = GetS(fit, "signal_fit_func", "dscb");
     out.isMatter = GetS(selection, "is_matter", "both");
-    out.basicSelectionDataForMcEff = GetS(commonSel, "basic_selection_data_for_mc_eff", "");
+    out.basicSelectionDataForMcEff = GetS(commonSel, "basic_selection_data", "");
     out.additionalDataSelectionGeneral = GetS(selection, "additional_data_selection_general", "");
     out.additionalDataSelection = GetS(profile, "additional_data_selection", "");
     out.centralitySelection = GetS(profile, "centrality_selection", "");
@@ -250,9 +311,7 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     if (onFlyChecks.contains("variables") && onFlyChecks["variables"].is_array()) {
         out.onTheFlyVariables = onFlyChecks["variables"].get<std::vector<std::string>>();
     }
-    if (correction.contains("onebin_qa_columns") && correction["onebin_qa_columns"].is_array()) {
-        out.oneBinQaColumns = correction["onebin_qa_columns"].get<std::vector<std::string>>();
-    } else if (onFlyChecks.contains("variables") && onFlyChecks["variables"].is_array()) {
+    if (onFlyChecks.contains("variables") && onFlyChecks["variables"].is_array()) {
         out.oneBinQaColumns = onFlyChecks["variables"].get<std::vector<std::string>>();
     } else if (checksGeneral.contains("variables") && checksGeneral["variables"].is_array()) {
         out.oneBinQaColumns = checksGeneral["variables"].get<std::vector<std::string>>();
@@ -281,24 +340,24 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
             out.oneBinQaAxisPool[it.key()] = ax;
         }
     }
-    if (profile.contains("pt_bins") && profile["pt_bins"].is_array()) {
-        out.ptBins = profile["pt_bins"].get<std::vector<double>>();
+    if (commonBinning.contains("pt_bins") && commonBinning["pt_bins"].is_array()) {
+        out.ptBins = commonBinning["pt_bins"].get<std::vector<double>>();
     }
-    if (profile.contains("ct_bins_by_pt") && profile["ct_bins_by_pt"].is_array()) {
-        out.ctBinsByPt = profile["ct_bins_by_pt"].get<std::vector<std::vector<double>>>();
+    if (commonBinning.contains("ct_bins_by_pt") && commonBinning["ct_bins_by_pt"].is_array()) {
+        out.ctBinsByPt = commonBinning["ct_bins_by_pt"].get<std::vector<std::vector<double>>>();
     }
     out.addAbsorptionCorrectionPtCt = profile.value("add_absorption_correction", false);
-    out.mcFileForAcceptance = GetS(path, "mc_file_for_acceptance", "");
-    if (profile.contains("cen_bins") && profile["cen_bins"].is_array()) {
-        out.cenBins = profile["cen_bins"].get<std::vector<double>>();
+    out.mcFileForAcceptance = GetS(path, "mc_path", "");
+    if (commonBinning.contains("cen_bins") && commonBinning["cen_bins"].is_array()) {
+        out.cenBins = commonBinning["cen_bins"].get<std::vector<double>>();
     }
-    if (profile.contains("pt_bins_by_centrality") && profile["pt_bins_by_centrality"].is_array()) {
-        out.ptBinsByCentrality = profile["pt_bins_by_centrality"].get<std::vector<std::vector<double>>>();
+    if (commonBinning.contains("pt_bins_by_centrality") && commonBinning["pt_bins_by_centrality"].is_array()) {
+        out.ptBinsByCentrality = commonBinning["pt_bins_by_centrality"].get<std::vector<std::vector<double>>>();
     }
     out.mcFileForAbsorption = GetS(path, "mc_file_for_absorption", "");
     out.originalCtaoAbsorption = GetD(params, "original_ctao_absorption", out.originalCtaoAbsorption);
 
-    const bool doSystExec = execution.value("do_systematics", correction.value("do_systematics", false));
+    const bool doSystExec = execution.value("do_systematics", false);
     out.doSystematics = doSystExec && mode != "topology_spectrum";
     out.randomSeed = GetI(syst, "random_seed", out.randomSeed);
     out.systNtrails = GetI(syst, "syst_ntrails", out.systNtrails);
@@ -340,7 +399,8 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     const std::string period = GetS(tags, "period", "period");
     const std::string periodMark = GetS(tags, "period_mark", "mark");
     const std::string periodTag = period + "_" + periodMark;
-    const std::string outputDir = GetS(path, "output_dir", "./Outputs") + "/" + periodTag + "/" + mode + "/" + out.isMatter;
+    const std::string outputBase = GetS(path, "output_dir", "./Outputs");
+    const std::string outputDir = outputBase + "/" + periodTag + "/" + mode + "/" + out.isMatter;
     out.outputRoot = outputDir + "/spectrum.root";
     out.onTheFlyChecksRoot = outputDir + "/Checks_hypertriton/checks_hypertriton.root";
     out.onTheFlyChecksPdfDir = outputDir + "/Checks_hypertriton";
@@ -893,7 +953,10 @@ void WriteGroupOutput(TFile &fout,
     if (hSysTotal) hSysTotal->Write("h_sys_total", TObject::kOverwrite);
 
     auto cSys = MakeSystematicsDetailCanvas("c_sys_details", hSysSelection, hSysAbsorption, hSysBranching, hSysTotal);
-    if (cSys) cSys->Write("c_sys_details", TObject::kOverwrite);
+    if (cSys) {
+        cSys->SetTitle(hSysTotal ? hSysTotal->GetTitle() : dirName.c_str());
+        cSys->Write("c_sys_details", TObject::kOverwrite);
+    }
     auto cFinal = MakeFinalSpectrumCanvas("c_final_spectrum",
                                           hFinalStat,
                                           gFinalSys,
@@ -903,6 +966,32 @@ void WriteGroupOutput(TFile &fout,
                                           finalLabelCfg ? *finalLabelCfg : PlotLabelConfig{},
                                           finalIsMatter,
                                           finalNEvents);
+    const bool isExpCtFit = finalStdFit && std::string(finalStdFit->GetName()).rfind("f_exp_", 0) == 0;
+    if (cFinal && isExpCtFit) {
+        constexpr double kSpeedOfLightCmPerPsLocal = 0.0299792458;
+        const double tauCm = finalStdFit->GetParameter(1);
+        const double tauCmErr = finalStdFit->GetParError(1);
+        const double tauPs = tauCm / kSpeedOfLightCmPerPsLocal;
+        const double tauPsErr = tauCmErr / kSpeedOfLightCmPerPsLocal;
+        const double chi2 = finalStdFit->GetChisquare();
+        const int ndf = finalStdFit->GetNDF();
+        const double fitProb = (ndf > 0) ? TMath::Prob(chi2, ndf) : 0.0;
+
+        cFinal->cd();
+        TLatex latex;
+        latex.SetNDC();
+        latex.SetTextFont(42);
+        latex.SetTextSize(0.035);
+        latex.SetTextAlign(13);
+        double y = 0.88;
+        latex.DrawLatex(0.60, y, Form("#tau = %.1f #pm %.1f ps", tauPs, tauPsErr));
+        y -= 0.05;
+        latex.DrawLatex(0.60, y, Form("#chi^{2}/ndf = %.2f/%d", chi2, ndf));
+        y -= 0.05;
+        latex.DrawLatex(0.60, y, Form("Fit probability = %.3f", fitProb));
+        cFinal->Modified();
+        cFinal->Update();
+    }
     if (cFinal) cFinal->Write("c_final_spectrum", TObject::kOverwrite);
 }
 
@@ -1089,9 +1178,12 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
                                            stdCorr + 5.0 * std::max(1e-12, stdCorrErr));
     out.hCorrDist->SetDirectory(nullptr);
     out.hCorrDist->SetStats(false);
+    const std::string simpleBinTitle = BuildSimpleBinTitle(item);
+    out.hCorrDist->SetTitle((simpleBinTitle + ";Corrected counts;Entries").c_str());
     out.hTrailBdtEff = std::make_unique<TH1D>(("h_trail_bdt_eff_" + item.label).c_str(), ";trail index;BDT efficiency", static_cast<int>(nUse), 0.5, static_cast<double>(nUse) + 0.5);
     out.hTrailBdtEff->SetDirectory(nullptr);
     out.hTrailBdtEff->SetStats(false);
+    out.hTrailBdtEff->SetTitle((simpleBinTitle + ";trail index;BDT efficiency").c_str());
 
     auto itData = rdfCache.find(runCfg.dataTree + "@" + item.snapshotDataPath);
     auto itMc = rdfCache.find(runCfg.mcTree + "@" + item.snapshotMcPath);
@@ -1204,7 +1296,7 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
                                                       stdCorrErr,
                                                       item.cenMin,
                                                       item.cenMax,
-                                                      item.label);
+                                                      simpleBinTitle);
     }
 
     if (!enableAbsorptionSystematic) {
@@ -1215,6 +1307,7 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
                                                  1.5);
         out.hCorrVsAbso->SetDirectory(nullptr);
         out.hCorrVsAbso->SetStats(false);
+        out.hCorrVsAbso->SetTitle((simpleBinTitle + ";n x #sigma_{He3};Corrected counts").c_str());
         out.hCorrVsAbso->GetXaxis()->SetBinLabel(1, "disabled");
         out.hCorrVsAbso->SetBinContent(1, stdCorr);
         out.absorptionRms = 0.0;
@@ -1233,6 +1326,7 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
     out.hCorrVsAbso = std::make_unique<TH1D>(("h_corr_vs_abso_" + item.label).c_str(), ";n x #sigma_{He3};Corrected counts", static_cast<int>(absoFiles.size()), 0.5, static_cast<double>(absoFiles.size()) + 0.5);
     out.hCorrVsAbso->SetDirectory(nullptr);
     out.hCorrVsAbso->SetStats(false);
+    out.hCorrVsAbso->SetTitle((simpleBinTitle + ";n x #sigma_{He3};Corrected counts").c_str());
     std::vector<double> corrVariants;
     for (size_t iabso = 0; iabso < absoFiles.size(); ++iabso) {
         const auto &absoFile = absoFiles[iabso];
@@ -1269,6 +1363,7 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
     if (out.hCorrVsAbso) {
         const std::string cName = "c_absorption_source_" + item.label;
         out.cCorrVsAbso = std::make_unique<TCanvas>(cName.c_str(), cName.c_str(), 960, 720);
+        out.cCorrVsAbso->SetTitle(simpleBinTitle.c_str());
         out.cCorrVsAbso->cd();
         out.cCorrVsAbso->SetLeftMargin(0.14);
         out.cCorrVsAbso->SetBottomMargin(0.18);
@@ -1494,6 +1589,34 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                     static_cast<int>(edges.size() - 1), edges.data());
         auto hSysTotal = std::make_unique<TH1D>("h_sys_total", useCtAxis ? ";ct;#sigma_{syst}^{total}" : ";p_{T};#sigma_{syst}^{total}",
                              static_cast<int>(edges.size() - 1), edges.data());
+        const std::string groupBinTitle = BuildSimpleGroupTitle(group.items, group.key);
+        hRaw->SetTitle((groupBinTitle + (useCtAxis ? ";ct;N_{raw}" : ";p_{T};N_{raw}")).c_str());
+        hCorr->SetTitle((groupBinTitle + (useCtAxis ? ";ct;N_{corr}" : ";p_{T};N_{corr}")).c_str());
+        hBdtEff->SetTitle((groupBinTitle + (useCtAxis ? ";ct;BDT eff" : ";p_{T};BDT eff")).c_str());
+        hAcc->SetTitle((groupBinTitle + (useCtAxis ? ";ct;Accptance #times efficency" : ";p_{T};Accptance #times efficency")).c_str());
+        hAbso->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#epsilon_{abso}" : ";p_{T};#epsilon_{abso}")).c_str());
+        hFitSigma->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#sigma_{fit}" : ";p_{T};#sigma_{fit}")).c_str());
+        hFitMean->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#mu_{fit}" : ";p_{T};#mu_{fit}")).c_str());
+        hFitChi2->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#chi^{2}/ndf" : ";p_{T};#chi^{2}/ndf")).c_str());
+        hSysSelection->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#sigma_{syst}^{selection}" : ";p_{T};#sigma_{syst}^{selection}")).c_str());
+        hSysAbsorption->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#sigma_{syst}^{abso}" : ";p_{T};#sigma_{syst}^{abso}")).c_str());
+        hSysBranching->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#sigma_{syst}^{BR}" : ";p_{T};#sigma_{syst}^{BR}")).c_str());
+        hSysTotal->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#sigma_{syst}^{total}" : ";p_{T};#sigma_{syst}^{total}")).c_str());
+        if (modeName == "ct_single") {
+            // ct_single group-level summary histograms should be generic (no first-bin title).
+            hRaw->SetTitle(";ct;N_{raw}");
+            hCorr->SetTitle(";ct;N_{corr}");
+            hBdtEff->SetTitle(";ct;BDT eff");
+            hAcc->SetTitle(";ct;Acceptance #times efficiency");
+            hAbso->SetTitle(";ct;#epsilon_{abso}");
+            hFitSigma->SetTitle(";ct;#sigma_{fit}");
+            hFitMean->SetTitle(";ct;#mu_{fit}");
+            hFitChi2->SetTitle(";ct;#chi^{2}/ndf");
+            hSysSelection->SetTitle(";ct;#sigma_{syst}^{selection}");
+            hSysAbsorption->SetTitle(";ct;#sigma_{syst}^{abso}");
+            hSysBranching->SetTitle(";ct;#sigma_{syst}^{BR}");
+            hSysTotal->SetTitle(";ct;#sigma_{syst}^{total}");
+        }
         hRaw->SetDirectory(nullptr);
         hCorr->SetDirectory(nullptr);
         hBdtEff->SetDirectory(nullptr);
@@ -1603,6 +1726,8 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                 const std::string frameName = "frame_data_" + item.label;
                 auto *cloned = dynamic_cast<RooPlot *>(oneBinRes.massFit.frame->Clone(frameName.c_str()));
                 if (cloned) {
+                    const std::string simpleBinTitle = BuildSimpleBinTitle(item);
+                    cloned->SetTitle(simpleBinTitle.c_str());
                     fitFrames.emplace_back(cloned);
                     const std::string canvasName = "canvas_" + frameName;
                     auto cData = MakeDecoratedFitCanvas(canvasName,
@@ -1612,7 +1737,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                                                         runCfg.isMatter,
                                                         groupNEvents);
                     if (cData) {
-                        cData->SetTitle(("Invariant mass fit " + item.label).c_str());
+                        cData->SetTitle(simpleBinTitle.c_str());
                         stdDataFitCanvases.push_back(std::move(cData));
                     }
                 }
@@ -1787,6 +1912,30 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                                                    "#it{c}t (cm)");
             if (expoOut.fit) shapeFits.push_back(std::move(expoOut.fit));
             if (expoOut.canvas) shapeFitCanvases.push_back(std::move(expoOut.canvas));
+
+            const std::filesystem::path outDir = std::filesystem::path(runCfg.outputRoot).parent_path();
+            std::filesystem::create_directories(outDir);
+            const std::string txtName = "final_spectrum_expfit_" + SanitizeName(group.dirName) + ".txt";
+            std::ofstream fitTxt(outDir / txtName, std::ios::out | std::ios::trunc);
+            if (fitTxt.is_open()) {
+                fitTxt << std::fixed << std::setprecision(6);
+                fitTxt << "mode=ct_single\n";
+                fitTxt << "group=" << group.dirName << "\n";
+                if (!shapeFits.empty() && shapeFits.back()) {
+                    const double chi2 = shapeFits.back()->GetChisquare();
+                    const int ndf = shapeFits.back()->GetNDF();
+                    const double chi2Ndf = (ndf > 0) ? (chi2 / static_cast<double>(ndf)) : 0.0;
+                    const double fitProb = (ndf > 0) ? TMath::Prob(chi2, ndf) : 0.0;
+                    fitTxt << "lifetime_ps=" << expoOut.tauPs << "\n";
+                    fitTxt << "lifetime_err_ps=" << expoOut.tauPsErr << "\n";
+                    fitTxt << "chi2=" << chi2 << "\n";
+                    fitTxt << "ndf=" << ndf << "\n";
+                    fitTxt << "chi2_ndf=" << chi2Ndf << "\n";
+                    fitTxt << "fit_probability=" << fitProb << "\n";
+                } else {
+                    fitTxt << "status=exp_fit_missing\n";
+                }
+            }
         }
 
         std::unique_ptr<TH1D> hRawOverNevts;

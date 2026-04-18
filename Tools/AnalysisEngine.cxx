@@ -50,7 +50,7 @@ int AnalysisEngine::Run(const std::string &configPath, const std::string &modeOv
 std::string AnalysisEngine::ResolveMode(const GeneralHelper::Json &cfg, const std::string &overrideMode) {
     if (!overrideMode.empty()) return overrideMode;
     const auto execution = cfg.value("execution", GeneralHelper::Json::object());
-    return execution.value("mode", std::string("bdt_spectrum"));
+    return execution.value("analysis_mode", std::string("bdt_spectrum"));
 }
 
 ChecksConfig AnalysisEngine::BuildChecksConfig(const GeneralHelper::Json &cfg) {
@@ -109,11 +109,12 @@ ChecksConfig AnalysisEngine::BuildChecksConfig(const GeneralHelper::Json &cfg) {
     }
 
     out.mcChecks = parseBlock(jc.value("mc_checks", GeneralHelper::Json::object()));
-    if (out.mcChecks.file.empty()) out.mcChecks.file = path.value("mc_file_for_acceptance", std::string());
+    if (out.mcChecks.file.empty()) out.mcChecks.file = path.value("mc_path", std::string());
     if (out.mcChecks.tree.empty()) out.mcChecks.tree = trees.value("mc", std::string("O2mchypcands"));
 
     out.dataAllChecks = parseBlock(jc.value("data_all_checks", GeneralHelper::Json::object()));
-    if (out.dataAllChecks.tree.empty()) out.dataAllChecks.tree = trees.value("data", std::string("O2hypcands"));
+    out.dataAllChecks.file = path.value("data_path", out.dataAllChecks.file);
+    out.dataAllChecks.tree = trees.value("data", std::string("O2hypcands"));
 
     out.onTheFlyChecks = parseBlock(jc.value("hypertriton_onthefly_checks", GeneralHelper::Json::object()));
     if (!out.onTheFlyChecks.enable) {

@@ -77,7 +77,6 @@ Reweight policy update:
 ### 4.2 execution
 - `mode`: `spectrum | topology_spectrum | crosssection | ct_single`
 - `enable_implicit_mt`
-- `stop_on_error`
 
 ### 4.3 analysis
 - `binning`

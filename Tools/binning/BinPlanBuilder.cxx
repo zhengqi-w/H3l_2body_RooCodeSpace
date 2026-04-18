@@ -33,23 +33,23 @@ void AddEdge(std::vector<double> &edges, double value) {
 
 BinPlan BinPlanBuilder::Build(const GeneralHelper::Json &cfg, const ModePolicy &policy) const {
     const auto analysis = cfg.value("analysis", GeneralHelper::Json::object());
-    const auto binning = analysis.value("binning", GeneralHelper::Json::object());
-    const auto modeProfiles = binning.value("mode_profiles", GeneralHelper::Json::object());
+    const auto modeProfiles = analysis.value("mode_profiles", GeneralHelper::Json::object());
     if (!modeProfiles.contains(policy.profileKey)) {
-        throw std::runtime_error("analysis.binning.mode_profiles missing key: " + policy.profileKey);
+        throw std::runtime_error("analysis.mode_profiles missing key: " + policy.profileKey);
     }
 
     const auto profile = modeProfiles.at(policy.profileKey);
     const auto common = cfg.value("common", GeneralHelper::Json::object());
+    const auto commonBinning = common.value("binning", GeneralHelper::Json::object());
     const auto commonPath = common.value("path", GeneralHelper::Json::object());
-    const std::string snapshotDir = commonPath.value("input_snapshot_dir", std::string());
+    const std::string snapshotDir = commonPath.value("snapshot_dir", std::string());
 
     BinPlan out;
     out.mode = policy.mode;
 
     if (policy.useCentrality && policy.usePt) {
-        const auto cenEdges = ReadDoubleArray(profile.value("cen_bins", GeneralHelper::Json::array()));
-        const auto ptByCen = profile.value("pt_bins_by_centrality", GeneralHelper::Json::array());
+        const auto cenEdges = ReadDoubleArray(commonBinning.value("cen_bins", GeneralHelper::Json::array()));
+        const auto ptByCen = commonBinning.value("pt_bins_by_centrality", GeneralHelper::Json::array());
         if (cenEdges.size() < 2) {
             throw std::runtime_error("Invalid cen_bins for mode: " + policy.mode);
         }
@@ -92,8 +92,8 @@ BinPlan BinPlanBuilder::Build(const GeneralHelper::Json &cfg, const ModePolicy &
             }
         }
     } else if (policy.usePt && policy.useCt) {
-        const auto ptEdges = ReadDoubleArray(profile.value("pt_bins", GeneralHelper::Json::array()));
-        const auto ctByPt = profile.value("ct_bins_by_pt", GeneralHelper::Json::array());
+        const auto ptEdges = ReadDoubleArray(commonBinning.value("pt_bins", GeneralHelper::Json::array()));
+        const auto ctByPt = commonBinning.value("ct_bins_by_pt", GeneralHelper::Json::array());
         if (ptEdges.size() < 2) {
             throw std::runtime_error("Invalid pt_bins for mode: " + policy.mode);
         }
@@ -127,9 +127,9 @@ BinPlan BinPlanBuilder::Build(const GeneralHelper::Json &cfg, const ModePolicy &
             }
         }
     } else if (policy.useCt && !policy.usePt) {
-        const auto ctEdges = ReadDoubleArray(profile.value("ct_bins", GeneralHelper::Json::array()));
+        const auto ctEdges = ReadDoubleArray(commonBinning.value("ct_bins_single", GeneralHelper::Json::array()));
         if (ctEdges.size() < 2) {
-            throw std::runtime_error("Invalid ct_bins for mode: " + policy.mode);
+            throw std::runtime_error("Invalid ct_bins_single for mode: " + policy.mode);
         }
         for (size_t i = 0; i + 1 < ctEdges.size(); ++i) {
             BinPlanItem item;
