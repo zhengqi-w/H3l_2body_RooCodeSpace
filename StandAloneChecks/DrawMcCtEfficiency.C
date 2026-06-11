@@ -175,7 +175,7 @@ int DrawMcCtEfficiency(const std::vector<double> &ctEdges = {0.4, 0.6, 0.8, 1, 1
                        const char *isMatter = "both",
                        bool enableImplicitMT = false,
                        const char *extraCut = "fGenDecRad < 2.1",
-                       const char *outpath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MCEfficiency") {
+                       const char *outpath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/StandAloneChecks/MCEfficiency") {
     try {
         if (!mcFileForAcceptance || std::string(mcFileForAcceptance).empty()) {
             throw std::runtime_error("mc_file_for_acceptance is required");

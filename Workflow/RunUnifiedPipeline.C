@@ -50,6 +50,11 @@ bool IsAllowedMode(const std::string &mode) {
     return kAllowed.find(mode) != kAllowed.end();
 }
 
+std::string PreprocessModeForAnalysisMode(const std::string &mode) {
+    if (mode == "bdt_spectrum") return "cen_pt";
+    return mode;
+}
+
 std::string EscapeForShellSingleQuoted(const std::string &s) {
     std::string out;
     out.reserve(s.size() + 8);
@@ -142,16 +147,18 @@ int RunUnifiedPipeline(const char *configPath = "configs/general_config.json",
         if (!IsAllowedMode(trainingMode) || !IsAllowedMode(wpMode) || !IsAllowedMode(analysisMode)) {
             throw std::runtime_error("Unsupported mode in execution.{training_mode,wp_mode,analysis_mode}");
         }
+        const std::string trainingPreprocessMode = PreprocessModeForAnalysisMode(trainingMode);
+        const std::string wpPreprocessMode = PreprocessModeForAnalysisMode(wpMode);
 
         std::string stageOpt = stage ? std::string(stage) : std::string("all");
         stageOpt = NormalizeMode(stageOpt);
 
         const std::string pythonCmd =
             "python3 PreProcess/BDTPreProcess.py --config-file " + EscapeForShellSingleQuoted(cfgPath.string()) +
-            " --mix-mode " + EscapeForShellSingleQuoted(trainingMode);
+            " --mix-mode " + EscapeForShellSingleQuoted(trainingPreprocessMode);
         const std::string wpCmd =
             "root -l -b -q 'PreProcess/ProcessWP.C(\"" + EscapeForRootString(cfgPath.string()) + "\", \"" +
-            EscapeForRootString(wpMode) + "\")'";
+            EscapeForRootString(wpPreprocessMode) + "\")'";
         const std::string analysisCmd =
             "root -l -b -q 'Tasks/ProcessAnalysis.C(\"" + EscapeForRootString(cfgPath.string()) + "\", \"" +
             EscapeForRootString(analysisMode) + "\")'";

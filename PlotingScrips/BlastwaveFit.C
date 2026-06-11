@@ -28,7 +28,7 @@ std::string MakePdfName(const char *filePath) {
   if (dotPos != std::string::npos) {
     base = base.substr(0, dotPos);
   }
-  std::string dir = gSystem->DirName(filePath ? filePath : "./");
+  std::string dir = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/PlotingScrips/BlastwaveFit";
   return dir + "/" + base + "_BGBW_fit.pdf";
 }
 
@@ -61,6 +61,7 @@ void BlastwaveFit(
   for (const auto &filePathStr : filePaths) {
     const char *filePath = filePathStr.c_str();
     const std::string pdfName = (pdfOut && std::string(pdfOut).size()) ? pdfOut : MakePdfName(filePath);
+    gSystem->mkdir(gSystem->DirName(pdfName.c_str()), true);
     const std::string histPathStr(histPath);
     const auto [dirPath, objName] = SplitPath(histPathStr);
 

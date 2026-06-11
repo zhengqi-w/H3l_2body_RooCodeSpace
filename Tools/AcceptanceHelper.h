@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <utility>
 
 namespace AcceptanceHelper {
@@ -218,6 +219,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
     const std::vector<std::vector<double>> &ptBinsPerCent,
     const std::string &basicSel   = "",
     const std::vector<std::string> &topologyselection = {},
+    const std::vector<std::vector<std::string>> &topologySelectionPerCent = {},
     const bool selTwoBody = true,
     const std::string &centVar    = "fCentralityFT0C",
     const std::string &evselCol   = "fIsSurvEvSel",
@@ -238,6 +240,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
 
     const bool haveEvsel   = HasColumn(rdf, evselCol);
     const bool haveReco    = HasColumn(rdf, recoCol);
+    const bool haveRecoMCCollision = HasColumn(rdf, "fIsRecoMCCollision");
 
     if (!centBins1D.empty() && !ptBinsPerCent.empty() && !HasColumn(rdf, centVar))
         throw std::runtime_error("ComputeAcceptanceFlexible: missing centrality column '" + centVar + "'");
@@ -254,7 +257,8 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
 
     auto [df_evsel_ready, evselFlagCol] = ensure_flag_column(rdf, haveEvsel, evselCol, "__acc_evsel_flag");
     auto [df_reco_ready, recoFlagCol] = ensure_flag_column(df_evsel_ready, haveReco, recoCol, "__acc_reco_flag");
-    auto df_ready_flags = df_reco_ready;
+    auto [df_reco_mc_ready, recoMCCollisionFlagCol] = ensure_flag_column(df_reco_ready, haveRecoMCCollision, "fIsRecoMCCollision", "__acc_reco_mc_collision_flag");
+    auto df_ready_flags = df_reco_mc_ready;
 
     auto ensure_int_flag_column = [](ROOT::RDF::RNode node,
                                      const std::string &colName,
@@ -269,16 +273,17 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
 
     auto [df_flags_evsel_int, evselFlagColInt] = ensure_int_flag_column(df_ready_flags, evselFlagCol, "__acc_evsel_flag_int");
     auto [df_ready_flags_int, recoFlagColInt] = ensure_int_flag_column(df_flags_evsel_int, recoFlagCol, "__acc_reco_flag_int");
+    auto [df_reco_mc_flags_int, recoMCCollisionFlagColInt] = ensure_int_flag_column(df_ready_flags_int, recoMCCollisionFlagCol, "__acc_reco_mc_collision_flag_int");
 
-    ROOT::RDF::RNode df_with_fundamental = df_ready_flags_int;
+    ROOT::RDF::RNode df_with_fundamental = df_reco_mc_flags_int;
     if (selTwoBody) {
         if (!HasColumn(rdf, "fIsTwoBodyDecay")) {
             throw std::runtime_error("ComputeAcceptanceFlexible: missing column 'fIsTwoBodyDecay' required by selTwoBody=true");
         }
         const std::string fundamentalSel = "(fIsTwoBodyDecay > 0)";
-        df_with_fundamental = df_ready_flags_int.Define("__acc_fundamental_flag_int", "(" + fundamentalSel + ") ? 1 : 0");
+        df_with_fundamental = df_reco_mc_flags_int.Define("__acc_fundamental_flag_int", "(" + fundamentalSel + ") ? 1 : 0");
     } else {
-        df_with_fundamental = df_ready_flags_int.Define("__acc_fundamental_flag_int", []() -> int { return 1; });
+        df_with_fundamental = df_reco_mc_flags_int.Define("__acc_fundamental_flag_int", []() -> int { return 1; });
     }
 
     std::string mergedBasicSelExpr = basicSel.empty() ? std::string("1") : basicSel;
@@ -312,6 +317,17 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
     if (enableTopologyEff && !ptBins1D.empty() && static_cast<int>(topologyselection.size()) != static_cast<int>(ptBins1D.size()) - 1) {
         throw std::runtime_error("ComputeAcceptanceFlexible: topologyselection size must match nPtBins for scenario 1");
     }
+    const bool enableTopologyEffPerCent = !topologySelectionPerCent.empty();
+    if (enableTopologyEffPerCent && !centBins1D.empty() && !ptBinsPerCent.empty()) {
+        if (topologySelectionPerCent.size() != ptBinsPerCent.size()) {
+            throw std::runtime_error("ComputeAcceptanceFlexible: topologySelectionPerCent size must match nCentBins for scenario 4");
+        }
+        for (size_t ic = 0; ic < ptBinsPerCent.size(); ++ic) {
+            if (topologySelectionPerCent[ic].size() != ptBinsPerCent[ic].size() - 1) {
+                throw std::runtime_error("ComputeAcceptanceFlexible: topologySelectionPerCent[" + std::to_string(ic) + "] size must match nPtBins for scenario 4");
+            }
+        }
+    }
 
     std::string topologyFlagColInt = "__acc_topology_flag_int";
     if (enableTopologyEff && !ptBins1D.empty()) {
@@ -324,6 +340,31 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                 : std::string("1");
             topoExpr << "((" << genPtColUsed << " >= " << ptBins1D[i] << ") && ("
                      << genPtColUsed << " < " << ptBins1D[i + 1] << ") && (" << topoSel << "))";
+        }
+        topoExpr << ") ? 1 : 0";
+        auto df_with_topo_flag = df_ready.Define("__acc_topology_flag", topoExpr.str());
+        auto topoPair = ensure_int_flag_column(df_with_topo_flag, "__acc_topology_flag", "__acc_topology_flag_int");
+        df_ready = topoPair.first;
+        topologyFlagColInt = topoPair.second;
+    } else if (enableTopologyEffPerCent && !centBins1D.empty() && !ptBinsPerCent.empty()) {
+        std::ostringstream topoExpr;
+        topoExpr << "(";
+        bool firstTerm = true;
+        for (size_t ic = 0; ic + 1 < centBins1D.size(); ++ic) {
+            for (size_t ip = 0; ip + 1 < ptBinsPerCent[ic].size(); ++ip) {
+                if (!firstTerm) topoExpr << " || ";
+                firstTerm = false;
+                const std::string topoSel = (ic < topologySelectionPerCent.size() &&
+                                             ip < topologySelectionPerCent[ic].size() &&
+                                             !topologySelectionPerCent[ic][ip].empty())
+                    ? topologySelectionPerCent[ic][ip]
+                    : std::string("1");
+                topoExpr << "((" << centColUsed << " >= " << centBins1D[ic] << ") && ("
+                         << centColUsed << " < " << centBins1D[ic + 1] << ") && ("
+                         << genPtColUsed << " >= " << ptBinsPerCent[ic][ip] << ") && ("
+                         << genPtColUsed << " < " << ptBinsPerCent[ic][ip + 1] << ") && ("
+                         << topoSel << "))";
+            }
         }
         topoExpr << ") ? 1 : 0";
         auto df_with_topo_flag = df_ready.Define("__acc_topology_flag", topoExpr.str());
@@ -374,10 +415,10 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genPt, int evselFlag, int recoFlag, int basicFlag, int fundamentalFlag, int topologyFlag, double genMatter) {
+            [&](unsigned slot, double genPt, int evselFlag, int recoFlag, int recoMCCollisionFlag, int basicFlag, int fundamentalFlag, int topologyFlag, double genMatter) {
                 auto &slotHist = acquire_slot(slot);
                 const bool passFundamental = fundamentalFlag != 0;
-                const bool passEvsel = passFundamental && (evselFlag != 0);
+                const bool passEvsel = passFundamental && (evselFlag != 0) && (recoMCCollisionFlag != 0);
                 const bool passBasic = basicFlag != 0;
                 const bool passTopo = topologyFlagColInt.empty() ? true : (topologyFlag != 0);
                 const bool passReco = passFundamental && passBasic && (recoFlag != 0) && passTopo;
@@ -397,7 +438,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_pt_antimatter->Fill(genPt);
                 }                
             },
-            {genPtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, topologyFlagColInt, genMatterColUsed});
+            {genPtColUsed, evselFlagColInt, recoFlagColInt, recoMCCollisionFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, topologyFlagColInt, genMatterColUsed});
 
         res.evsel_pt_both = MergeSlotHists(slotHists, [](const SlotHistPt &slot) { return slot.evsel_pt_both.get(); }, "h_evsel_pt_both");
         res.reco_pt_both  = MergeSlotHists(slotHists, [](const SlotHistPt &slot) { return slot.reco_pt_both.get(); },  "h_reco_pt_both");
@@ -449,10 +490,10 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genCt, int evselFlag, int recoFlag, int basicFlag, int fundamentalFlag, double genMatter) {
+            [&](unsigned slot, double genCt, int evselFlag, int recoFlag, int recoMCCollisionFlag, int basicFlag, int fundamentalFlag, double genMatter) {
                 auto &slotHist = acquire_slot(slot);
                 const bool passFundamental = fundamentalFlag != 0;
-                const bool passEvsel = passFundamental && (evselFlag != 0);
+                const bool passEvsel = passFundamental && (evselFlag != 0) && (recoMCCollisionFlag != 0);
                 const bool passBasic = basicFlag != 0;
                 const bool passReco = passFundamental && passBasic && (recoFlag != 0);
                 const bool isMatter = genMatter > 0.0;
@@ -471,7 +512,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_ct_antimatter->Fill(genCt);
                 }
             },
-            {genCtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, genMatterColUsed});
+            {genCtColUsed, evselFlagColInt, recoFlagColInt, recoMCCollisionFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, genMatterColUsed});
 
         res.evsel_ct_both = MergeSlotHists(slotHists, [](const SlotHistCt &slot) { return slot.evsel_ct_both.get(); }, "h_evsel_ct_both");
         res.reco_ct_both  = MergeSlotHists(slotHists, [](const SlotHistCt &slot) { return slot.reco_ct_both.get(); },  "h_reco_ct_both");
@@ -547,13 +588,13 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genPt, double genCt, int evselFlag, int recoFlag, int basicFlag, int fundamentalFlag, double genMatter) {
+            [&](unsigned slot, double genPt, double genCt, int evselFlag, int recoFlag, int recoMCCollisionFlag, int basicFlag, int fundamentalFlag, double genMatter) {
                 const int ptIdx = FindBin(ptBins1D, genPt);
                 if (ptIdx < 0)
                     return;
                 auto &slotHist = acquire_slot(slot);
                 const bool passFundamental = fundamentalFlag != 0;
-                const bool passEvsel = passFundamental && (evselFlag != 0);
+                const bool passEvsel = passFundamental && (evselFlag != 0) && (recoMCCollisionFlag != 0);
                 const bool passBasic = basicFlag != 0;
                 const bool passReco = passFundamental && passBasic && (recoFlag != 0);
                 const bool isMatter = genMatter > 0.0;
@@ -572,7 +613,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_ct_antimatter[ptIdx]->Fill(genCt);
                 }
             },
-            {genPtColUsed, genCtColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, genMatterColUsed});
+            {genPtColUsed, genCtColUsed, evselFlagColInt, recoFlagColInt, recoMCCollisionFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, genMatterColUsed});
 
         auto merge_per_pt = [&](auto accessor, const std::string &namePrefix, std::vector<TH1D*> &target) {
             for (int i = 0; i < nPt; ++i) {
@@ -675,13 +716,13 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         };
 
         df_ready.ForeachSlot(
-            [&](unsigned slot, double genPt, double cent, int evselFlag, int recoFlag, int basicFlag, int fundamentalFlag, int topologyFlag, double genMatter) {
+            [&](unsigned slot, double genPt, double cent, int evselFlag, int recoFlag, int recoMCCollisionFlag, int basicFlag, int fundamentalFlag, int topologyFlag, double genMatter) {
                 const int centIdx = FindBin(centBins1D, cent);
                 if (centIdx < 0)
                     return;
                 auto &slotHist = acquire_slot(slot);
                 const bool passFundamental = fundamentalFlag != 0;
-                const bool passEvsel = passFundamental && (evselFlag != 0);
+                const bool passEvsel = passFundamental && (evselFlag != 0) && (recoMCCollisionFlag != 0);
                 const bool passBasic = basicFlag != 0;
                 const bool passTopo = topologyFlagColInt.empty() ? true : (topologyFlag != 0);
                 const bool passReco = passFundamental && passBasic && (recoFlag != 0) && passTopo;
@@ -701,7 +742,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                         slotHist.reco_pt_antimatter[centIdx]->Fill(genPt);
                 }
             },
-            {genPtColUsed, centColUsed, evselFlagColInt, recoFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, topologyFlagColInt, genMatterColUsed});
+            {genPtColUsed, centColUsed, evselFlagColInt, recoFlagColInt, recoMCCollisionFlagColInt, basicSelFlagColInt, fundamentalSelFlagColInt, topologyFlagColInt, genMatterColUsed});
 
         auto merge_per_cent = [&](auto accessor, const std::string &namePrefix, std::vector<TH1D*> &target) {
             for (int i = 0; i < nCent; ++i) {

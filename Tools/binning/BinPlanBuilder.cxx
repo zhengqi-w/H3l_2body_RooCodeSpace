@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
+#include <filesystem>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -29,6 +31,53 @@ void AddEdge(std::vector<double> &edges, double value) {
     edges.push_back(value);
 }
 
+std::string SanitizeBinningPeriodTag(std::string tag) {
+    for (auto &c : tag) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (!std::isalnum(uc) && c != '_' && c != '-') c = '_';
+    }
+    return tag;
+}
+
+std::string BuildBinningCombinedPeriodTag(const GeneralHelper::Json &periods) {
+    std::string out;
+    if (!periods.is_array()) return "combined_period";
+    for (size_t ip = 0; ip < periods.size(); ++ip) {
+        const auto &period = periods[ip];
+        std::string tag = "period_" + std::to_string(ip);
+        if (period.is_object()) {
+            tag = period.value("tag", tag);
+        }
+        tag = SanitizeBinningPeriodTag(tag);
+        if (tag.empty()) continue;
+        if (!out.empty()) out += "_";
+        out += tag;
+    }
+    return out.empty() ? "combined_period" : out;
+}
+
+std::string ResolveSnapshotDir(const GeneralHelper::Json &cfg) {
+    const auto common = cfg.value("common", GeneralHelper::Json::object());
+    const auto commonPath = common.value("path", GeneralHelper::Json::object());
+    const std::string snapshotDir = commonPath.value("snapshot_dir", std::string());
+    const auto execution = cfg.value("execution", GeneralHelper::Json::object());
+    if (!execution.value("combine_period", false)) return snapshotDir;
+
+    const auto periods = common.value("periods", GeneralHelper::Json::array());
+    if (!periods.is_array() || periods.empty()) {
+        throw std::runtime_error("execution.combine_period=true but common.periods is empty");
+    }
+    if (snapshotDir.empty()) {
+        throw std::runtime_error("execution.combine_period=true but common.path.snapshot_dir is empty");
+    }
+    const std::string combinedDir =
+        (std::filesystem::path(snapshotDir).parent_path() / BuildBinningCombinedPeriodTag(periods)).string();
+    if (!std::filesystem::exists(combinedDir)) {
+        throw std::runtime_error("Combined-period snapshot directory not found: " + combinedDir);
+    }
+    return combinedDir;
+}
+
 } // namespace
 
 BinPlan BinPlanBuilder::Build(const GeneralHelper::Json &cfg, const ModePolicy &policy) const {
@@ -41,8 +90,7 @@ BinPlan BinPlanBuilder::Build(const GeneralHelper::Json &cfg, const ModePolicy &
     const auto profile = modeProfiles.at(policy.profileKey);
     const auto common = cfg.value("common", GeneralHelper::Json::object());
     const auto commonBinning = common.value("binning", GeneralHelper::Json::object());
-    const auto commonPath = common.value("path", GeneralHelper::Json::object());
-    const std::string snapshotDir = commonPath.value("snapshot_dir", std::string());
+    const std::string snapshotDir = ResolveSnapshotDir(cfg);
 
     BinPlan out;
     out.mode = policy.mode;

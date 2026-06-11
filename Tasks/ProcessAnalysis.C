@@ -1,3 +1,10 @@
+#include <TCanvas.h>
+#include <TSystem.h>
+
+R__LOAD_LIBRARY(libHist)
+R__LOAD_LIBRARY(libGraf)
+R__LOAD_LIBRARY(libGpad)
+
 #include "../Tools/AnalysisEngine.h"
 #include "../Tools/AnalysisEngine.cxx"
 #include "../Tools/binning/BinPlanBuilder.cxx"

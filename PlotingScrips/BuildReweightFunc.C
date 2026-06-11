@@ -61,8 +61,10 @@ void BuildReweightFunc(
     const char *he3File = "/Users/zhengqingwang/alice/data/h3l_spec_run2/He3_50_90.root",
     const char *he3HistPath = "Hist1D_y1",
   const char *he3GraphPath = "Graph1D_y1",
-    const char *h3lBwFile = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/Ploting_scrips/H3L_BWFit_Run3_23.root",
-    const char *outFile = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/Ploting_scrips/ReweightFunc.root") {
+    const char *h3lBwFile = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/PlotingScrips/extract_bwfits/H3L_BWFit_Run3_23.root",
+    const char *outFile = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/PlotingScrips/BuildReweightFunc/ReweightFunc.root") {
+
+  gSystem->mkdir(gSystem->DirName(outFile), true);
 
   TFile *fHe3 = TFile::Open(he3File, "READ");
   if (!fHe3 || fHe3->IsZombie()) {

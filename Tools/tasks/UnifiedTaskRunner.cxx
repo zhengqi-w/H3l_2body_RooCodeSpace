@@ -1,6 +1,7 @@
 #include "UnifiedTaskRunner.h"
 
 #include "BinningCorrectionHelper.h"
+#include "IntegralYieldHelper.h"
 #include "ProcessOneBin.h"
 #include "SpectrumPlotHelper.h"
 #include "../checks/ChecksConfig.h"
@@ -9,6 +10,7 @@
 #include <RooMsgService.h>
 #include <RooPlot.h>
 #include <TCanvas.h>
+#include <TBox.h>
 #include <TClass.h>
 #include <TDirectory.h>
 #include <TFile.h>
@@ -19,12 +21,14 @@
 #include <TKey.h>
 #include <TMath.h>
 #include <TLatex.h>
+#include <TPaveText.h>
 #include <TTree.h>
 
 #include "../../include/AliPWGFunc.h"
 #include "../../include/AliPWGFunc.cxx"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cmath>
@@ -64,6 +68,47 @@ int GetI(const GeneralHelper::Json &j, const char *key, int def = 0) {
     if (j.contains(key) && j[key].is_number_integer()) return j[key].get<int>();
     if (j.contains(key) && j[key].is_number()) return static_cast<int>(j[key].get<double>());
     return def;
+}
+
+std::string NormalizeEventSignalLossMethod(std::string method) {
+    method.erase(std::remove_if(method.begin(), method.end(), [](unsigned char c) {
+                     return c == '-' || c == '_' || std::isspace(c);
+                 }),
+                 method.end());
+    std::transform(method.begin(), method.end(), method.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (method == "impact" || method == "impactparameter") return "impactparameter";
+    return "multiplicity";
+}
+
+std::map<std::string, SpectrumFunctionConfig> ParseSpectrumFitParameterConfigs(const GeneralHelper::Json &j) {
+    std::map<std::string, SpectrumFunctionConfig> out;
+    if (!j.is_object()) return out;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        if (!it.value().is_object()) continue;
+        SpectrumFunctionConfig cfg;
+        const auto &v = it.value();
+        const char *initialKeys[] = {"initial", "init", "parameters_initial"};
+        for (const char *key : initialKeys) {
+            if (v.contains(key) && v[key].is_array()) {
+                cfg.initial = v[key].get<std::vector<double>>();
+                break;
+            }
+        }
+        const char *limitKeys[] = {"limits", "ranges", "parameter_limits"};
+        for (const char *key : limitKeys) {
+            if (!v.contains(key) || !v[key].is_array()) continue;
+            for (const auto &row : v[key]) {
+                if (!row.is_array() || row.size() < 2) continue;
+                if (!row[0].is_number() || !row[1].is_number()) continue;
+                cfg.limits.emplace_back(row[0].get<double>(), row[1].get<double>());
+            }
+            break;
+        }
+        if (!cfg.initial.empty() || !cfg.limits.empty()) out[it.key()] = std::move(cfg);
+    }
+    return out;
 }
 
 std::string BuildRangeLabel(const std::string &prefix, double v1, double v2) {
@@ -144,11 +189,61 @@ std::string NormalizeWpFilename(std::string name) {
     return name;
 }
 
+bool IsCombinePeriodEnabled(const GeneralHelper::Json &cfg) {
+    const auto execution = cfg.value("execution", GeneralHelper::Json::object());
+    return execution.value("combine_period", false);
+}
+
+std::string SanitizePeriodTag(std::string tag) {
+    for (auto &c : tag) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (!std::isalnum(uc) && c != '_' && c != '-') c = '_';
+    }
+    return tag;
+}
+
+std::string BuildCombinedPeriodTag(const GeneralHelper::Json &cfg) {
+    const auto common = cfg.value("common", GeneralHelper::Json::object());
+    const auto periods = common.value("periods", GeneralHelper::Json::array());
+    std::string out;
+    if (!periods.is_array()) return "combined_period";
+    for (size_t ip = 0; ip < periods.size(); ++ip) {
+        const auto &period = periods[ip];
+        std::string tag = "period_" + std::to_string(ip);
+        if (period.is_object()) tag = GetS(period, "tag", tag);
+        tag = SanitizePeriodTag(tag);
+        if (tag.empty()) continue;
+        if (!out.empty()) out += "_";
+        out += tag;
+    }
+    return out.empty() ? "combined_period" : out;
+}
+
+std::string CombinedTopDir(const std::string &path, const std::string &tag) {
+    return (std::filesystem::path(path).parent_path() / tag).string();
+}
+
+std::string CombinedSubDir(const std::string &path, const std::string &tag) {
+    const std::filesystem::path p(path);
+    return (p.parent_path().parent_path() / tag / p.filename()).string();
+}
+
+std::string ResolveCombinedPath(const GeneralHelper::Json &cfg,
+                                const std::string &path,
+                                bool isTopDir) {
+    if (path.empty() || !IsCombinePeriodEnabled(cfg)) return path;
+    const auto common = cfg.value("common", GeneralHelper::Json::object());
+    const auto periods = common.value("periods", GeneralHelper::Json::array());
+    if (!periods.is_array() || periods.empty()) return path;
+    const std::string tag = BuildCombinedPeriodTag(cfg);
+    return isTopDir ? CombinedTopDir(path, tag) : CombinedSubDir(path, tag);
+}
+
 std::string ResolveWpFile(const GeneralHelper::Json &cfg, const std::string &mode) {
     const auto common = cfg.value("common", GeneralHelper::Json::object());
     const auto path = common.value("path", GeneralHelper::Json::object());
     const auto wpFiles = common.value("wp_files", GeneralHelper::Json::object());
-    const std::string wpDir = GetS(path, "wp_dir", "");
+    const std::string wpDir = ResolveCombinedPath(cfg, GetS(path, "wp_dir", ""), false);
     if (wpDir.empty()) return std::string();
 
     const std::string wpFilename = NormalizeWpFilename(GetS(wpFiles, mode.c_str(), ""));
@@ -174,24 +269,79 @@ std::string ResolveScoreEffDir(const GeneralHelper::Json &cfg, const std::string
     (void)mode;
     const auto common = cfg.value("common", GeneralHelper::Json::object());
     const auto path = common.value("path", GeneralHelper::Json::object());
-    return GetS(path, "wp_dir", "");
+    return ResolveCombinedPath(cfg, GetS(path, "wp_dir", ""), false);
 }
 
 double GetNEvents(const GeneralHelper::Json &cfg, double cenMin, double cenMax) {
     const auto common = cfg.value("common", GeneralHelper::Json::object());
     const auto path = common.value("path", GeneralHelper::Json::object());
+    const auto periods = common.value("periods", GeneralHelper::Json::array());
     const auto eventHist = common.value("event_hist", GeneralHelper::Json::object());
-    const std::string filePath = GetS(path, "analysisresults_path", "");
     const std::string histPath = GetS(eventHist, "n_events_hist", "");
-    if (filePath.empty() || histPath.empty()) return 0.0;
+    if (histPath.empty()) return 0.0;
 
-    TFile f(filePath.c_str(), "READ");
-    if (f.IsZombie()) return 0.0;
-    TH1 *h = dynamic_cast<TH1 *>(f.Get(histPath.c_str()));
-    if (!h) return 0.0;
-    const int bmin = h->GetXaxis()->FindBin(cenMin + 1e-3);
-    const int bmax = h->GetXaxis()->FindBin(cenMax - 1e-3);
-    return h->Integral(bmin, bmax);
+    std::vector<std::string> files;
+    if (IsCombinePeriodEnabled(cfg) && periods.is_array() && !periods.empty()) {
+        for (const auto &period : periods) {
+            if (!period.is_object()) continue;
+            const std::string fp = GetS(period, "analysisresults_path", "");
+            if (!fp.empty()) files.push_back(fp);
+        }
+    }
+    if (files.empty()) {
+        const std::string filePath = GetS(path, "analysisresults_path", "");
+        if (!filePath.empty()) files.push_back(filePath);
+    }
+
+    double sum = 0.0;
+    for (const auto &filePath : files) {
+        TFile f(filePath.c_str(), "READ");
+        if (f.IsZombie()) continue;
+        TH1 *h = dynamic_cast<TH1 *>(f.Get(histPath.c_str()));
+        if (!h) continue;
+        const int bmin = h->GetXaxis()->FindBin(cenMin + 1e-3);
+        const int bmax = h->GetXaxis()->FindBin(cenMax - 1e-3);
+        sum += h->Integral(bmin, bmax);
+    }
+    return sum;
+}
+
+std::vector<std::pair<std::string, double>> GetPeriodEventWeights(const GeneralHelper::Json &cfg,
+                                                                  double cenMin,
+                                                                  double cenMax) {
+    std::vector<std::pair<std::string, double>> out;
+    if (!IsCombinePeriodEnabled(cfg)) return out;
+    const auto common = cfg.value("common", GeneralHelper::Json::object());
+    const auto periods = common.value("periods", GeneralHelper::Json::array());
+    const auto eventHist = common.value("event_hist", GeneralHelper::Json::object());
+    const std::string histPath = GetS(eventHist, "n_events_hist", "");
+    if (!periods.is_array() || periods.empty() || histPath.empty()) return out;
+
+    double total = 0.0;
+    for (size_t ip = 0; ip < periods.size(); ++ip) {
+        const auto &period = periods[ip];
+        if (!period.is_object()) continue;
+        const std::string tag = GetS(period, "tag", "period_" + std::to_string(ip));
+        const std::string filePath = GetS(period, "analysisresults_path", "");
+        double count = 0.0;
+        if (!filePath.empty()) {
+            TFile f(filePath.c_str(), "READ");
+            if (!f.IsZombie()) {
+                TH1 *h = dynamic_cast<TH1 *>(f.Get(histPath.c_str()));
+                if (h) {
+                    const int bmin = h->GetXaxis()->FindBin(cenMin + 1e-3);
+                    const int bmax = h->GetXaxis()->FindBin(cenMax - 1e-3);
+                    count = h->Integral(bmin, bmax);
+                }
+            }
+        }
+        out.emplace_back(tag, count);
+        total += count;
+    }
+    if (total > 0.0) {
+        for (auto &kv : out) kv.second /= total;
+    }
+    return out;
 }
 
 struct GroupContext {
@@ -210,8 +360,13 @@ struct RunConfig {
     std::string sigFunc;
     std::string isMatter;
     std::string mcFileForAcceptance;
+    std::string eventSignalLossFile;
+    std::string eventSignalLossMethod{"multiplicity"};
     std::vector<double> cenBins;
+    std::vector<double> relatedMultiplicityCenter;
     std::vector<std::vector<double>> ptBinsByCentrality;
+    std::vector<std::vector<std::string>> topologySelectionsByCentrality;
+    std::vector<bool> addEventSignalLossCenPt;
     std::string mcFileForAbsorption;
     double originalCtaoAbsorption{7.6};
     std::string absorptionTree;
@@ -238,6 +393,8 @@ struct RunConfig {
     bool doSystematics{false};
     int randomSeed{40};
     int systNtrails{200};
+    int nTrailsForIntegralSyst{1000};
+    int nCombinationsForIntegralSystExtrapolation{500};
     int nBinsForFit{100};
     int systBdtScoreNPoints{20};
     double systThrChi2Ndf{2.0};
@@ -246,6 +403,22 @@ struct RunConfig {
     std::vector<std::string> systSigFuncs;
     std::vector<std::string> systAbsorptionFiles;
     std::vector<std::string> systAbsorptionFileLabels;
+    std::vector<std::string> integralFitFuncs;
+    std::map<std::string, SpectrumFunctionConfig> integralFitParameters;
+    std::string integralFitFunc{"fBGBW"};
+    bool rejectIntegralFitFuncByChi2{false};
+    double integralFitFuncMaxChi2Ndf{5.0};
+    double integralFitFuncFallbackFraction{0.20};
+    double integralGaussFitMaxChi2Ndf{3.0};
+    double perPtBinGaussFitMaxChi2Ndf{3.0};
+    double integralExtrapToyMaxChi2Ndf{-1.0};
+    double integralFitRangeMin{0.0};
+    double integralFitRangeMax{10.0};
+    double integratedYieldRangeMin{0.0};
+    double integratedYieldRangeMax{10.0};
+    double integralLowPtMaxFactor{10.0};
+    bool integralFitUseMinosErrors{false};
+    double absorptionLength{0.5};
 
     double branchingRatio{0.25};
     double branchingRatioFractionalUncertainty{0.0};
@@ -348,11 +521,31 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     }
     out.addAbsorptionCorrectionPtCt = profile.value("add_absorption_correction", false);
     out.mcFileForAcceptance = GetS(path, "mc_path", "");
+    out.eventSignalLossFile = GetS(path, "event_signal_loss_file", "");
+    out.eventSignalLossMethod = NormalizeEventSignalLossMethod(GetS(analysis, "event_signal_loss_method", "multiplicity"));
     if (commonBinning.contains("cen_bins") && commonBinning["cen_bins"].is_array()) {
         out.cenBins = commonBinning["cen_bins"].get<std::vector<double>>();
     }
+    if (commonBinning.contains("related_multiplicity_center") && commonBinning["related_multiplicity_center"].is_array()) {
+        out.relatedMultiplicityCenter = commonBinning["related_multiplicity_center"].get<std::vector<double>>();
+    }
     if (commonBinning.contains("pt_bins_by_centrality") && commonBinning["pt_bins_by_centrality"].is_array()) {
         out.ptBinsByCentrality = commonBinning["pt_bins_by_centrality"].get<std::vector<std::vector<double>>>();
+    }
+    if (profile.contains("data_selection_topology") && profile["data_selection_topology"].is_array()) {
+        out.topologySelectionsByCentrality.clear();
+        for (const auto &row : profile["data_selection_topology"]) {
+            std::vector<std::string> rowSelections;
+            if (row.is_array()) {
+                for (const auto &cell : row) {
+                    rowSelections.push_back(cell.is_string() ? cell.get<std::string>() : std::string{});
+                }
+            }
+            out.topologySelectionsByCentrality.push_back(std::move(rowSelections));
+        }
+    }
+    if (params.contains("add_event_signal_loss_cen_pt") && params["add_event_signal_loss_cen_pt"].is_array()) {
+        out.addEventSignalLossCenPt = params["add_event_signal_loss_cen_pt"].get<std::vector<bool>>();
     }
     out.mcFileForAbsorption = GetS(path, "mc_file_for_absorption", "");
     out.originalCtaoAbsorption = GetD(params, "original_ctao_absorption", out.originalCtaoAbsorption);
@@ -361,6 +554,9 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     out.doSystematics = doSystExec && mode != "topology_spectrum";
     out.randomSeed = GetI(syst, "random_seed", out.randomSeed);
     out.systNtrails = GetI(syst, "syst_ntrails", out.systNtrails);
+    out.nTrailsForIntegralSyst = GetI(syst, "n_trails_for_integral_syst", out.nTrailsForIntegralSyst);
+    out.nCombinationsForIntegralSystExtrapolation =
+        GetI(syst, "n_combinations_for_integral_syst_extrapolation", out.nCombinationsForIntegralSystExtrapolation);
     out.nBinsForFit = GetI(syst, "n_bins_for_fit", out.nBinsForFit);
     out.systBdtScoreNPoints = GetI(syst, "syst_bdt_score_npoints", out.systBdtScoreNPoints);
     out.systThrChi2Ndf = GetD(syst, "syst_thrashold_chi2ndf", out.systThrChi2Ndf);
@@ -377,6 +573,42 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     if (syst.contains("syst_absorption_file_labels") && syst["syst_absorption_file_labels"].is_array()) {
         out.systAbsorptionFileLabels = syst["syst_absorption_file_labels"].get<std::vector<std::string>>();
     }
+    out.absorptionLength = GetD(syst, "absorption_length", out.absorptionLength);
+    out.integralFitFunc = GetS(fit, "integral_fit_func", out.integralFitFunc);
+    if (syst.contains("integral_fit_funcs") && syst["integral_fit_funcs"].is_array()) {
+        out.integralFitFuncs = syst["integral_fit_funcs"].get<std::vector<std::string>>();
+    }
+    if (out.integralFitFuncs.empty()) out.integralFitFuncs.push_back(out.integralFitFunc);
+    out.rejectIntegralFitFuncByChi2 = syst.value("reject_integral_fit_func_by_chi2", out.rejectIntegralFitFuncByChi2);
+    out.integralFitFuncMaxChi2Ndf = GetD(syst, "integral_fit_func_max_chi2ndf", out.integralFitFuncMaxChi2Ndf);
+    out.integralFitFuncFallbackFraction =
+        GetD(syst, "integral_fit_func_fallback_fraction", out.integralFitFuncFallbackFraction);
+    out.integralGaussFitMaxChi2Ndf =
+        GetD(syst, "integral_gauss_fit_max_chi2ndf", out.integralGaussFitMaxChi2Ndf);
+    out.perPtBinGaussFitMaxChi2Ndf =
+        GetD(syst, "per_ptbin_gauss_fit_max_chi2ndf", out.perPtBinGaussFitMaxChi2Ndf);
+    out.integralExtrapToyMaxChi2Ndf =
+        GetD(syst, "integral_extrap_toy_max_chi2ndf", out.integralExtrapToyMaxChi2Ndf);
+    if (syst.contains("integral_fit_range") && syst["integral_fit_range"].is_array() &&
+        syst["integral_fit_range"].size() >= 2) {
+        out.integralFitRangeMin = syst["integral_fit_range"][0].get<double>();
+        out.integralFitRangeMax = syst["integral_fit_range"][1].get<double>();
+    }
+    if (syst.contains("integrated_yield_range") && syst["integrated_yield_range"].is_array() &&
+        syst["integrated_yield_range"].size() >= 2) {
+        out.integratedYieldRangeMin = syst["integrated_yield_range"][0].get<double>();
+        out.integratedYieldRangeMax = syst["integrated_yield_range"][1].get<double>();
+    }
+    out.integralLowPtMaxFactor =
+        GetD(syst, "integral_lowpt_max_factor", out.integralLowPtMaxFactor);
+    out.integralFitUseMinosErrors =
+        syst.value("integral_fit_use_minos_errors", out.integralFitUseMinosErrors);
+    out.integralFitParameters = ParseSpectrumFitParameterConfigs(fit.value("integral_fit_parameters", GeneralHelper::Json::object()));
+    auto systIntegralFitParameters =
+        ParseSpectrumFitParameterConfigs(syst.value("integral_fit_parameters", GeneralHelper::Json::object()));
+    for (auto &kv : systIntegralFitParameters) {
+        out.integralFitParameters[kv.first] = std::move(kv.second);
+    }
     out.branchingRatio = GetD(params, "branching_ratio", out.branchingRatio);
     out.branchingRatioFractionalUncertainty =
         GetD(params, "branching_ratio_fractional_uncertainty",
@@ -388,6 +620,9 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     out.fitCfg.sigmaRangeMcToData = params.value("sigma_range_mc_to_data", std::vector<double>{1.0, 1.5});
     out.fitCfg.nBinsMcFrame = params.value("mass_nbins_mc", out.fitCfg.nBinsMcFrame);
     out.fitCfg.nBinsDataFrame = params.value("mass_nbins_data", out.fitCfg.nBinsDataFrame);
+    out.fitCfg.useBinnedDataFit = params.value("mass_fit_use_binned_data", out.fitCfg.useBinnedDataFit);
+    out.fitCfg.prefitSidebands = params.value("mass_fit_prefit_sidebands", out.fitCfg.prefitSidebands);
+    out.fitCfg.sidebandExclusionSigma = GetD(params, "mass_fit_sideband_exclusion_sigma", out.fitCfg.sidebandExclusionSigma);
 
     out.plotLabels.usePerformance = tags.value("use_performance", false);
     out.plotLabels.performanceLabel = GetS(tags, "performance_label", "");
@@ -396,9 +631,17 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     out.plotLabels.collisionSystem = GetS(tags, "collision_system", "");
     out.plotLabels.collisionEnergy = GetS(tags, "collision_energy", "");
 
-    const std::string period = GetS(tags, "period", "period");
-    const std::string periodMark = GetS(tags, "period_mark", "mark");
-    const std::string periodTag = period + "_" + periodMark;
+    std::string periodTag;
+    if (IsCombinePeriodEnabled(cfg)) {
+        const auto commonPeriods = common.value("periods", GeneralHelper::Json::array());
+        periodTag = (commonPeriods.is_array() && !commonPeriods.empty()) ? BuildCombinedPeriodTag(cfg) : "combined_period";
+        out.plotLabels.period = periodTag;
+        out.plotLabels.periodMark.clear();
+    } else {
+        const std::string period = GetS(tags, "period", "period");
+        const std::string periodMark = GetS(tags, "period_mark", "mark");
+        periodTag = period + "_" + periodMark;
+    }
     const std::string outputBase = GetS(path, "output_dir", "./Outputs");
     const std::string outputDir = outputBase + "/" + periodTag + "/" + mode + "/" + out.isMatter;
     out.outputRoot = outputDir + "/spectrum.root";
@@ -507,6 +750,9 @@ struct CorrectedCountsResult {
     double bdtEfficiency{1.0};
     double acceptance{1.0};
     double absorption{1.0};
+    double eventLoss{1.0};
+    double eventSplitting{1.0};
+    double signalLoss{1.0};
     double branchingRatio{1.0};
     double deltaRapidity{1.0};
     double matterRatio{1.0};
@@ -520,6 +766,9 @@ CorrectedCountsResult ComputeCorrectedCounts(const std::string &mode,
                                              double acc,
                                              double abso,
                                              double bdtEff,
+                                             double eventLoss,
+                                             double eventSplitting,
+                                             double signalLoss,
                                              double nEvents,
                                              double branchingRatio,
                                              double deltaRap,
@@ -535,10 +784,14 @@ CorrectedCountsResult ComputeCorrectedCounts(const std::string &mode,
     out.bdtEfficiency = eff;
     out.acceptance = accVal;
     out.absorption = absoVal;
+    out.eventLoss = (eventLoss > 0.0) ? eventLoss : 1.0;
+    out.eventSplitting = (eventSplitting > 0.0) ? eventSplitting : 1.0;
+    out.signalLoss = (signalLoss > 0.0) ? signalLoss : 1.0;
 
     if (mode == "bdt_spectrum" || mode == "topology_spectrum") {
-        const double base = raw / accVal / absoVal / eff;
-        const double baseErr = rawErr / accVal / absoVal / eff;
+        const double lossCorr = out.eventLoss / out.signalLoss;
+        const double base = raw / accVal / absoVal / eff * lossCorr;
+        const double baseErr = rawErr / accVal / absoVal / eff * lossCorr;
         const double binWidth = item.ptMax - item.ptMin;
         const double matterRatio = (isMatter == "both") ? 2.0 : 1.0;
         const double norm = std::max(1.0, nEvents) * std::max(1e-12, branchingRatio) * std::max(1e-12, deltaRap) *
@@ -765,6 +1018,7 @@ BinningCorrectionConfig BuildCorrectionConfig(const RunConfig &runCfg) {
     BinningCorrectionConfig cfg;
     cfg.mode = runCfg.mode;
     cfg.isMatter = runCfg.isMatter;
+    cfg.eventSignalLossMethod = runCfg.eventSignalLossMethod;
     cfg.mcTree = runCfg.mcTree;
     cfg.absorptionTree = runCfg.absorptionTree;
     cfg.mcFileForAcceptance = runCfg.mcFileForAcceptance;
@@ -778,6 +1032,7 @@ BinningCorrectionConfig BuildCorrectionConfig(const RunConfig &runCfg) {
     cfg.originalCtaoAbsorption = runCfg.originalCtaoAbsorption;
     cfg.cenBins = runCfg.cenBins;
     cfg.ptBinsByCentrality = runCfg.ptBinsByCentrality;
+    cfg.topologySelectionsByCentrality = runCfg.topologySelectionsByCentrality;
     cfg.ptBins = runCfg.ptBins;
     cfg.ctBinsByPt = runCfg.ctBinsByPt;
     return cfg;
@@ -788,6 +1043,8 @@ struct SysBinArtifacts {
     std::unique_ptr<TH1D> hCorrDist;
     std::unique_ptr<TH1D> hTrailBdtEff;
     std::unique_ptr<TH1D> hCorrVsAbso;
+    std::vector<double> acceptedCorrValues;
+    std::vector<double> corrValuesByTrial;
     std::vector<std::unique_ptr<RooPlot>> trailFrames;
     std::unique_ptr<TCanvas> cCorrDist;
     std::unique_ptr<TCanvas> cCorrVsAbso;
@@ -835,9 +1092,13 @@ void WriteGroupOutput(TFile &fout,
                       TH1D *hBdtEff,
                       TH1D *hAcc,
                       TH1D *hAbso,
+                      TH1D *hEventLoss,
+                      TH1D *hEventSplitting,
+                      TH1D *hSignalLoss,
                       TH1D *hFitSigma,
                       TH1D *hFitMean,
                       TH1D *hFitChi2,
+                      TH1D *hPeriodEventWeights,
                       TH1D *hRawOverNevts,
                       TCanvas *cRawOverNevts,
                       TH1D *hSysSelection,
@@ -876,9 +1137,13 @@ void WriteGroupOutput(TFile &fout,
         if (hBdtEff) hBdtEff->Write("h_bdt_efficiency", TObject::kOverwrite);
         if (hAcc) hAcc->Write("h_acceptance", TObject::kOverwrite);
         if (hAbso) hAbso->Write("h_absorption", TObject::kOverwrite);
+        if (hEventLoss) hEventLoss->Write("h_event_loss", TObject::kOverwrite);
+        if (hEventSplitting) hEventSplitting->Write("h_event_splitting", TObject::kOverwrite);
+        if (hSignalLoss) hSignalLoss->Write("h_signal_loss", TObject::kOverwrite);
         if (hFitSigma) hFitSigma->Write("h_fit_sigma", TObject::kOverwrite);
         if (hFitMean) hFitMean->Write("h_fit_mean", TObject::kOverwrite);
         if (hFitChi2) hFitChi2->Write("h_fit_chi2ndf", TObject::kOverwrite);
+        if (hPeriodEventWeights) hPeriodEventWeights->Write("h_period_event_weights", TObject::kOverwrite);
         if (hRawOverNevts) hRawOverNevts->Write("h_raw_over_nevents", TObject::kOverwrite);
         if (cRawOverNevts) cRawOverNevts->Write("c_raw_over_nevents", TObject::kOverwrite);
         if (shapeFits) {
@@ -1001,16 +1266,25 @@ void AppendCorrectionsCsv(const std::string &csvPath,
                           const std::string &group,
                           const BinPlanItem &item,
                           const GeneralHelper::MassFitResult &fitRes,
-                          const CorrectedCountsResult &corrRes) {
+                          const CorrectedCountsResult &corrRes,
+                          double sysSelection,
+                          double sysAbsorption,
+                          double sysBranching,
+                          double sysTotal) {
     const bool exists = std::filesystem::exists(csvPath);
     std::ofstream ofs(csvPath, std::ios::app);
     if (!ofs.is_open()) return;
+    ofs << std::setprecision(12);
 
     if (!exists) {
         ofs << "mode,group,label,raw,raw_err,chi2_ndf,significance,corrected,corrected_err,";
-        ofs << "bdt_efficiency,acceptance,absorption,branching_ratio,delta_rapidity,matter_ratio,n_events,bin_width\n";
+        ofs << "bdt_efficiency,acceptance,absorption,event_loss,event_splitting,signal_loss,branching_ratio,delta_rapidity,matter_ratio,n_events,bin_width,";
+        ofs << "syst_selection_abs,syst_absorption_abs,syst_branching_abs,syst_total_abs,";
+        ofs << "syst_selection_ratio,syst_absorption_ratio,syst_branching_ratio,syst_total_ratio\n";
     }
 
+    const double den = std::abs(corrRes.value);
+    const auto ratio = [den](double v) { return den > 0.0 ? v / den : 0.0; };
     ofs << mode << ',' << group << ',' << item.label << ','
         << fitRes.signal << ',' << fitRes.signalErr << ','
         << fitRes.chi2Data << ',' << fitRes.significance << ','
@@ -1018,11 +1292,44 @@ void AppendCorrectionsCsv(const std::string &csvPath,
         << corrRes.bdtEfficiency << ','
         << corrRes.acceptance << ','
         << corrRes.absorption << ','
+        << corrRes.eventLoss << ','
+        << corrRes.eventSplitting << ','
+        << corrRes.signalLoss << ','
         << corrRes.branchingRatio << ','
         << corrRes.deltaRapidity << ','
         << corrRes.matterRatio << ','
         << corrRes.nEvents << ','
-        << corrRes.binWidth << '\n';
+        << corrRes.binWidth << ','
+        << sysSelection << ','
+        << sysAbsorption << ','
+        << sysBranching << ','
+        << sysTotal << ','
+        << ratio(sysSelection) << ','
+        << ratio(sysAbsorption) << ','
+        << ratio(sysBranching) << ','
+        << ratio(sysTotal) << '\n';
+}
+
+void AppendIntegratedYieldCsvRow(std::ofstream &ofs,
+                                 double cenMin,
+                                 double cenMax,
+                                 double value,
+                                 double statErr,
+                                 double systExtrap,
+                                 double systFitFunc,
+                                 double systAbsorption,
+                                 double systTrails,
+                                 double systBranching,
+                                 double systTotal) {
+    const double den = std::abs(value);
+    const auto ratio = [den](double v) { return den > 0.0 ? v / den : 0.0; };
+    ofs << cenMin << ',' << cenMax << ','
+        << value << ',' << statErr << ','
+        << systExtrap << ',' << systFitFunc << ',' << systAbsorption << ','
+        << systTrails << ',' << systBranching << ',' << systTotal << ','
+        << ratio(statErr) << ','
+        << ratio(systExtrap) << ',' << ratio(systFitFunc) << ',' << ratio(systAbsorption) << ','
+        << ratio(systTrails) << ',' << ratio(systBranching) << ',' << ratio(systTotal) << '\n';
 }
 
 void WriteOnTheFlyChecksOutput(const std::string &rootFilePath,
@@ -1141,6 +1448,8 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
                                      double stdCorrErr,
                                      double acc,
                                      double abso,
+                                     double eventLoss,
+                                     double signalLoss,
                                      double nEvents,
                                      int histBin,
                                      std::ofstream *trailLog,
@@ -1184,6 +1493,7 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
     out.hTrailBdtEff->SetDirectory(nullptr);
     out.hTrailBdtEff->SetStats(false);
     out.hTrailBdtEff->SetTitle((simpleBinTitle + ";trail index;BDT efficiency").c_str());
+    out.corrValuesByTrial.assign(nUse, std::numeric_limits<double>::quiet_NaN());
 
     auto itData = rdfCache.find(runCfg.dataTree + "@" + item.snapshotDataPath);
     auto itMc = rdfCache.find(runCfg.mcTree + "@" + item.snapshotMcPath);
@@ -1224,12 +1534,43 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
     else if (runCfg.isMatter == "antimatter") mcMassSel += " && fIsMatter <= 0";
     auto mcMass = itMc->second->Filter(mcMassSel).Take<double>("fMassH3L");
 
+    auto isHigherOrderPolynomial = [](const std::string &name) {
+        return name == "pol2" || name == "pol3" || name == "pol4";
+    };
+    auto hasCleanSidebands = [](const std::vector<double> &masses,
+                                const GeneralHelper::MassFitConfig &fitCfg) {
+        int nSignalWindow = 0;
+        int nSideband = 0;
+        constexpr double signalLow = 2.985;
+        constexpr double signalHigh = 2.997;
+        for (double m : masses) {
+            if (m < fitCfg.massMin || m > fitCfg.massMax) continue;
+            if (m >= signalLow && m <= signalHigh) {
+                ++nSignalWindow;
+            } else {
+                ++nSideband;
+            }
+        }
+        if (nSignalWindow < 3) return false;
+        return nSideband <= 5 ||
+               static_cast<double>(nSideband) / static_cast<double>(std::max(1, nSignalWindow)) < 0.25;
+    };
+
     for (size_t i = 0; i < nUse; ++i) {
         const auto [ibdt, ibkg, isig] = combos[i];
+        const auto &trialDataMasses = *dataMassCache[ibdt];
+        std::string trialBkgFunc = bkgFuncs[ibkg];
+        if (isHigherOrderPolynomial(trialBkgFunc) && hasCleanSidebands(trialDataMasses, runCfg.fitCfg)) {
+            trialBkgFunc = "pol1";
+        }
 
         GeneralHelper::MassFitResult trialFit;
         try {
-            trialFit = GeneralHelper::FitMassSpectrum(*dataMassCache[ibdt], *mcMass, runCfg.fitCfg, bkgFuncs[ibkg], sigFuncs[isig]);
+            trialFit = GeneralHelper::FitMassSpectrum(trialDataMasses, *mcMass, runCfg.fitCfg, trialBkgFunc, sigFuncs[isig]);
+            if (!std::isfinite(trialFit.chi2Data) && trialBkgFunc != "pol1" && isHigherOrderPolynomial(bkgFuncs[ibkg])) {
+                trialBkgFunc = "pol1";
+                trialFit = GeneralHelper::FitMassSpectrum(trialDataMasses, *mcMass, runCfg.fitCfg, trialBkgFunc, sigFuncs[isig]);
+            }
         } catch (const std::exception &) {
             continue;
         }
@@ -1246,12 +1587,18 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
             acc,
             abso,
             bdtCandidates[ibdt].efficiency,
+            eventLoss,
+            1.0,
+            signalLoss,
             nEvents,
             runCfg.branchingRatio,
             runCfg.deltaRap,
             runCfg.isMatter,
             runCfg.addAbsorptionCorrectionPtCt);
         const double corr = corrRes.value;
+        if (std::isfinite(corr) && i < out.corrValuesByTrial.size()) {
+            out.corrValuesByTrial[i] = corr;
+        }
 
         const double corrErr = corrRes.error;
         if (out.hTrailBdtEff) out.hTrailBdtEff->SetBinContent(static_cast<int>(i + 1), bdtCandidates[ibdt].efficiency);
@@ -1262,10 +1609,13 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
             if (cloned) out.trailFrames.emplace_back(cloned);
         }
 
-        const bool pass = trialFit.chi2Data < runCfg.systThrChi2Ndf &&
-                  trialFit.significance > runCfg.systThrSignificance &&
-                          std::isfinite(corr);
-        if (pass && out.hCorrDist) out.hCorrDist->Fill(corr);
+        const bool pass = std::isfinite(corr) &&
+                          std::isfinite(trialFit.chi2Data) &&
+                          trialFit.chi2Data < runCfg.systThrChi2Ndf;
+        if (pass) {
+            if (out.hCorrDist) out.hCorrDist->Fill(corr);
+            out.acceptedCorrValues.push_back(corr);
+        }
 
         if (trailLog && trailLog->is_open()) {
             (*trailLog)
@@ -1274,7 +1624,7 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
                 << item.label << ','
                 << bdtCandidates[ibdt].score << ','
                 << bdtCandidates[ibdt].efficiency << ','
-                << bkgFuncs[ibkg] << ','
+                << trialBkgFunc << ','
                 << sigFuncs[isig] << ','
                 << trialFit.chi2Data << ','
                 << trialFit.significance << ','
@@ -1296,7 +1646,9 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
                                                       stdCorrErr,
                                                       item.cenMin,
                                                       item.cenMax,
-                                                      simpleBinTitle);
+                                                      simpleBinTitle,
+                                                      runCfg.perPtBinGaussFitMaxChi2Ndf,
+                                                      &out.selectionRms);
     }
 
     if (!enableAbsorptionSystematic) {
@@ -1348,16 +1700,8 @@ SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
         corrVariants.push_back(corrVar);
     }
     if (!corrVariants.empty()) {
-        double mean = 0.0;
-        for (double v : corrVariants) mean += v;
-        mean /= static_cast<double>(corrVariants.size());
-        double var = 0.0;
-        for (double v : corrVariants) {
-            const double d = v - mean;
-            var += d * d;
-        }
-        var /= static_cast<double>(corrVariants.size());
-        out.absorptionRms = std::sqrt(std::max(0.0, var));
+        const auto mm = std::minmax_element(corrVariants.begin(), corrVariants.end());
+        out.absorptionRms = std::max(0.0, runCfg.absorptionLength) * (*mm.second - *mm.first);
     }
 
     if (out.hCorrVsAbso) {
@@ -1390,7 +1734,8 @@ struct BlastWavePostFit {
 };
 
 BlastWavePostFit BuildBlastWavePostFit(const GroupContext &group,
-                                       TH1D *hCorr) {
+                                       TH1D *hCorr,
+                                       const std::map<std::string, SpectrumFunctionConfig> &fitParameters) {
     BlastWavePostFit out;
     if (!hCorr || group.items.empty()) return out;
 
@@ -1399,41 +1744,11 @@ BlastWavePostFit BuildBlastWavePostFit(const GroupContext &group,
     if (!(fitMax > fitMin)) return out;
 
     const std::string cleanName = SanitizeName(group.dirName);
-    static std::atomic<unsigned long> sBwFitCallId{0};
-    static std::mutex sBwFitMutex;
-    const unsigned long fitId = sBwFitCallId.fetch_add(1, std::memory_order_relaxed) + 1;
-    const std::string tmpName = "f_bgbw_tmp_" + cleanName + "_" + std::to_string(fitId);
-    AliPWGFunc bwHelper;
-    bwHelper.SetVarType(AliPWGFunc::kdNdpt);
-    TF1 *raw = bwHelper.GetBGBW(2.991, 0.6, 0.12, 0.5, 1.0,
-                                tmpName.c_str());
+    auto raw = BuildSpectrumFunction("fBGBW", cleanName + "_std_bgbw", fitParameters);
     if (!raw) return out;
-    raw->SetRange(0.0, 10.0);
-    raw->SetNpx(1200);
-    raw->SetParameter(1, 0.6);
-    raw->SetParameter(2, 0.2);
-    raw->SetParameter(3, 1.0);
-    raw->SetParameter(4, 1.0);
-
-    raw->SetParLimits(1, 0.2, 0.9);
-    raw->SetParLimits(2, 0.1, 0.6);
-    raw->SetParLimits(3, 0.01, 5.0);
-    // Requested norm scale: ~1e-2 to 1e3, typical around 1e0.
-    raw->SetParLimits(4, 1e-2, 1e3);
-
-    const bool imtWasEnabled = ROOT::IsImplicitMTEnabled();
-    const unsigned int imtThreads = ROOT::GetThreadPoolSize();
-    if (imtWasEnabled) ROOT::DisableImplicitMT();
-    {
-        // Keep BW fit thread-safe under ROOT implicit MT.
-        std::lock_guard<std::mutex> lock(sBwFitMutex);
-        hCorr->Fit(raw, "SRQ0", "", fitMin, fitMax);
-    }
-    if (imtWasEnabled) ROOT::EnableImplicitMT(imtThreads > 0 ? imtThreads : 1);
-
-    auto *fittedClone = dynamic_cast<TF1 *>(raw->Clone(("f_bgbw_" + cleanName).c_str()));
-    if (!fittedClone) return out;
-    out.fit.reset(fittedClone);
+    FitHistogramWithFunction(hCorr, raw.get(), fitMin, fitMax);
+    raw->SetName(("f_bgbw_" + cleanName).c_str());
+    out.fit = std::move(raw);
 
     out.fit->SetRange(0.0, 10.0);
     out.canvas = MakeBlastWaveFitCanvas("c_bgbw_fit_" + cleanName,
@@ -1495,12 +1810,15 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
     const RunConfig runCfg = BuildRunConfig(cfg, modeName);
     const auto corrCfg = BuildCorrectionConfig(runCfg);
     const std::vector<GroupContext> groups = BuildGroups(modeName, plan);
-    const std::string csvPath = std::filesystem::path(runCfg.outputRoot).parent_path().string() + "/corrections_all.csv";
+    const std::string outputDir = std::filesystem::path(runCfg.outputRoot).parent_path().string();
+    const std::string csvPath = outputDir + "/corrections_all.csv";
+    const std::string integratedYieldCsvPath = outputDir + "/integrated_yield_summary.csv";
 
     // Clear previous CSV before appending new rows for this run.
     {
         std::error_code ec;
         std::filesystem::remove(csvPath, ec);
+        std::filesystem::remove(integratedYieldCsvPath, ec);
     }
 
     const bool isSpectrumMode = (modeName == "bdt_spectrum" || modeName == "topology_spectrum");
@@ -1508,13 +1826,15 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
     const bool applyBrSystematic = runCfg.doSystematics &&
                                    (isSpectrumMode || isLifetimeMode) &&
                                    runCfg.branchingRatioFractionalUncertainty > 0.0;
-    const std::string periodTag = runCfg.plotLabels.period + "_" + runCfg.plotLabels.periodMark;
+    const std::string periodTag = runCfg.plotLabels.periodMark.empty()
+                                      ? runCfg.plotLabels.period
+                                      : runCfg.plotLabels.period + "_" + runCfg.plotLabels.periodMark;
     double totalRawOverNevts = 0.0;
     double totalEventsOverNevts = 0.0;
     double totalRawErr2OverNevts = 0.0;
 
     std::filesystem::create_directories(std::filesystem::path(runCfg.outputRoot).parent_path());
-    TFile fout(runCfg.outputRoot.c_str(), "UPDATE");
+    TFile fout(runCfg.outputRoot.c_str(), "RECREATE");
     if (fout.IsZombie()) {
         throw std::runtime_error("Cannot open output ROOT: " + runCfg.outputRoot);
     }
@@ -1522,6 +1842,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
     PtCtAcceptanceCache ptCtAccCache;
     PtCtAbsorptionCache ptCtAbsoCache;
     SpectrumAcceptanceCache spectrumAccCache;
+    SpectrumEventSignalLossCache spectrumEvtSigLossCache;
     if (modeName == "pt_ct") {
         ptCtAccCache = BuildPtCtAcceptanceCache(corrCfg, runCfg.mcFileForAcceptance);
         if (runCfg.addAbsorptionCorrectionPtCt) {
@@ -1530,6 +1851,10 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
     } else if (isSpectrumMode) {
         const std::string mcFileForAccSpectrum = ResolveAcceptanceMcFileForGroup(runCfg, GroupContext{});
         spectrumAccCache = BuildSpectrumAcceptanceCache(corrCfg, mcFileForAccSpectrum);
+        spectrumEvtSigLossCache = BuildSpectrumEventSignalLossCache(corrCfg,
+                                                                    runCfg.eventSignalLossFile,
+                                                                    runCfg.mcFileForAcceptance,
+                                                                    runCfg.addEventSignalLossCenPt);
     }
 
     std::unordered_map<std::string, std::shared_ptr<ROOT::RDataFrame>> rdfCache;
@@ -1557,6 +1882,27 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         hTauPerPt->SetStats(false);
     }
 
+    struct IntegralSummaryRow {
+        double cenMin{0.0};
+        double cenMax{0.0};
+        double value{0.0};
+        double statErr{0.0};
+        double systExtrap{0.0};
+        double systFitFunc{0.0};
+        double systAbsorption{0.0};
+        double systTrails{0.0};
+        double systBranching{0.0};
+        double systTotal{0.0};
+    };
+    std::vector<IntegralSummaryRow> integralSummaryRows;
+
+    struct IntegralFitParameterSummaryRow {
+        double cenMin{0.0};
+        double cenMax{0.0};
+        IntegralFitParameterRow fitRow;
+    };
+    std::vector<IntegralFitParameterSummaryRow> integralFitParameterRows;
+
     for (const auto &group : groups) {
         const auto edges = BuildAxisEdges(modeName, group.items);
         if (edges.size() < 2) continue;
@@ -1575,6 +1921,12 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                            static_cast<int>(edges.size() - 1), edges.data());
         auto hAbso = std::make_unique<TH1D>("h_absorption", useCtAxis ? ";ct;#epsilon_{abso}" : ";p_{T};#epsilon_{abso}",
                             static_cast<int>(edges.size() - 1), edges.data());
+        auto hEventLoss = std::make_unique<TH1D>("h_event_loss", useCtAxis ? ";ct;Event loss / event splitting" : ";p_{T};Event loss / event splitting",
+                    static_cast<int>(edges.size() - 1), edges.data());
+        auto hEventSplitting = std::make_unique<TH1D>("h_event_splitting", useCtAxis ? ";ct;Event splitting" : ";p_{T};Event splitting",
+                    static_cast<int>(edges.size() - 1), edges.data());
+        auto hSignalLoss = std::make_unique<TH1D>("h_signal_loss", useCtAxis ? ";ct;Signal loss correction" : ";p_{T};Signal loss correction",
+                    static_cast<int>(edges.size() - 1), edges.data());
         auto hFitSigma = std::make_unique<TH1D>("h_fit_sigma", useCtAxis ? ";ct;#sigma_{fit}" : ";p_{T};#sigma_{fit}",
                      static_cast<int>(edges.size() - 1), edges.data());
         auto hFitMean = std::make_unique<TH1D>("h_fit_mean", useCtAxis ? ";ct;#mu_{fit}" : ";p_{T};#mu_{fit}",
@@ -1595,6 +1947,9 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         hBdtEff->SetTitle((groupBinTitle + (useCtAxis ? ";ct;BDT eff" : ";p_{T};BDT eff")).c_str());
         hAcc->SetTitle((groupBinTitle + (useCtAxis ? ";ct;Accptance #times efficency" : ";p_{T};Accptance #times efficency")).c_str());
         hAbso->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#epsilon_{abso}" : ";p_{T};#epsilon_{abso}")).c_str());
+        hEventLoss->SetTitle((groupBinTitle + (useCtAxis ? ";ct;Event loss / event splitting" : ";p_{T};Event loss / event splitting")).c_str());
+        hEventSplitting->SetTitle((groupBinTitle + (useCtAxis ? ";ct;Event splitting" : ";p_{T};Event splitting")).c_str());
+        hSignalLoss->SetTitle((groupBinTitle + (useCtAxis ? ";ct;Signal loss correction" : ";p_{T};Signal loss correction")).c_str());
         hFitSigma->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#sigma_{fit}" : ";p_{T};#sigma_{fit}")).c_str());
         hFitMean->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#mu_{fit}" : ";p_{T};#mu_{fit}")).c_str());
         hFitChi2->SetTitle((groupBinTitle + (useCtAxis ? ";ct;#chi^{2}/ndf" : ";p_{T};#chi^{2}/ndf")).c_str());
@@ -1609,6 +1964,9 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             hBdtEff->SetTitle(";ct;BDT eff");
             hAcc->SetTitle(";ct;Acceptance #times efficiency");
             hAbso->SetTitle(";ct;#epsilon_{abso}");
+            hEventLoss->SetTitle(";ct;Event loss / event splitting");
+            hEventSplitting->SetTitle(";ct;Event splitting");
+            hSignalLoss->SetTitle(";ct;Signal loss correction");
             hFitSigma->SetTitle(";ct;#sigma_{fit}");
             hFitMean->SetTitle(";ct;#mu_{fit}");
             hFitChi2->SetTitle(";ct;#chi^{2}/ndf");
@@ -1622,6 +1980,9 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         hBdtEff->SetDirectory(nullptr);
         hAcc->SetDirectory(nullptr);
         hAbso->SetDirectory(nullptr);
+        hEventLoss->SetDirectory(nullptr);
+        hEventSplitting->SetDirectory(nullptr);
+        hSignalLoss->SetDirectory(nullptr);
         hFitSigma->SetDirectory(nullptr);
         hFitMean->SetDirectory(nullptr);
         hFitChi2->SetDirectory(nullptr);
@@ -1633,6 +1994,9 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         hBdtEff->SetStats(false);
         hAcc->SetStats(false);
         hAbso->SetStats(false);
+        hEventLoss->SetStats(false);
+        hEventSplitting->SetStats(false);
+        hSignalLoss->SetStats(false);
         hFitSigma->SetStats(false);
         hFitMean->SetStats(false);
         hFitChi2->SetStats(false);
@@ -1645,6 +2009,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         std::vector<std::unique_ptr<TF1>> shapeFits;
         std::vector<std::unique_ptr<TCanvas>> shapeFitCanvases;
         std::vector<SysBinArtifacts> sysArtifacts;
+        std::unique_ptr<TH1D> hPeriodEventWeights;
 
         const std::string mcFileForAccGroup = ResolveAcceptanceMcFileForGroup(runCfg, group);
         const auto accVec = ComputeAcceptancePerBinWithErrors(corrCfg,
@@ -1681,6 +2046,20 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         if ((modeName == "bdt_spectrum" || modeName == "topology_spectrum") && !group.items.empty()) {
             groupNEvents = GetNEvents(cfg, group.items.front().cenMin, group.items.front().cenMax);
             if (groupNEvents <= 0.0) groupNEvents = 1.0;
+            auto periodWeights = GetPeriodEventWeights(cfg, group.items.front().cenMin, group.items.front().cenMax);
+            if (!periodWeights.empty()) {
+                hPeriodEventWeights = std::make_unique<TH1D>("h_period_event_weights",
+                                                             ";Period;Data event weight",
+                                                             static_cast<int>(periodWeights.size()),
+                                                             0.5,
+                                                             static_cast<double>(periodWeights.size()) + 0.5);
+                hPeriodEventWeights->SetDirectory(nullptr);
+                hPeriodEventWeights->SetStats(false);
+                for (size_t ip = 0; ip < periodWeights.size(); ++ip) {
+                    hPeriodEventWeights->SetBinContent(static_cast<int>(ip + 1), periodWeights[ip].second);
+                    hPeriodEventWeights->GetXaxis()->SetBinLabel(static_cast<int>(ip + 1), periodWeights[ip].first.c_str());
+                }
+            }
         }
 
         for (const auto &item : group.items) {
@@ -1701,7 +2080,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             if (!runCfg.oneBinQaColumns.empty()) {
                 oneBinOpt.qaColumns = runCfg.oneBinQaColumns;
             }
-            oneBinOpt.throwOnError = false;
+            oneBinOpt.throwOnError = IsCombinePeriodEnabled(cfg);
             std::vector<std::string> selParts;
             if (!runCfg.centralitySelection.empty()) selParts.push_back(runCfg.centralitySelection);
             if (!runCfg.additionalDataSelectionGeneral.empty()) selParts.push_back(runCfg.additionalDataSelectionGeneral);
@@ -1803,6 +2182,9 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             const double accErr = (static_cast<size_t>(ib - 1) < accVec.size()) ? accVec[static_cast<size_t>(ib - 1)].error : 0.0;
             const double abso = (static_cast<size_t>(ib - 1) < absoVec.size()) ? absoVec[static_cast<size_t>(ib - 1)].value : 1.0;
             const double absoErr = (static_cast<size_t>(ib - 1) < absoVec.size()) ? absoVec[static_cast<size_t>(ib - 1)].error : 0.0;
+            const auto evtLossCorr = isSpectrumMode ? GetSpectrumEventLossForBin(spectrumEvtSigLossCache, item) : BinValueWithError{1.0, 0.0};
+            const auto evtSplittingCorr = isSpectrumMode ? GetSpectrumEventSplittingForBin(spectrumEvtSigLossCache, item) : BinValueWithError{1.0, 0.0};
+            const auto sigLossCorr = isSpectrumMode ? GetSpectrumSignalLossForBin(spectrumEvtSigLossCache, item) : BinValueWithError{1.0, 0.0};
 
             const auto corrRes = ComputeCorrectedCounts(
                 modeName,
@@ -1811,6 +2193,9 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                 acc,
                 abso,
                 bdtEff,
+                evtLossCorr.value,
+                evtSplittingCorr.value,
+                sigLossCorr.value,
                 groupNEvents,
                 runCfg.branchingRatio,
                 runCfg.deltaRap,
@@ -1830,6 +2215,12 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             hAcc->SetBinError(ib, accErr);
             hAbso->SetBinContent(ib, abso);
             hAbso->SetBinError(ib, absoErr);
+            hEventLoss->SetBinContent(ib, evtLossCorr.value);
+            hEventLoss->SetBinError(ib, evtLossCorr.error);
+            hEventSplitting->SetBinContent(ib, evtSplittingCorr.value);
+            hEventSplitting->SetBinError(ib, evtSplittingCorr.error);
+            hSignalLoss->SetBinContent(ib, sigLossCorr.value);
+            hSignalLoss->SetBinError(ib, sigLossCorr.error);
             hFitSigma->SetBinContent(ib, fitRes.sigmaData);
             hFitSigma->SetBinError(ib, fitRes.sigmaDataErr);
             hFitMean->SetBinContent(ib, fitRes.meanData);
@@ -1841,14 +2232,14 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                 hSysBranching->SetBinContent(ib, 0.0);
             }
 
-            AppendCorrectionsCsv(csvPath, modeName, group.dirName, item, fitRes, corrRes);
-
             if (runCfg.doSystematics) {
                 auto sysOut = RunSystematicsForBin(runCfg, group, item, rdfCache,
                                                    corr,
                                                    hCorr->GetBinError(ib),
                                                    acc,
                                                    abso,
+                                                   evtLossCorr.value,
+                                                   sigLossCorr.value,
                                                    groupNEvents,
                                                    ib,
                                                    runCfg.doSystematics ? &trailLog : nullptr,
@@ -1858,6 +2249,14 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                 hSysAbsorption->SetBinContent(ib, sysOut.absorptionRms);
                 sysArtifacts.push_back(std::move(sysOut));
             }
+            const double sysSelection = hSysSelection->GetBinContent(ib);
+            const double sysAbsorption = hSysAbsorption->GetBinContent(ib);
+            const double sysBranching = hSysBranching->GetBinContent(ib);
+            const double sysTotal = std::sqrt(sysSelection * sysSelection +
+                                              sysAbsorption * sysAbsorption +
+                                              sysBranching * sysBranching);
+            AppendCorrectionsCsv(csvPath, modeName, group.dirName, item, fitRes, corrRes,
+                                 sysSelection, sysAbsorption, sysBranching, sysTotal);
         }
 
         for (int ib = 1; ib <= hSysTotal->GetNbinsX(); ++ib) {
@@ -1885,7 +2284,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         }
 
         if (modeName == "bdt_spectrum" || modeName == "topology_spectrum") {
-            auto bwOut = BuildBlastWavePostFit(group, hCorr.get());
+            auto bwOut = BuildBlastWavePostFit(group, hCorr.get(), runCfg.integralFitParameters);
             if (bwOut.fit) shapeFits.push_back(std::move(bwOut.fit));
             if (bwOut.canvas) shapeFitCanvases.push_back(std::move(bwOut.canvas));
         }
@@ -1938,6 +2337,127 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             }
         }
 
+        IntegralYieldResult integralResult;
+        if (isSpectrumMode && !group.items.empty()) {
+            std::vector<std::unique_ptr<TH1D>> absorptionVariantOwned;
+            std::vector<TH1D*> absorptionVariantPtrs;
+            std::vector<std::string> absorptionVariantLabels;
+            for (const auto &kv : absoVecByFile) {
+                const auto &absoVariant = kv.second;
+                if (absoVariant.empty()) continue;
+                auto hVar = std::unique_ptr<TH1D>(static_cast<TH1D *>(hCorr->Clone(("h_corr_absvar_" + SanitizeName(group.dirName) + "_" + SanitizeName(kv.first)).c_str())));
+                hVar->SetDirectory(nullptr);
+                for (int ib = 1; ib <= hVar->GetNbinsX(); ++ib) {
+                    if (static_cast<size_t>(ib - 1) >= absoVariant.size()) continue;
+                    const double absoStd = hAbso->GetBinContent(ib);
+                    const double absoVar = absoVariant[static_cast<size_t>(ib - 1)];
+                    if (absoStd <= 0.0 || absoVar <= 0.0) continue;
+                    const double scale = absoStd / absoVar;
+                    hVar->SetBinContent(ib, hCorr->GetBinContent(ib) * scale);
+                    hVar->SetBinError(ib, hCorr->GetBinError(ib) * std::abs(scale));
+                }
+                absorptionVariantPtrs.push_back(hVar.get());
+                {
+                    auto itLabel = std::find(runCfg.systAbsorptionFiles.begin(), runCfg.systAbsorptionFiles.end(), kv.first);
+                    if (itLabel != runCfg.systAbsorptionFiles.end()) {
+                        const size_t idxLabel = static_cast<size_t>(std::distance(runCfg.systAbsorptionFiles.begin(), itLabel));
+                        if (idxLabel < runCfg.systAbsorptionFileLabels.size() && !runCfg.systAbsorptionFileLabels[idxLabel].empty()) {
+                            absorptionVariantLabels.push_back(runCfg.systAbsorptionFileLabels[idxLabel]);
+                        } else {
+                            absorptionVariantLabels.push_back(kv.first);
+                        }
+                    } else {
+                        absorptionVariantLabels.push_back(kv.first);
+                    }
+                }
+                absorptionVariantOwned.push_back(std::move(hVar));
+            }
+
+            std::vector<std::vector<double>> trailValuesByBin(static_cast<size_t>(hCorr->GetNbinsX()));
+            std::vector<std::vector<double>> trailValuesByTrialBin(static_cast<size_t>(hCorr->GetNbinsX()));
+            if (runCfg.doSystematics) {
+                for (size_t iItem = 0; iItem < group.items.size(); ++iItem) {
+                    const std::string subName = MakeSysSubBinName(modeName, group.items[iItem]);
+                    auto itArt = std::find_if(sysArtifacts.begin(), sysArtifacts.end(),
+                                              [&](const SysBinArtifacts &a) { return a.subBinName == subName; });
+                    if (itArt != sysArtifacts.end() && iItem < trailValuesByBin.size()) {
+                        trailValuesByBin[iItem] = itArt->acceptedCorrValues;
+                        trailValuesByTrialBin[iItem] = itArt->corrValuesByTrial;
+                    }
+                }
+            }
+
+            IntegralYieldInput iInput;
+            iInput.groupTag = group.dirName;
+            iInput.cenMin = group.items.front().cenMin;
+            iInput.cenMax = group.items.front().cenMax;
+            iInput.hCorrected = hCorr.get();
+            iInput.hCorrectedSyst = hSysTotal.get();
+            iInput.absorptionVariants = absorptionVariantPtrs;
+            iInput.absorptionVariantLabels = absorptionVariantLabels;
+            iInput.measuredPtEdges = edges;
+            iInput.trailCorrectedValuesByBin = trailValuesByBin;
+            iInput.trailCorrectedValuesByTrialBin = trailValuesByTrialBin;
+
+            IntegralYieldConfig iCfg;
+            iCfg.nominalFitFunc = runCfg.integralFitFunc;
+            iCfg.fitFuncCandidates = runCfg.integralFitFuncs;
+            iCfg.fitFuncParameters = runCfg.integralFitParameters;
+            iCfg.doSystematics = runCfg.doSystematics;
+            iCfg.nTrailsForIntegralSyst = runCfg.nTrailsForIntegralSyst;
+            iCfg.nCombinationsForExtrapolation = runCfg.nCombinationsForIntegralSystExtrapolation;
+            iCfg.rejectFitFuncByChi2 = runCfg.rejectIntegralFitFuncByChi2;
+            iCfg.fitFuncMaxChi2Ndf = runCfg.integralFitFuncMaxChi2Ndf;
+            iCfg.fitFuncFallbackFraction = runCfg.integralFitFuncFallbackFraction;
+            iCfg.gaussFitMaxChi2Ndf = runCfg.integralGaussFitMaxChi2Ndf;
+            iCfg.extrapToyMaxChi2Ndf = runCfg.integralExtrapToyMaxChi2Ndf;
+            iCfg.fitRangeMin = runCfg.integralFitRangeMin;
+            iCfg.fitRangeMax = runCfg.integralFitRangeMax;
+            iCfg.integrateMin = runCfg.integratedYieldRangeMin;
+            iCfg.integrateMax = runCfg.integratedYieldRangeMax;
+            iCfg.lowPtMaxFactor = runCfg.integralLowPtMaxFactor;
+            iCfg.useMinosErrors = runCfg.integralFitUseMinosErrors;
+            iCfg.branchingRatioFractionalUncertainty = runCfg.branchingRatioFractionalUncertainty;
+            iCfg.absorptionLength = runCfg.absorptionLength;
+            iCfg.usePerformanceLabel = runCfg.plotLabels.usePerformance;
+            iCfg.performanceLabel = runCfg.plotLabels.performanceLabel;
+            iCfg.collisionSystem = runCfg.plotLabels.collisionSystem;
+            iCfg.collisionEnergy = runCfg.plotLabels.collisionEnergy;
+            iCfg.period = runCfg.plotLabels.period;
+            iCfg.periodMark = runCfg.plotLabels.periodMark;
+            iCfg.isMatter = runCfg.isMatter;
+
+            std::cout << "[Info] Run integrated-yield for " << group.dirName
+                      << " with nominal=" << iCfg.nominalFitFunc
+                      << ", candidates=" << iCfg.fitFuncCandidates.size()
+                      << ", nTrails=" << iCfg.nTrailsForIntegralSyst
+                      << std::endl;
+            integralResult = ComputeIntegralYield(iInput, iCfg, runCfg.randomSeed + static_cast<int>(group.items.front().cenMin * 10.0));
+            if (integralResult.ok) {
+                integralSummaryRows.push_back(IntegralSummaryRow{
+                    iInput.cenMin,
+                    iInput.cenMax,
+                    integralResult.value,
+                    integralResult.statErr,
+                    integralResult.systExtrapolation,
+                    integralResult.systFitFunction,
+                    integralResult.systAbsorption,
+                    integralResult.systTrails,
+                    integralResult.systBranchingRatio,
+                    integralResult.systTotal});
+                for (const auto &fitRow : integralResult.fitParameterRows) {
+                    integralFitParameterRows.push_back(IntegralFitParameterSummaryRow{
+                        iInput.cenMin,
+                        iInput.cenMax,
+                        fitRow});
+                }
+            } else {
+                std::cout << "[Warn] Integrated-yield skipped for " << group.dirName
+                          << " (see IntegralYield logs above for failure step)"
+                          << std::endl;
+            }
+        }
+
         std::unique_ptr<TH1D> hRawOverNevts;
         std::unique_ptr<TCanvas> cRawOverNevts;
         if (isSpectrumMode) {
@@ -1960,9 +2480,13 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                          hBdtEff.get(),
                          hAcc.get(),
                          hAbso.get(),
+                         hEventLoss.get(),
+                         hEventSplitting.get(),
+                         hSignalLoss.get(),
                          hFitSigma.get(),
                          hFitMean.get(),
                          hFitChi2.get(),
+                         hPeriodEventWeights.get(),
                          hRawOverNevts.get(),
                          cRawOverNevts.get(),
                          hSysSelection.get(),
@@ -1982,6 +2506,37 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                          &runCfg.plotLabels,
                          runCfg.isMatter,
                          groupNEvents);
+
+        if (isSpectrumMode && integralResult.ok) {
+            TDirectory *groupDir = fout.GetDirectory(group.dirName.c_str());
+            if (groupDir) {
+                TDirectory *intDir = groupDir->GetDirectory("integral_yield");
+                if (!intDir) intDir = groupDir->mkdir("integral_yield");
+                if (intDir) {
+                    intDir->cd();
+                    if (integralResult.fNominal) integralResult.fNominal->Write("f_integral_nominal", TObject::kOverwrite);
+                    for (size_t i = 0; i < integralResult.fFitCandidates.size(); ++i) {
+                        if (integralResult.fFitCandidates[i]) {
+                            integralResult.fFitCandidates[i]->Write(Form("f_integral_candidate_%zu", i), TObject::kOverwrite);
+                        }
+                    }
+                    if (integralResult.hExtrapRatioDist) integralResult.hExtrapRatioDist->Write("h_integral_extrap_ratio", TObject::kOverwrite);
+                    if (integralResult.hIntegralTrailDist) integralResult.hIntegralTrailDist->Write("h_integral_trails", TObject::kOverwrite);
+                    if (integralResult.hAbsorptionYieldScan) integralResult.hAbsorptionYieldScan->Write("h_integral_absorption_scan", TObject::kOverwrite);
+                    if (integralResult.hSystSources) integralResult.hSystSources->Write("h_integral_syst_sources", TObject::kOverwrite);
+                    if (integralResult.hSystSourceFractions) integralResult.hSystSourceFractions->Write("h_integral_syst_source_fractions", TObject::kOverwrite);
+                    if (integralResult.hIntegralYieldOneBin) integralResult.hIntegralYieldOneBin->Write("h_integral_yield_onebin", TObject::kOverwrite);
+                    if (integralResult.cNominalAndFunctions) integralResult.cNominalAndFunctions->Write("c_integral_fit_functions", TObject::kOverwrite);
+                    if (integralResult.cFitFunctionParameters) integralResult.cFitFunctionParameters->Write("c_integral_fit_function_parameters", TObject::kOverwrite);
+                    if (integralResult.cExtrapolation) integralResult.cExtrapolation->Write("c_integral_extrapolation", TObject::kOverwrite);
+                    if (integralResult.cAbsorption) integralResult.cAbsorption->Write("c_integral_absorption", TObject::kOverwrite);
+                    if (integralResult.cAbsorptionYieldScan) integralResult.cAbsorptionYieldScan->Write("c_integral_absorption_scan", TObject::kOverwrite);
+                    if (integralResult.cTrails) integralResult.cTrails->Write("c_integral_trails", TObject::kOverwrite);
+                    if (integralResult.cSources) integralResult.cSources->Write("c_integral_syst_sources", TObject::kOverwrite);
+                    if (integralResult.cIntegralYieldOneBin) integralResult.cIntegralYieldOneBin->Write("c_integral_yield_onebin", TObject::kOverwrite);
+                }
+            }
+        }
 
     }
 
@@ -2013,6 +2568,623 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                 stdDir->cd();
                 if (hAll) hAll->Write("h_raw_over_nevents_all", TObject::kOverwrite);
                 if (cAll) cAll->Write("c_raw_over_nevents_all", TObject::kOverwrite);
+            }
+        }
+    }
+
+    if (isSpectrumMode && !integralSummaryRows.empty()) {
+        std::vector<double> cenEdges = runCfg.cenBins;
+        if (cenEdges.size() < 2) {
+            cenEdges.clear();
+            cenEdges.push_back(integralSummaryRows.front().cenMin);
+            for (const auto &row : integralSummaryRows) cenEdges.push_back(row.cenMax);
+        }
+
+        auto hIntegralStat = std::make_unique<TH1D>("h_integral_yield_stat", ";Centrality (%);Integrated yield", static_cast<int>(cenEdges.size() - 1), cenEdges.data());
+        auto hIntegralSys = std::make_unique<TH1D>("h_integral_yield_sys", ";Centrality (%);Integrated yield", static_cast<int>(cenEdges.size() - 1), cenEdges.data());
+        auto hIntegralSysRatio = std::make_unique<TH1D>("h_integral_yield_sys_ratio", ";Centrality (%);Total sys / integrated yield", static_cast<int>(cenEdges.size() - 1), cenEdges.data());
+        auto hSystFractionSummary = std::make_unique<TH1D>("h_integral_syst_fraction_summary", ";Systematic source;Average fraction (%)", 5, 0.5, 5.5);
+        std::array<std::unique_ptr<TH1D>, 6> hSystFractionVsCen;
+        const std::array<std::string, 6> systNames = {"Extrap", "FitFunc", "Absorption", "CorrTrails", "Branching", "Total"};
+        const std::array<int, 6> systColors = {kRed + 1, kBlue + 1, kMagenta + 1, kGreen + 2, kOrange + 7, kBlack};
+        for (size_t i = 0; i < hSystFractionVsCen.size(); ++i) {
+            hSystFractionVsCen[i] = std::make_unique<TH1D>(("h_integral_syst_fraction_vs_centrality_" + systNames[i]).c_str(),
+                                                           ";Centrality (%);Uncertainty / integrated yield (%)",
+                                                           static_cast<int>(cenEdges.size() - 1),
+                                                           cenEdges.data());
+            hSystFractionVsCen[i]->SetDirectory(nullptr);
+            hSystFractionVsCen[i]->SetStats(false);
+            hSystFractionVsCen[i]->SetLineColor(systColors[i]);
+            hSystFractionVsCen[i]->SetMarkerColor(systColors[i]);
+            hSystFractionVsCen[i]->SetMarkerStyle(i == 5 ? 20 : 24 + static_cast<int>(i));
+            hSystFractionVsCen[i]->SetLineWidth(i == 5 ? 3 : 2);
+        }
+
+        hIntegralStat->SetDirectory(nullptr);
+        hIntegralSys->SetDirectory(nullptr);
+        hIntegralSysRatio->SetDirectory(nullptr);
+        hSystFractionSummary->SetDirectory(nullptr);
+        hIntegralStat->SetStats(false);
+        hIntegralSys->SetStats(false);
+        hIntegralSysRatio->SetStats(false);
+        hSystFractionSummary->SetStats(false);
+        hSystFractionSummary->GetXaxis()->SetBinLabel(1, "Extrap");
+        hSystFractionSummary->GetXaxis()->SetBinLabel(2, "FitFunc");
+        hSystFractionSummary->GetXaxis()->SetBinLabel(3, "Absorption");
+        hSystFractionSummary->GetXaxis()->SetBinLabel(4, "CorrTrails");
+        hSystFractionSummary->GetXaxis()->SetBinLabel(5, "Branching");
+
+        std::array<double, 5> fracSums{0.0, 0.0, 0.0, 0.0, 0.0};
+        int fracCount = 0;
+        for (const auto &row : integralSummaryRows) {
+            const double x = 0.5 * (row.cenMin + row.cenMax);
+            const int ib = hIntegralStat->FindBin(x);
+            hIntegralStat->SetBinContent(ib, row.value);
+            hIntegralStat->SetBinError(ib, row.statErr);
+            hIntegralSys->SetBinContent(ib, row.value);
+            hIntegralSys->SetBinError(ib, row.systTotal);
+            hIntegralSysRatio->SetBinContent(ib, (std::abs(row.value) > 0.0) ? (row.systTotal / std::abs(row.value)) : 0.0);
+
+            if (std::abs(row.value) > 0.0) {
+                const std::array<double, 6> fracs = {
+                    100.0 * row.systExtrap / std::abs(row.value),
+                    100.0 * row.systFitFunc / std::abs(row.value),
+                    100.0 * row.systAbsorption / std::abs(row.value),
+                    100.0 * row.systTrails / std::abs(row.value),
+                    100.0 * row.systBranching / std::abs(row.value),
+                    100.0 * row.systTotal / std::abs(row.value)};
+                for (size_t i = 0; i < fracs.size(); ++i) {
+                    hSystFractionVsCen[i]->SetBinContent(ib, fracs[i]);
+                }
+                fracSums[0] += fracs[0];
+                fracSums[1] += fracs[1];
+                fracSums[2] += fracs[2];
+                fracSums[3] += fracs[3];
+                fracSums[4] += fracs[4];
+                ++fracCount;
+            }
+        }
+        if (fracCount > 0) {
+            for (int i = 0; i < 5; ++i) {
+                hSystFractionSummary->SetBinContent(i + 1, fracSums[static_cast<size_t>(i)] / static_cast<double>(fracCount));
+            }
+        }
+
+        auto sortedIntegralSummaryRows = integralSummaryRows;
+        std::sort(sortedIntegralSummaryRows.begin(), sortedIntegralSummaryRows.end(),
+                  [](const IntegralSummaryRow &a, const IntegralSummaryRow &b) {
+                      if (a.cenMin != b.cenMin) return a.cenMin < b.cenMin;
+                      return a.cenMax < b.cenMax;
+                  });
+
+        {
+            std::ofstream intCsv(integratedYieldCsvPath);
+            if (intCsv.is_open()) {
+                intCsv << std::setprecision(12);
+                intCsv << "centrality_min,centrality_max,integrated_yield,stat_err,";
+                intCsv << "syst_extrapolation_abs,syst_fit_function_abs,syst_absorption_abs,syst_correction_trails_abs,syst_branching_abs,syst_total_abs,";
+                intCsv << "stat_ratio,syst_extrapolation_ratio,syst_fit_function_ratio,syst_absorption_ratio,syst_correction_trails_ratio,syst_branching_ratio,syst_total_ratio\n";
+                for (const auto &row : sortedIntegralSummaryRows) {
+                    AppendIntegratedYieldCsvRow(intCsv,
+                                                row.cenMin,
+                                                row.cenMax,
+                                                row.value,
+                                                row.statErr,
+                                                row.systExtrap,
+                                                row.systFitFunc,
+                                                row.systAbsorption,
+                                                row.systTrails,
+                                                row.systBranching,
+                                                row.systTotal);
+                }
+            }
+        }
+
+        const auto formatCentrality = [](double cmin, double cmax) {
+            std::ostringstream os;
+            os << FormatTitleNumber(cmin) << "--" << FormatTitleNumber(cmax);
+            return os.str();
+        };
+        const auto formatPercent = [](double ratio) {
+            std::ostringstream os;
+            os << std::fixed << std::setprecision(2) << 100.0 * ratio;
+            return os.str();
+        };
+        const auto formatScientificLatex = [](double value) {
+            if (!std::isfinite(value) || value == 0.0) return std::string("$0$");
+            const double absValue = std::abs(value);
+            const int exponent = static_cast<int>(std::floor(std::log10(absValue)));
+            const double mantissa = value / std::pow(10.0, exponent);
+            std::ostringstream os;
+            os << "$" << std::fixed << std::setprecision(3) << mantissa
+               << " \\times 10^{" << exponent << "}$";
+            return os.str();
+        };
+        const auto formatParameterValue = [](double value) {
+            if (!std::isfinite(value)) return std::string("--");
+            const double absValue = std::abs(value);
+            std::ostringstream os;
+            if ((absValue > 0.0 && absValue < 1e-3) || absValue >= 1e4) {
+                os << std::scientific << std::setprecision(3) << value;
+            } else {
+                os << std::fixed << std::setprecision(4) << value;
+            }
+            return os.str();
+        };
+        const auto formatParameterLatex = [&](double value, double err) {
+            if (!std::isfinite(value)) return std::string("--");
+            if (std::isfinite(err) && err > 0.0) {
+                return "$" + formatParameterValue(value) + " \\pm " + formatParameterValue(err) + "$";
+            }
+            return "$" + formatParameterValue(value) + "$";
+        };
+        const auto formatParameterNameLatex = [](const std::string &name) {
+            if (name == "#beta") return std::string("$\\beta$");
+            if (name == "Norm") return std::string("Norm.");
+            return std::string("$") + name + "$";
+        };
+        const auto formatChi2NdfLatex = [&](double chi2, int ndf) {
+            if (!std::isfinite(chi2) || ndf < 0) return std::string("--");
+            return formatParameterValue(chi2) + " (" + std::to_string(ndf) + ")";
+        };
+        const auto formatFitStatus = [](const IntegralFitParameterRow &row) {
+            if (row.isNominal) return std::string("nominal");
+            if (row.rejectedByChi2 && row.rejectedByLowPt) return std::string("rejected chi2 low-pT");
+            if (row.rejectedByChi2) return std::string("rejected chi2");
+            if (row.rejectedByLowPt) return std::string("rejected low-pT");
+            return std::string("accepted");
+        };
+
+        const std::filesystem::path integratedYieldDir = std::filesystem::path(integratedYieldCsvPath).parent_path();
+        const std::filesystem::path integratedYieldSystTexPath = integratedYieldDir / "integrated_yield_syst_table.tex";
+        const std::filesystem::path integratedYieldFinalTexPath = integratedYieldDir / "integrated_yield_final_table.tex";
+        const std::filesystem::path fitParameterCsvPath = integratedYieldDir / "fit_function_parameters.csv";
+        const std::filesystem::path fitParameterTexPath = integratedYieldDir / "fit_function_parameters_table.tex";
+        const std::filesystem::path bgbwParameterTexPath = integratedYieldDir / "bgbw_fit_parameters_table.tex";
+
+        {
+            std::ofstream systTex(integratedYieldSystTexPath);
+            if (systTex.is_open()) {
+                systTex << "% Auto-generated by UnifiedTaskRunner from integrated_yield_summary.csv.\n";
+                systTex << "% Do not edit by hand; rerun the workflow instead.\n";
+                systTex << "\\begin{tabular}{c|cccccc}\n";
+                systTex << "    \\hline\n";
+                systTex << "    Centrality (\\%) & Extrapolation (\\%) & Fit function (\\%) & Absorption (\\%) & Selection/trials (\\%) & Branching ratio (\\%) & Total syst. (\\%) \\\\\n";
+                systTex << "    \\hline\n";
+                for (const auto &row : sortedIntegralSummaryRows) {
+                    const double den = std::abs(row.value);
+                    const auto ratio = [den](double v) { return den > 0.0 ? v / den : 0.0; };
+                    systTex << "    " << formatCentrality(row.cenMin, row.cenMax)
+                            << " & " << formatPercent(ratio(row.systExtrap))
+                            << " & " << formatPercent(ratio(row.systFitFunc))
+                            << " & " << formatPercent(ratio(row.systAbsorption))
+                            << " & " << formatPercent(ratio(row.systTrails))
+                            << " & " << formatPercent(ratio(row.systBranching))
+                            << " & " << formatPercent(ratio(row.systTotal))
+                            << " \\\\\n";
+                }
+                systTex << "    \\hline\n";
+                systTex << "\\end{tabular}\n";
+                std::cout << "[Info] Wrote LaTeX table fragment: " << integratedYieldSystTexPath << std::endl;
+            }
+        }
+
+        {
+            std::ofstream finalTex(integratedYieldFinalTexPath);
+            if (finalTex.is_open()) {
+                finalTex << "% Auto-generated by UnifiedTaskRunner from integrated_yield_summary.csv.\n";
+                finalTex << "% Do not edit by hand; rerun the workflow instead.\n";
+                finalTex << "\\begin{tabular}{c|ccc}\n";
+                finalTex << "    \\hline\n";
+                finalTex << "    Centrality (\\%) & Integrated yield & Stat. unc. & Syst. unc. \\\\\n";
+                finalTex << "    \\hline\n";
+                for (const auto &row : sortedIntegralSummaryRows) {
+                    finalTex << "    " << formatCentrality(row.cenMin, row.cenMax)
+                             << " & " << formatScientificLatex(row.value)
+                             << " & " << formatScientificLatex(row.statErr)
+                             << " & " << formatScientificLatex(row.systTotal)
+                             << " \\\\\n";
+                }
+                finalTex << "    \\hline\n";
+                finalTex << "\\end{tabular}\n";
+                std::cout << "[Info] Wrote LaTeX table fragment: " << integratedYieldFinalTexPath << std::endl;
+            }
+        }
+
+        if (!integralFitParameterRows.empty()) {
+            auto sortedFitParameterRows = integralFitParameterRows;
+            std::sort(sortedFitParameterRows.begin(), sortedFitParameterRows.end(),
+                      [](const IntegralFitParameterSummaryRow &a, const IntegralFitParameterSummaryRow &b) {
+                          if (a.cenMin != b.cenMin) return a.cenMin < b.cenMin;
+                          if (a.cenMax != b.cenMax) return a.cenMax < b.cenMax;
+                          if (a.fitRow.isNominal != b.fitRow.isNominal) return a.fitRow.isNominal > b.fitRow.isNominal;
+                          if (a.fitRow.functionName != b.fitRow.functionName) return a.fitRow.functionName < b.fitRow.functionName;
+                          return a.fitRow.parameterName < b.fitRow.parameterName;
+                      });
+
+            {
+                std::ofstream fitCsv(fitParameterCsvPath);
+                if (fitCsv.is_open()) {
+                    fitCsv << std::setprecision(12);
+                    fitCsv << "centrality_min,centrality_max,function,parameter,parameter_index,value,error,limit_min,limit_max,has_limits,chi2,ndf,chi2_ndf,is_nominal,rejected_by_chi2,rejected_by_lowpt,status\n";
+                    for (const auto &row : sortedFitParameterRows) {
+                        const auto &fitRow = row.fitRow;
+                        fitCsv << row.cenMin << ',' << row.cenMax << ','
+                               << fitRow.functionName << ','
+                               << fitRow.parameterName << ','
+                               << fitRow.parameterIndex << ','
+                               << fitRow.value << ','
+                               << fitRow.error << ','
+                               << fitRow.limitMin << ','
+                               << fitRow.limitMax << ','
+                               << (fitRow.hasLimits ? 1 : 0) << ','
+                               << fitRow.chi2 << ','
+                               << fitRow.ndf << ','
+                               << fitRow.chi2Ndf << ','
+                               << (fitRow.isNominal ? 1 : 0) << ','
+                               << (fitRow.rejectedByChi2 ? 1 : 0) << ','
+                               << (fitRow.rejectedByLowPt ? 1 : 0) << ','
+                               << formatFitStatus(fitRow) << '\n';
+                    }
+                    std::cout << "[Info] Wrote fit-function parameter CSV: " << fitParameterCsvPath << std::endl;
+                }
+            }
+
+            {
+                std::ofstream fitTex(fitParameterTexPath);
+                if (fitTex.is_open()) {
+                    fitTex << "% Auto-generated by UnifiedTaskRunner from fit_function_parameters.csv.\n";
+                    fitTex << "% Do not edit by hand; rerun the workflow instead.\n";
+                    fitTex << "\\begin{tabular}{c|ccccc}\n";
+                    fitTex << "    \\hline\n";
+                    fitTex << "    Centrality (\\%) & Function & Parameter & Value & $\\chi^{2}$ (ndf) & Status \\\\\n";
+                    fitTex << "    \\hline\n";
+                    for (const auto &row : sortedFitParameterRows) {
+                        const auto &fitRow = row.fitRow;
+                        fitTex << "    " << formatCentrality(row.cenMin, row.cenMax)
+                               << " & " << fitRow.functionName
+                               << " & " << formatParameterNameLatex(fitRow.parameterName)
+                               << " & " << formatParameterLatex(fitRow.value, fitRow.error)
+                               << " & " << formatChi2NdfLatex(fitRow.chi2, fitRow.ndf)
+                               << " & " << formatFitStatus(fitRow)
+                               << " \\\\\n";
+                    }
+                    fitTex << "    \\hline\n";
+                    fitTex << "\\end{tabular}\n";
+                    std::cout << "[Info] Wrote LaTeX table fragment: " << fitParameterTexPath << std::endl;
+                }
+            }
+
+            {
+                std::map<std::pair<double, double>, std::map<std::string, IntegralFitParameterRow>> bgbwRowsByCen;
+                for (const auto &row : sortedFitParameterRows) {
+                    if (!row.fitRow.isNominal || row.fitRow.functionName != "fBGBW") continue;
+                    bgbwRowsByCen[{row.cenMin, row.cenMax}][row.fitRow.parameterName] = row.fitRow;
+                }
+
+                std::ofstream bgbwTex(bgbwParameterTexPath);
+                if (bgbwTex.is_open()) {
+                    bgbwTex << "% Auto-generated by UnifiedTaskRunner from fit_function_parameters.csv.\n";
+                    bgbwTex << "% Do not edit by hand; rerun the workflow instead.\n";
+                    bgbwTex << "\\begin{tabular}{c|cccc}\n";
+                    bgbwTex << "    \\hline\n";
+                    bgbwTex << "    Centrality (\\%) & $\\beta$ & $T$ & $n$ & $\\chi^{2}$ (ndf) \\\\\n";
+                    bgbwTex << "    \\hline\n";
+                    for (const auto &kv : bgbwRowsByCen) {
+                        const auto &cen = kv.first;
+                        const auto &pars = kv.second;
+                        const auto getPar = [&](const std::string &name) {
+                            auto it = pars.find(name);
+                            if (it == pars.end()) return std::string("--");
+                            return formatParameterLatex(it->second.value, it->second.error);
+                        };
+                        double chi2 = std::numeric_limits<double>::quiet_NaN();
+                        int ndf = -1;
+                        if (!pars.empty()) {
+                            chi2 = pars.begin()->second.chi2;
+                            ndf = pars.begin()->second.ndf;
+                        }
+                        bgbwTex << "    " << formatCentrality(cen.first, cen.second)
+                                << " & " << getPar("#beta")
+                                << " & " << getPar("T")
+                                << " & " << getPar("n")
+                                << " & " << formatChi2NdfLatex(chi2, ndf)
+                                << " \\\\\n";
+                    }
+                    bgbwTex << "    \\hline\n";
+                    bgbwTex << "\\end{tabular}\n";
+                    std::cout << "[Info] Wrote LaTeX table fragment: " << bgbwParameterTexPath << std::endl;
+                }
+            }
+        }
+
+        auto gIntegralSys = std::make_unique<TGraphAsymmErrors>(hIntegralStat->GetNbinsX());
+        gIntegralSys->SetName("g_integral_yield_sys");
+        gIntegralSys->SetLineColor(kAzure + 2);
+        gIntegralSys->SetLineStyle(kDashed);
+        gIntegralSys->SetLineWidth(2);
+        for (int ib = 1; ib <= hIntegralStat->GetNbinsX(); ++ib) {
+            const double x = hIntegralStat->GetXaxis()->GetBinCenter(ib);
+            const double y = hIntegralStat->GetBinContent(ib);
+            const double ex = 0.5 * hIntegralStat->GetXaxis()->GetBinWidth(ib);
+            const double ey = hIntegralSys->GetBinError(ib);
+            gIntegralSys->SetPoint(ib - 1, x, y);
+            gIntegralSys->SetPointError(ib - 1, ex, ex, ey, ey);
+        }
+
+        struct IntegralMultiplicityPoint {
+            double mult{0.0};
+            double yield{0.0};
+            double stat{0.0};
+            double syst{0.0};
+            double cenMin{0.0};
+            double cenMax{0.0};
+        };
+        std::vector<IntegralMultiplicityPoint> integralMultiplicityPoints;
+        if (runCfg.relatedMultiplicityCenter.size() + 1 == runCfg.cenBins.size()) {
+            for (const auto &row : integralSummaryRows) {
+                int cenIdx = -1;
+                for (size_t ic = 0; ic + 1 < runCfg.cenBins.size(); ++ic) {
+                    if (std::abs(row.cenMin - runCfg.cenBins[ic]) < 1e-6 &&
+                        std::abs(row.cenMax - runCfg.cenBins[ic + 1]) < 1e-6) {
+                        cenIdx = static_cast<int>(ic);
+                        break;
+                    }
+                }
+                if (cenIdx < 0 || static_cast<size_t>(cenIdx) >= runCfg.relatedMultiplicityCenter.size()) continue;
+                integralMultiplicityPoints.push_back({runCfg.relatedMultiplicityCenter[static_cast<size_t>(cenIdx)],
+                                                       row.value,
+                                                       row.statErr,
+                                                       row.systTotal,
+                                                       row.cenMin,
+                                                       row.cenMax});
+            }
+            std::sort(integralMultiplicityPoints.begin(),
+                      integralMultiplicityPoints.end(),
+                      [](const auto &a, const auto &b) { return a.mult < b.mult; });
+        } else if (!runCfg.relatedMultiplicityCenter.empty()) {
+            Warning("UnifiedTaskRunner",
+                    "related_multiplicity_center size (%zu) does not match centrality bin count (%zu); skip multiplicity summary canvas",
+                    runCfg.relatedMultiplicityCenter.size(),
+                    runCfg.cenBins.size() > 0 ? runCfg.cenBins.size() - 1 : 0);
+        }
+
+        auto cIntegral = std::make_unique<TCanvas>("c_integral_yield_vs_centrality", "", 900, 700);
+        cIntegral->SetLeftMargin(0.14);
+        cIntegral->SetBottomMargin(0.12);
+        cIntegral->SetRightMargin(0.05);
+        cIntegral->SetTopMargin(0.06);
+        cIntegral->SetTicks(1, 1);
+        double yIntMin = std::numeric_limits<double>::infinity();
+        double yIntMax = 0.0;
+        for (int ib = 1; ib <= hIntegralStat->GetNbinsX(); ++ib) {
+            const double y = hIntegralStat->GetBinContent(ib);
+            const double e = std::hypot(hIntegralStat->GetBinError(ib), hIntegralSys->GetBinError(ib));
+            if (y <= 0.0) continue;
+            yIntMin = std::min(yIntMin, std::max(1e-20, y - e));
+            yIntMax = std::max(yIntMax, y + e);
+        }
+        if (!std::isfinite(yIntMin)) yIntMin = 0.0;
+        if (!(yIntMax > yIntMin)) yIntMax = yIntMin + 1e-12;
+        hIntegralStat->GetYaxis()->SetRangeUser(std::max(0.0, yIntMin * 0.75), yIntMax * 1.35);
+        hIntegralStat->SetTitle("");
+        hIntegralStat->SetMarkerStyle(20);
+        hIntegralStat->SetMarkerColor(kBlack);
+        hIntegralStat->SetLineColor(kBlack);
+        hIntegralStat->Draw("E1 X0");
+        for (int ib = 1; ib <= hIntegralStat->GetNbinsX(); ++ib) {
+            const double x1 = hIntegralStat->GetXaxis()->GetBinLowEdge(ib);
+            const double x2 = hIntegralStat->GetXaxis()->GetBinUpEdge(ib);
+            const double y = hIntegralStat->GetBinContent(ib);
+            const double ey = hIntegralSys->GetBinError(ib);
+            if (!std::isfinite(y) || !std::isfinite(ey) || ey <= 0.0) continue;
+            TBox box(x1, std::max(0.0, y - ey), x2, y + ey);
+            box.SetFillStyle(0);
+            box.SetLineColor(kAzure + 2);
+            box.SetLineStyle(kDashed);
+            box.SetLineWidth(2);
+            box.DrawClone("l");
+        }
+        hIntegralStat->Draw("E1 X0 SAME");
+        {
+            TLegend leg(0.56, 0.74, 0.90, 0.90);
+            leg.SetBorderSize(0);
+            leg.SetFillStyle(0);
+            leg.SetTextFont(42);
+            leg.SetTextSize(0.035);
+            leg.AddEntry(hIntegralStat.get(), "Integrated yield (stat.)", "lep");
+            leg.AddEntry(gIntegralSys.get(), "Total syst.", "l");
+            leg.DrawClone();
+        }
+        {
+            TPaveText text(0.16, 0.64, 0.56, 0.90, "NDC");
+            text.SetBorderSize(0);
+            text.SetFillStyle(0);
+            text.SetTextAlign(12);
+            text.SetTextFont(42);
+            text.SetTextSize(0.035);
+            if (runCfg.plotLabels.usePerformance && !runCfg.plotLabels.performanceLabel.empty()) {
+                text.AddText(runCfg.plotLabels.performanceLabel.c_str());
+            }
+            if (!runCfg.plotLabels.collisionSystem.empty() || !runCfg.plotLabels.collisionEnergy.empty()) {
+                text.AddText((runCfg.plotLabels.collisionSystem + " " + runCfg.plotLabels.collisionEnergy).c_str());
+            }
+            if (!runCfg.plotLabels.period.empty() || !runCfg.plotLabels.periodMark.empty()) {
+                text.AddText((runCfg.plotLabels.period + " " + runCfg.plotLabels.periodMark).c_str());
+            }
+            const std::string decay = BuildDecayString(runCfg.isMatter);
+            if (!decay.empty()) {
+                text.AddText(decay.c_str());
+            }
+            text.DrawClone();
+        }
+
+        std::unique_ptr<TGraphAsymmErrors> gIntegralMultiplicityStat;
+        std::unique_ptr<TGraphAsymmErrors> gIntegralMultiplicitySys;
+        std::unique_ptr<TCanvas> cIntegralMultiplicity;
+        std::unique_ptr<TH1D> hFrameMult;
+        if (!integralMultiplicityPoints.empty()) {
+            const int nMult = static_cast<int>(integralMultiplicityPoints.size());
+            gIntegralMultiplicityStat = std::make_unique<TGraphAsymmErrors>(nMult);
+            gIntegralMultiplicitySys = std::make_unique<TGraphAsymmErrors>(nMult);
+            gIntegralMultiplicityStat->SetName("g_integral_yield_vs_multiplicity_stat");
+            gIntegralMultiplicitySys->SetName("g_integral_yield_vs_multiplicity_sys");
+            gIntegralMultiplicityStat->SetMarkerStyle(20);
+            gIntegralMultiplicityStat->SetMarkerColor(kBlack);
+            gIntegralMultiplicityStat->SetLineColor(kBlack);
+            gIntegralMultiplicitySys->SetLineColor(kAzure + 2);
+            gIntegralMultiplicitySys->SetLineStyle(kDashed);
+            gIntegralMultiplicitySys->SetLineWidth(2);
+
+            double multMin = std::numeric_limits<double>::infinity();
+            double multMax = 0.0;
+            double yMultMin = std::numeric_limits<double>::infinity();
+            double yMultMax = 0.0;
+            for (int ip = 0; ip < nMult; ++ip) {
+                const auto &p = integralMultiplicityPoints[static_cast<size_t>(ip)];
+                gIntegralMultiplicityStat->SetPoint(ip, p.mult, p.yield);
+                gIntegralMultiplicityStat->SetPointError(ip, 0.0, 0.0, p.stat, p.stat);
+                gIntegralMultiplicitySys->SetPoint(ip, p.mult, p.yield);
+                gIntegralMultiplicitySys->SetPointError(ip, 0.0, 0.0, p.syst, p.syst);
+                multMin = std::min(multMin, p.mult);
+                multMax = std::max(multMax, p.mult);
+                const double e = std::hypot(p.stat, p.syst);
+                if (p.yield > 0.0) yMultMin = std::min(yMultMin, std::max(1e-20, p.yield - e));
+                yMultMax = std::max(yMultMax, p.yield + e);
+            }
+            if (!std::isfinite(multMin) || !(multMax > multMin)) {
+                multMin = 0.0;
+                multMax = std::max(1.0, multMax);
+            }
+            if (!std::isfinite(yMultMin)) yMultMin = 0.0;
+            if (!(yMultMax > yMultMin)) yMultMax = yMultMin + 1e-12;
+            const double xPad = 0.08 * (multMax - multMin);
+            const double boxHalfWidth = 0.018 * (multMax - multMin);
+
+            cIntegralMultiplicity = std::make_unique<TCanvas>("c_integral_yield_vs_multiplicity", "", 900, 700);
+            cIntegralMultiplicity->SetLeftMargin(0.14);
+            cIntegralMultiplicity->SetBottomMargin(0.12);
+            cIntegralMultiplicity->SetRightMargin(0.05);
+            cIntegralMultiplicity->SetTopMargin(0.06);
+            cIntegralMultiplicity->SetTicks(1, 1);
+            hFrameMult = std::make_unique<TH1D>("h_frame_integral_yield_vs_multiplicity",
+                                                ";#LTd#it{N}_{ch}/d#eta#GT;Integrated yield",
+                                                100,
+                                                std::max(0.0, multMin - xPad),
+                                                multMax + xPad);
+            hFrameMult->SetDirectory(nullptr);
+            hFrameMult->SetStats(false);
+            hFrameMult->GetYaxis()->SetRangeUser(std::max(0.0, yMultMin * 0.75), yMultMax * 1.35);
+            hFrameMult->Draw("AXIS");
+            for (const auto &p : integralMultiplicityPoints) {
+                if (!std::isfinite(p.yield) || !std::isfinite(p.syst) || p.syst <= 0.0) continue;
+                TBox box(std::max(0.0, p.mult - boxHalfWidth),
+                         std::max(0.0, p.yield - p.syst),
+                         p.mult + boxHalfWidth,
+                         p.yield + p.syst);
+                box.SetFillStyle(0);
+                box.SetLineColor(kAzure + 2);
+                box.SetLineStyle(kDashed);
+                box.SetLineWidth(2);
+                box.DrawClone("l");
+            }
+            gIntegralMultiplicityStat->Draw("P SAME");
+            {
+                TLegend leg(0.56, 0.74, 0.90, 0.90);
+                leg.SetBorderSize(0);
+                leg.SetFillStyle(0);
+                leg.SetTextFont(42);
+                leg.SetTextSize(0.035);
+                leg.AddEntry(gIntegralMultiplicityStat.get(), "Integrated yield (stat.)", "lep");
+                leg.AddEntry(gIntegralMultiplicitySys.get(), "Total syst.", "l");
+                leg.DrawClone();
+            }
+            {
+                TPaveText text(0.16, 0.64, 0.56, 0.90, "NDC");
+                text.SetBorderSize(0);
+                text.SetFillStyle(0);
+                text.SetTextAlign(12);
+                text.SetTextFont(42);
+                text.SetTextSize(0.035);
+                if (runCfg.plotLabels.usePerformance && !runCfg.plotLabels.performanceLabel.empty()) {
+                    text.AddText(runCfg.plotLabels.performanceLabel.c_str());
+                }
+                if (!runCfg.plotLabels.collisionSystem.empty() || !runCfg.plotLabels.collisionEnergy.empty()) {
+                    text.AddText((runCfg.plotLabels.collisionSystem + " " + runCfg.plotLabels.collisionEnergy).c_str());
+                }
+                if (!runCfg.plotLabels.period.empty() || !runCfg.plotLabels.periodMark.empty()) {
+                    text.AddText((runCfg.plotLabels.period + " " + runCfg.plotLabels.periodMark).c_str());
+                }
+                const std::string decay = BuildDecayString(runCfg.isMatter);
+                if (!decay.empty()) {
+                    text.AddText(decay.c_str());
+                }
+                text.DrawClone();
+            }
+        }
+
+        auto cSysFrac = std::make_unique<TCanvas>("c_integral_syst_fraction_summary", "", 900, 700);
+        cSysFrac->SetLeftMargin(0.12);
+        cSysFrac->SetBottomMargin(0.14);
+        hSystFractionSummary->SetFillColor(kOrange - 3);
+        hSystFractionSummary->SetLineColor(kBlack);
+        hSystFractionSummary->Draw("HIST");
+
+        auto cSysFracVsCen = std::make_unique<TCanvas>("c_integral_syst_fraction_vs_centrality", "", 900, 700);
+        cSysFracVsCen->SetLeftMargin(0.12);
+        cSysFracVsCen->SetBottomMargin(0.12);
+        double yFracMax = 0.0;
+        for (const auto &hFrac : hSystFractionVsCen) {
+            if (hFrac) yFracMax = std::max(yFracMax, hFrac->GetMaximum());
+        }
+        if (yFracMax <= 0.0) yFracMax = 1.0;
+        hSystFractionVsCen.back()->GetYaxis()->SetRangeUser(0.0, yFracMax * 1.25);
+        hSystFractionVsCen.back()->Draw("HIST");
+        for (size_t i = 0; i + 1 < hSystFractionVsCen.size(); ++i) {
+            hSystFractionVsCen[i]->Draw("HIST SAME");
+        }
+        hSystFractionVsCen.back()->Draw("HIST SAME");
+        {
+            TLegend leg(0.56, 0.58, 0.90, 0.90);
+            leg.SetBorderSize(0);
+            leg.SetFillStyle(0);
+            for (size_t i = 0; i < hSystFractionVsCen.size(); ++i) {
+                leg.AddEntry(hSystFractionVsCen[i].get(),
+                             (systNames[i] + (i == hSystFractionVsCen.size() - 1 ? " (quadrature)" : "")).c_str(),
+                             "l");
+            }
+            leg.DrawClone();
+        }
+
+        TDirectory *summaryDir = fout.GetDirectory("summary");
+        if (!summaryDir) summaryDir = fout.mkdir("summary");
+        if (summaryDir) {
+            TDirectory *intDir = summaryDir->GetDirectory("integral_yield");
+            if (!intDir) intDir = summaryDir->mkdir("integral_yield");
+            if (intDir) {
+                intDir->cd();
+                hIntegralStat->Write("h_integral_yield_stat", TObject::kOverwrite);
+                hIntegralSys->Write("h_integral_yield_sys", TObject::kOverwrite);
+                hIntegralSysRatio->Write("h_integral_yield_sys_ratio", TObject::kOverwrite);
+                hSystFractionSummary->Write("h_integral_syst_fraction_summary", TObject::kOverwrite);
+                for (size_t i = 0; i < hSystFractionVsCen.size(); ++i) {
+                    if (hSystFractionVsCen[i]) {
+                        hSystFractionVsCen[i]->Write(("h_integral_syst_fraction_vs_centrality_" + systNames[i]).c_str(), TObject::kOverwrite);
+                    }
+                }
+                gIntegralSys->Write("g_integral_yield_sys", TObject::kOverwrite);
+                if (gIntegralMultiplicityStat) {
+                    gIntegralMultiplicityStat->Write("g_integral_yield_vs_multiplicity_stat", TObject::kOverwrite);
+                }
+                if (gIntegralMultiplicitySys) {
+                    gIntegralMultiplicitySys->Write("g_integral_yield_vs_multiplicity_sys", TObject::kOverwrite);
+                }
+                cIntegral->Write("c_integral_yield_vs_centrality", TObject::kOverwrite);
+                if (cIntegralMultiplicity) {
+                    cIntegralMultiplicity->Write("c_integral_yield_vs_multiplicity", TObject::kOverwrite);
+                }
+                cSysFrac->Write("c_integral_syst_fraction_summary", TObject::kOverwrite);
+                cSysFracVsCen->Write("c_integral_syst_fraction_vs_centrality", TObject::kOverwrite);
             }
         }
     }

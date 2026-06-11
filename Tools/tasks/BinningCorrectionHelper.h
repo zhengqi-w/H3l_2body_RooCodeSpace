@@ -3,6 +3,7 @@
 
 #include "../AcceptanceHelper.h"
 #include "../AbsorptionHelper.h"
+#include "../EventSignalLossHelper.h"
 #include "../GeneralHelper.hpp"
 #include "../binning/BinPlan.h"
 
@@ -23,6 +24,7 @@ namespace UnifiedAnalysis {
 struct BinningCorrectionConfig {
     std::string mode;
     std::string isMatter;
+    std::string eventSignalLossMethod{"multiplicity"};
     std::string mcTree;
     std::string absorptionTree;
     std::string mcFileForAcceptance;
@@ -31,6 +33,7 @@ struct BinningCorrectionConfig {
     double originalCtaoAbsorption{7.6};
     std::vector<double> cenBins;
     std::vector<std::vector<double>> ptBinsByCentrality;
+    std::vector<std::vector<std::string>> topologySelectionsByCentrality;
     std::vector<double> ptBins;
     std::vector<std::vector<double>> ctBinsByPt;
 };
@@ -57,6 +60,16 @@ struct SpectrumAcceptanceCache {
     std::vector<double> cenBins;
     std::vector<std::vector<double>> ptBinsByCentrality;
     std::vector<std::vector<BinValueWithError>> valuesByCentrality;
+};
+
+struct SpectrumEventSignalLossCache {
+    bool ready{false};
+    std::vector<double> cenBins;
+    std::vector<std::vector<double>> ptBinsByCentrality;
+    std::vector<bool> applyCorrectionByCentrality;
+    std::vector<std::vector<BinValueWithError>> eventLossByCentrality;
+    std::vector<std::vector<BinValueWithError>> eventSplittingByCentrality;
+    std::vector<std::vector<BinValueWithError>> signalLossByCentrality;
 };
 
 inline std::unique_ptr<TChain> MakeChainFromFileForCorrection(const std::string &file, const std::string &tree) {
@@ -93,6 +106,142 @@ inline int FindCentralityIndex(const std::vector<double> &cenBins, double cenMin
         }
     }
     return -1;
+}
+
+inline int FindPtIndexInPerCentBinning(const std::vector<std::vector<double>> &ptBinsByCentrality,
+                                       int cenIdx,
+                                       double ptMin,
+                                       double ptMax) {
+    if (cenIdx < 0 || static_cast<size_t>(cenIdx) >= ptBinsByCentrality.size()) return -1;
+    return FindPtIndex(ptBinsByCentrality[static_cast<size_t>(cenIdx)], ptMin, ptMax);
+}
+
+inline SpectrumEventSignalLossCache BuildSpectrumEventSignalLossCache(const BinningCorrectionConfig &cfg,
+                                                                      const std::string &eventSignalLossFile,
+                                                                      const std::string &mcFileForSignalLoss,
+                                                                      const std::vector<bool> &addEventSignalLossByCent) {
+    SpectrumEventSignalLossCache cache;
+    if (!(cfg.mode == "bdt_spectrum" || cfg.mode == "topology_spectrum")) return cache;
+    if (cfg.cenBins.size() < 2) return cache;
+    if (cfg.ptBinsByCentrality.size() != cfg.cenBins.size() - 1) return cache;
+
+    const int nCent = static_cast<int>(cfg.cenBins.size()) - 1;
+    cache.cenBins = cfg.cenBins;
+    cache.ptBinsByCentrality = cfg.ptBinsByCentrality;
+    cache.applyCorrectionByCentrality.assign(static_cast<size_t>(nCent), false);
+    for (int ic = 0; ic < nCent; ++ic) {
+        cache.applyCorrectionByCentrality[static_cast<size_t>(ic)] =
+            (static_cast<size_t>(ic) < addEventSignalLossByCent.size()) ? addEventSignalLossByCent[static_cast<size_t>(ic)] : false;
+    }
+
+    cache.eventLossByCentrality.assign(static_cast<size_t>(nCent), std::vector<BinValueWithError>{});
+    cache.eventSplittingByCentrality.assign(static_cast<size_t>(nCent), std::vector<BinValueWithError>{});
+    cache.signalLossByCentrality.assign(static_cast<size_t>(nCent), std::vector<BinValueWithError>{});
+    for (int ic = 0; ic < nCent; ++ic) {
+        const auto &ptEdges = cfg.ptBinsByCentrality[static_cast<size_t>(ic)];
+        if (ptEdges.size() < 2) continue;
+        const size_t nPt = ptEdges.size() - 1;
+        cache.eventLossByCentrality[static_cast<size_t>(ic)].assign(nPt, BinValueWithError{1.0, 0.0});
+        cache.eventSplittingByCentrality[static_cast<size_t>(ic)].assign(nPt, BinValueWithError{1.0, 0.0});
+        cache.signalLossByCentrality[static_cast<size_t>(ic)].assign(nPt, BinValueWithError{1.0, 0.0});
+    }
+
+    const bool useImpactParameter = (cfg.eventSignalLossMethod == "impactparameter" ||
+                                     cfg.eventSignalLossMethod == "impact_parameter" ||
+                                     cfg.eventSignalLossMethod == "impact");
+
+    // Event loss is centrality-dependent only; choose the configured method.
+    if (!eventSignalLossFile.empty()) {
+        auto evLossRes = EventSignalLossHelper::ComputeEventLoss(eventSignalLossFile, cfg.cenBins);
+        for (int ic = 0; ic < nCent; ++ic) {
+            const auto &values = useImpactParameter ? evLossRes.impactValue : evLossRes.multiplicityValue;
+            const auto &errors = useImpactParameter ? evLossRes.impactError : evLossRes.multiplicityError;
+            const double v = (static_cast<size_t>(ic) < values.size() && values[static_cast<size_t>(ic)] > 0.0)
+                                 ? values[static_cast<size_t>(ic)]
+                                 : 1.0;
+            const double e = (static_cast<size_t>(ic) < errors.size())
+                                 ? errors[static_cast<size_t>(ic)]
+                                 : 0.0;
+            const double split = (static_cast<size_t>(ic) < evLossRes.eventSplittingValue.size() &&
+                                  evLossRes.eventSplittingValue[static_cast<size_t>(ic)] > 0.0)
+                                     ? evLossRes.eventSplittingValue[static_cast<size_t>(ic)]
+                                     : 1.0;
+            const double splitErr = (static_cast<size_t>(ic) < evLossRes.eventSplittingError.size())
+                                        ? evLossRes.eventSplittingError[static_cast<size_t>(ic)]
+                                        : 0.0;
+            const auto correctedEventLoss = EventSignalLossHelper::RatioWithError(v, e, split, splitErr);
+            for (auto &cell : cache.eventLossByCentrality[static_cast<size_t>(ic)]) {
+                cell.value = correctedEventLoss.first > 0.0 ? correctedEventLoss.first : 1.0;
+                cell.error = correctedEventLoss.first > 0.0 ? correctedEventLoss.second : 0.0;
+            }
+            for (auto &cell : cache.eventSplittingByCentrality[static_cast<size_t>(ic)]) {
+                cell.value = split;
+                cell.error = splitErr;
+            }
+        }
+        evLossRes.Clear();
+    }
+
+    // Signal loss is centrality + pt dependent and is computed from EventLoss QA histograms.
+    (void)mcFileForSignalLoss;
+    if (!eventSignalLossFile.empty()) {
+        auto sigLossRes = EventSignalLossHelper::ComputeSignalLossCenPt(eventSignalLossFile,
+                                                                  cfg.cenBins,
+                                                                  cfg.ptBinsByCentrality);
+
+        const auto &hVec = useImpactParameter ? sigLossRes.impact_pt_per_cent
+                          : (cfg.isMatter == "matter") ? sigLossRes.signal_loss_pt_per_cent_matter
+                          : (cfg.isMatter == "antimatter") ? sigLossRes.signal_loss_pt_per_cent_antimatter
+                          : sigLossRes.signal_loss_pt_per_cent;
+        for (int ic = 0; ic < nCent; ++ic) {
+            if (static_cast<size_t>(ic) >= hVec.size() || !hVec[static_cast<size_t>(ic)]) continue;
+            TH1D *h = hVec[static_cast<size_t>(ic)];
+            for (size_t ip = 0; ip < cache.signalLossByCentrality[static_cast<size_t>(ic)].size(); ++ip) {
+                const int bin = static_cast<int>(ip + 1);
+                double v = h->GetBinContent(bin);
+                if (v <= 0.0) v = 1.0;
+                const double e = h->GetBinError(bin);
+                cache.signalLossByCentrality[static_cast<size_t>(ic)][ip] = BinValueWithError{v, e};
+            }
+        }
+        sigLossRes.Clear();
+    }
+
+    cache.ready = true;
+    return cache;
+}
+
+inline BinValueWithError GetSpectrumEventLossForBin(const SpectrumEventSignalLossCache &cache,
+                                                    const BinPlanItem &item) {
+    if (!cache.ready || !item.hasCen || !item.hasPt) return BinValueWithError{1.0, 0.0};
+    const int cenIdx = FindCentralityIndex(cache.cenBins, item.cenMin, item.cenMax);
+    if (cenIdx < 0 || static_cast<size_t>(cenIdx) >= cache.eventLossByCentrality.size()) return BinValueWithError{1.0, 0.0};
+    if (!cache.applyCorrectionByCentrality[static_cast<size_t>(cenIdx)]) return BinValueWithError{1.0, 0.0};
+    const int ptIdx = FindPtIndexInPerCentBinning(cache.ptBinsByCentrality, cenIdx, item.ptMin, item.ptMax);
+    if (ptIdx < 0 || static_cast<size_t>(ptIdx) >= cache.eventLossByCentrality[static_cast<size_t>(cenIdx)].size()) return BinValueWithError{1.0, 0.0};
+    return cache.eventLossByCentrality[static_cast<size_t>(cenIdx)][static_cast<size_t>(ptIdx)];
+}
+
+inline BinValueWithError GetSpectrumEventSplittingForBin(const SpectrumEventSignalLossCache &cache,
+                                                         const BinPlanItem &item) {
+    if (!cache.ready || !item.hasCen || !item.hasPt) return BinValueWithError{1.0, 0.0};
+    const int cenIdx = FindCentralityIndex(cache.cenBins, item.cenMin, item.cenMax);
+    if (cenIdx < 0 || static_cast<size_t>(cenIdx) >= cache.eventSplittingByCentrality.size()) return BinValueWithError{1.0, 0.0};
+    if (!cache.applyCorrectionByCentrality[static_cast<size_t>(cenIdx)]) return BinValueWithError{1.0, 0.0};
+    const int ptIdx = FindPtIndexInPerCentBinning(cache.ptBinsByCentrality, cenIdx, item.ptMin, item.ptMax);
+    if (ptIdx < 0 || static_cast<size_t>(ptIdx) >= cache.eventSplittingByCentrality[static_cast<size_t>(cenIdx)].size()) return BinValueWithError{1.0, 0.0};
+    return cache.eventSplittingByCentrality[static_cast<size_t>(cenIdx)][static_cast<size_t>(ptIdx)];
+}
+
+inline BinValueWithError GetSpectrumSignalLossForBin(const SpectrumEventSignalLossCache &cache,
+                                                     const BinPlanItem &item) {
+    if (!cache.ready || !item.hasCen || !item.hasPt) return BinValueWithError{1.0, 0.0};
+    const int cenIdx = FindCentralityIndex(cache.cenBins, item.cenMin, item.cenMax);
+    if (cenIdx < 0 || static_cast<size_t>(cenIdx) >= cache.signalLossByCentrality.size()) return BinValueWithError{1.0, 0.0};
+    if (!cache.applyCorrectionByCentrality[static_cast<size_t>(cenIdx)]) return BinValueWithError{1.0, 0.0};
+    const int ptIdx = FindPtIndexInPerCentBinning(cache.ptBinsByCentrality, cenIdx, item.ptMin, item.ptMax);
+    if (ptIdx < 0 || static_cast<size_t>(ptIdx) >= cache.signalLossByCentrality[static_cast<size_t>(cenIdx)].size()) return BinValueWithError{1.0, 0.0};
+    return cache.signalLossByCentrality[static_cast<size_t>(cenIdx)][static_cast<size_t>(ptIdx)];
 }
 
 inline PtCtAcceptanceCache BuildPtCtAcceptanceCache(const BinningCorrectionConfig &cfg,
@@ -187,7 +336,10 @@ inline SpectrumAcceptanceCache BuildSpectrumAcceptanceCache(const BinningCorrect
         std::vector<std::vector<double>>{},
         cfg.cenBins,
         cfg.ptBinsByCentrality,
-        cfg.mcEfficiencySelection);
+        cfg.mcEfficiencySelection,
+        std::vector<std::string>{},
+        cfg.mode == "topology_spectrum" ? cfg.topologySelectionsByCentrality
+                                        : std::vector<std::vector<std::string>>{});
 
     const auto &hVec = (cfg.isMatter == "matter") ? accRes.acc_pt_per_cent_matter
                       : (cfg.isMatter == "antimatter") ? accRes.acc_pt_per_cent_antimatter
@@ -291,16 +443,19 @@ inline std::vector<BinValueWithError> ComputeAcceptancePerBinWithErrors(const Bi
 
         auto accRes = AcceptanceHelper::ComputeAcceptanceFlexible(
             mcNode,
-            std::vector<double>{edges},
+            std::vector<double>{},
             std::vector<double>{},
             std::vector<std::vector<double>>{},
-            std::vector<double>{},
-            std::vector<std::vector<double>>{},
+            std::vector<double>{items.front().cenMin, items.front().cenMax},
+            std::vector<std::vector<double>>{edges},
             cfg.mcEfficiencySelection,
-            topoSel);
-        TH1D *src = (cfg.isMatter == "matter") ? accRes.acc_pt_matter
-                  : (cfg.isMatter == "antimatter") ? accRes.acc_pt_antimatter
-                  : accRes.acc_pt_both;
+            std::vector<std::string>{},
+            std::vector<std::vector<std::string>>{topoSel});
+        TH1D *src = (cfg.isMatter == "matter")
+                        ? (!accRes.acc_pt_per_cent_matter.empty() ? accRes.acc_pt_per_cent_matter.front() : nullptr)
+                    : (cfg.isMatter == "antimatter")
+                        ? (!accRes.acc_pt_per_cent_antimatter.empty() ? accRes.acc_pt_per_cent_antimatter.front() : nullptr)
+                        : (!accRes.acc_pt_per_cent.empty() ? accRes.acc_pt_per_cent.front() : nullptr);
         if (src) {
             for (size_t i = 0; i < items.size(); ++i) {
                 out[i].value = src->GetBinContent(static_cast<int>(i + 1));

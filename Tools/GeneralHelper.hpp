@@ -22,6 +22,7 @@
 #include "TCanvas.h"
 #include "TStyle.h"
 #include "TH1.h"
+#include "TH1D.h"
 #include "TLatex.h"
 #include "TLegend.h"
 #include "TColor.h"
@@ -32,6 +33,8 @@
 #include "TKey.h"
 #include "TDirectory.h"
 #include "TTree.h"
+#include "TF1.h"
+#include "TChain.h"
 
 #include <RooAbsPdf.h>
 #include <RooAbsReal.h>
@@ -40,9 +43,11 @@
 #include <RooArgSet.h>
 #include <RooChebychev.h>
 #include <RooCrystalBall.h>
+#include <RooDataHist.h>
 #include <RooDataSet.h>
 #include <RooExponential.h>
 #include <RooFit.h>
+#include <RooFitResult.h>
 #include <RooGaussian.h>
 #include <RooPlot.h>
 #include <RooRealVar.h>
@@ -467,6 +472,9 @@ struct MassFitConfig {
     std::vector<double> sigmaRangeMcToData{1.0, 1.5};
     int nBinsMcFrame{80};
     int nBinsDataFrame{40};
+    bool useBinnedDataFit{false};
+    bool prefitSidebands{true};
+    double sidebandExclusionSigma{4.0};
 };
 
 struct MassFitResult {
@@ -495,8 +503,16 @@ inline MassFitResult FitMassSpectrum(const std::vector<double> &dataMass,
                                      const MassFitConfig &cfg,
                                      const std::string &bkgFuncRaw,
                                      const std::string &sigFuncRaw) {
-    const std::string sigFunc = sigFuncRaw;
-    const std::string bkgFunc = bkgFuncRaw;
+    auto normalize = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return s;
+    };
+    std::string sigFunc = normalize(sigFuncRaw);
+    if (sigFunc == "gauss" || sigFunc == "gaussian") sigFunc = "gaus";
+    if (sigFunc == "dcb" || sigFunc == "crystalball" || sigFunc == "crystal_ball") sigFunc = "dscb";
+    const std::string bkgFunc = normalize(bkgFuncRaw);
 
     const double sigmaScaleMin = cfg.sigmaRangeMcToData.empty() ? 1.0 : cfg.sigmaRangeMcToData.front();
     const double sigmaScaleMax = cfg.sigmaRangeMcToData.size() < 2 ? 1.5 : cfg.sigmaRangeMcToData[1];
@@ -505,13 +521,18 @@ inline MassFitResult FitMassSpectrum(const std::vector<double> &dataMass,
 
     RooRealVar mass("m", "Mass(H3l)", cfg.massMin, cfg.massMax, "GeV/c^{2}");
     RooDataSet data("data", "data", RooArgSet(mass));
+    auto hDataFit = std::make_unique<TH1D>("hDataFit_FitMassSpectrum", "hDataFit_FitMassSpectrum",
+                                           nBinsDataFrame, cfg.massMin, cfg.massMax);
+    hDataFit->SetDirectory(nullptr);
     int dataCounts = 0;
     for (double v : dataMass) {
         if (v < cfg.massMin || v > cfg.massMax) continue;
         mass.setVal(v);
         data.add(RooArgSet(mass));
+        hDataFit->Fill(v);
         ++dataCounts;
     }
+    RooDataHist dataHist("dataHist", "dataHist", RooArgList(mass), hDataFit.get());
 
     RooDataSet mc("mc", "mc", RooArgSet(mass));
     for (double v : mcMass) {
@@ -527,7 +548,7 @@ inline MassFitResult FitMassSpectrum(const std::vector<double> &dataMass,
     RooRealVar n1McVar("n1Mc", "n1Mc", 5.0, 0.5, 30.0);
     RooRealVar n2McVar("n2Mc", "n2Mc", 5.0, 0.5, 30.0);
     RooAbsPdf *signalPdfMc = nullptr;
-    if (sigFunc == "gauss") {
+    if (sigFunc == "gaus") {
         signalPdfMc = new RooGaussian("sigMc", "sigMc", mass, muMc, sigmaMcVar);
     } else {
         signalPdfMc = new RooCrystalBall("sigMc", "sigMc", mass, muMc, sigmaMcVar, a1McVar, n1McVar, a2McVar, n2McVar);
@@ -605,7 +626,21 @@ inline MassFitResult FitMassSpectrum(const std::vector<double> &dataMass,
     RooRealVar nSig("nSig", "nSig", nSigInit, 0.0, nSigMax);
     RooRealVar nBkg("nBkg", "nBkg", nBkgInit, 0.0, nBkgMax);
     RooAddPdf model("model", "total_pdf", RooArgList(*signalPdf, *bkg), RooArgList(nSig, nBkg));
-    model.fitTo(data, RooFit::Extended(true), RooFit::Save(true), RooFit::PrintLevel(-1));
+    RooAbsData &dataForFit = cfg.useBinnedDataFit ? static_cast<RooAbsData &>(dataHist)
+                                                  : static_cast<RooAbsData &>(data);
+
+    const double sideHalfWidth = std::max(3.0, cfg.sidebandExclusionSigma) * sigmaScaleMax * sigmaMc;
+    const double sideLoMax = std::clamp(muMcVal - sideHalfWidth, cfg.massMin, cfg.massMax);
+    const double sideHiMin = std::clamp(muMcVal + sideHalfWidth, cfg.massMin, cfg.massMax);
+    if (cfg.prefitSidebands && sideLoMax > cfg.massMin && sideHiMin < cfg.massMax) {
+        mass.setRange("fit_side_lo", cfg.massMin, sideLoMax);
+        mass.setRange("fit_side_hi", sideHiMin, cfg.massMax);
+        bkg->fitTo(dataForFit, RooFit::Range("fit_side_lo,fit_side_hi"),
+                   RooFit::Save(true), RooFit::PrintLevel(-1));
+    }
+
+    model.fitTo(dataForFit, RooFit::Extended(true), RooFit::Save(true),
+                RooFit::Strategy(1), RooFit::PrintLevel(-1));
 
     const double muData = mu.getVal();
     const double muErrData = mu.getError();
@@ -633,13 +668,15 @@ inline MassFitResult FitMassSpectrum(const std::vector<double> &dataMass,
     bool validSignificance = bkgCounts3s + signalCounts3s > 0.0;
     if (validSignificance) {
         significance = signalCounts3s / std::sqrt(signalCounts3s + bkgCounts3s);
-        const double dSdSig = std::sqrt(signalCounts3s + bkgCounts3s) - (signalCounts3s / (2.0 * std::sqrt(signalCounts3s + bkgCounts3s)));
-        const double dBdSig = -(signalCounts3s / (2.0 * std::sqrt(signalCounts3s + bkgCounts3s)));
+        const double sumSB = signalCounts3s + bkgCounts3s;
+        const double sumSB32 = sumSB * std::sqrt(sumSB);
+        const double dSdSig = (signalCounts3s + 2.0 * bkgCounts3s) / (2.0 * sumSB32);
+        const double dBdSig = -signalCounts3s / (2.0 * sumSB32);
         significanceErr = std::sqrt(std::pow(dSdSig * signalCounts3sErr, 2) + std::pow(dBdSig * bkgCounts3sErr, 2));
     }
 
     const int nBkgFloatParams = (bkgOrder == 0) ? 1 : bkgOrder;
-    const int nDataFloatParams = nBkgFloatParams + ((sigFunc == "gaus") ? 2 : 6);
+    const int nDataFloatParams = nBkgFloatParams + 2 + 2; // bkg shape + mean/sigma + extended yields
     const int ndfData = std::max(1, nBinsDataFrame - nDataFloatParams);
     double chi2OverNdfData = 0.0;
 
@@ -668,7 +705,11 @@ inline MassFitResult FitMassSpectrum(const std::vector<double> &dataMass,
     frameMc->addObject(textMC.release());
 
     frame.reset(massHolder->frame(nBinsDataFrame));
-    data.plotOn(frame.get(), RooFit::Name("data"));
+    if (cfg.useBinnedDataFit) {
+        dataHist.plotOn(frame.get(), RooFit::Name("data"));
+    } else {
+        data.plotOn(frame.get(), RooFit::Name("data"));
+    }
     model.plotOn(frame.get(), RooFit::Name("total"));
     model.plotOn(frame.get(), RooFit::Components(*bkg), RooFit::LineStyle(kDashed), RooFit::LineColor(kRed + 1), RooFit::Name("bkg"));
     model.plotOn(frame.get(), RooFit::Components(*signalPdf), RooFit::LineStyle(kDotted), RooFit::LineColor(kGreen + 2), RooFit::Name("sig"));
@@ -687,6 +728,7 @@ inline MassFitResult FitMassSpectrum(const std::vector<double> &dataMass,
     }
     textData->AddText(Form(" #mu = %.3f #pm %.3f MeV/c^{2}", muData * 1e3, muErrData * 1e3));
     textData->AddText(Form(" #sigma = %.3f #pm %.3f MeV/c^{2}", sigmaData * 1e3, sigmaErrData * 1e3));
+    textData->AddText(cfg.useBinnedDataFit ? " fit: binned extended ML" : " fit: unbinned extended ML");
     textData->AddText(Form(" #chi^{2}/NDF = %.2f(NDF:%d)", chi2OverNdfData , ndfData));
     frame->addObject(textData.release());
 

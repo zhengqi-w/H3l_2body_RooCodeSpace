@@ -24,7 +24,9 @@
 #include <memory>
 #include <algorithm>
 #include <unordered_map>
+#include <cctype>
 #include <cmath>
+#include <filesystem>
 
 #include <nlohmann/json.hpp>
 
@@ -89,6 +91,52 @@ static std::string NormalizeWpFilename(std::string name) {
   return name;
 }
 
+static std::vector<std::string> JsonStringVector(const json &j) {
+  std::vector<std::string> out;
+  if (j.is_string()) {
+    out.push_back(j.get<std::string>());
+  } else if (j.is_array()) {
+    for (const auto &v : j) {
+      if (v.is_string() && !v.get<std::string>().empty()) out.push_back(v.get<std::string>());
+    }
+  }
+  return out;
+}
+
+static std::string SanitizePeriodTag(std::string tag) {
+  for (auto &c : tag) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    if (!std::isalnum(uc) && c != '_' && c != '-') c = '_';
+  }
+  return tag;
+}
+
+static std::string CombinedPeriodTag(const json &periods) {
+  std::string out;
+  if (!periods.is_array()) return "combined_period";
+  for (size_t i = 0; i < periods.size(); ++i) {
+    std::string tag = Form("period%zu", i);
+    if (periods[i].is_object() && periods[i].contains("tag") && periods[i]["tag"].is_string()) {
+      tag = periods[i]["tag"].get<std::string>();
+    }
+    tag = SanitizePeriodTag(tag);
+    if (tag.empty()) continue;
+    if (!out.empty()) out += "_";
+    out += tag;
+  }
+  return out.empty() ? "combined_period" : out;
+}
+
+static std::string CombinedTopDir(const std::string &path, const std::string &tag) {
+  std::filesystem::path p(path);
+  return (p.parent_path() / tag).string();
+}
+
+static std::string CombinedSubDir(const std::string &path, const std::string &tag) {
+  std::filesystem::path p(path);
+  return (p.parent_path().parent_path() / tag / p.filename()).string();
+}
+
 static json ResolveWpConfig(const json &raw_cfg) {
   if (!raw_cfg.is_object()) return raw_cfg;
   if (raw_cfg.contains("preprocess") && raw_cfg["preprocess"].is_object() &&
@@ -102,6 +150,9 @@ static json ResolveWpConfig(const json &raw_cfg) {
     const json treeNames = common.value("tree_names", json::object());
     const json eventHist = common.value("event_hist", json::object());
     const json params = common.value("parameters", json::object());
+    const json periods = common.value("periods", json::array());
+    const json execution = raw_cfg.value("execution", json::object());
+    const bool combinePeriod = execution.value("combine_period", false);
 
     auto set_if_missing = [&](const char *targetKey, const std::vector<std::string> &sourceKeys) {
       if (cfg.contains(targetKey)) return;
@@ -119,6 +170,39 @@ static json ResolveWpConfig(const json &raw_cfg) {
     set_if_missing("score_eff_dir", {"wp_dir"});
     set_if_missing("out_dir", {"wp_dir"});
     set_if_missing("spectrum_file", {"spectrum_file"});
+
+    if (combinePeriod && periods.is_array() && !periods.empty()) {
+      const std::string tag = CombinedPeriodTag(periods);
+      cfg["combined_period_tag"] = tag;
+      cfg["period_text"] = tag;
+      if (cfg.contains("trained_data_dir") && cfg["trained_data_dir"].is_string()) {
+        cfg["trained_data_dir"] = CombinedTopDir(cfg["trained_data_dir"].get<std::string>(), tag);
+      }
+      if (cfg.contains("score_eff_dir") && cfg["score_eff_dir"].is_string()) {
+        cfg["score_eff_dir"] = CombinedSubDir(cfg["score_eff_dir"].get<std::string>(), tag);
+      }
+      if (cfg.contains("out_dir") && cfg["out_dir"].is_string()) {
+        cfg["out_dir"] = CombinedSubDir(cfg["out_dir"].get<std::string>(), tag);
+      }
+      if (!cfg.contains("analysisresults_paths")) {
+        json vals = json::array();
+        for (const auto &p : periods) {
+          if (p.is_object() && p.contains("analysisresults_path") && p["analysisresults_path"].is_string()) {
+            vals.push_back(p["analysisresults_path"]);
+          }
+        }
+        if (!vals.empty()) cfg["analysisresults_paths"] = vals;
+      }
+      if (!cfg.contains("mc_paths")) {
+        json vals = json::array();
+        for (const auto &p : periods) {
+          if (p.is_object() && p.contains("mc_path") && p["mc_path"].is_string()) {
+            vals.push_back(p["mc_path"]);
+          }
+        }
+        if (!vals.empty()) cfg["mc_paths"] = vals;
+      }
+    }
 
     if (!cfg.contains("tree_name") && treeNames.contains("data")) cfg["tree_name"] = treeNames["data"];
     if (!cfg.contains("tree_name_mc") && treeNames.contains("mc")) cfg["tree_name_mc"] = treeNames["mc"];
@@ -192,6 +276,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
   try { raw_cfg = json::parse(cfg_text); }
   catch(...) { printf("Invalid JSON config.\n"); return; }
   json cfg = ResolveWpConfig(raw_cfg);
+  const bool combinePeriod = raw_cfg.value("execution", json::object()).value("combine_period", false);
 
   // required fields
   std::string trained_data_dir = cfg.value("trained_data_dir", std::string(""));
@@ -251,6 +336,14 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
   std::string n_events_hist = cfg.value("n_events_hist", std::string(""));
   std::string spectrum_file = cfg.value("spectrum_file", std::string(""));
   std::string mc_path = cfg.value("mc_path", std::string(""));
+  std::vector<std::string> analysisresults_paths = cfg.contains("analysisresults_paths")
+      ? JsonStringVector(cfg["analysisresults_paths"])
+      : std::vector<std::string>{};
+  std::vector<std::string> mc_paths = cfg.contains("mc_paths")
+      ? JsonStringVector(cfg["mc_paths"])
+      : std::vector<std::string>{};
+  if (analysisresults_paths.empty() && !analysisresults_path.empty()) analysisresults_paths.push_back(analysisresults_path);
+  if (mc_paths.empty() && !mc_path.empty()) mc_paths.push_back(mc_path);
   std::string basic_selection_data = cfg.value("basic_selection_data", std::string(""));
   double signal_sigma_mult = cfg.value("signal_window_sigma", 3.0);
   int min_entries_for_fit   = cfg.value("min_entries_for_fit", 50);
@@ -263,61 +356,108 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
   std::vector<double> target_ct_range = cfg.value("target_ct_range", std::vector<double>{});
   std::vector<double> target_cen_range = cfg.value("target_cen_range", std::vector<double>{});
   std::vector<double> yield_eff_range = cfg.value("yield_eff_range", std::vector<double>{0.5, 0.9});
+  bool use_spectrum_expected = cfg.value("use_spectrum", true);
   bool enable_mt = cfg.value("enable_implicit_mt", false);
+  bool prefit_sidebands = cfg.value("prefit_sidebands", false);
+  bool save_score_fit_frames = cfg.value("save_score_fit_frames", false);
+  int wp_progress_every = std::max(1, cfg.value("progress_every", 10));
+  bool background_order_auto = false;
+  int background_order = 1;
+  if (cfg.contains("background_order") && cfg["background_order"].is_string()) {
+    std::string orderMode = cfg["background_order"].get<std::string>();
+    std::transform(orderMode.begin(), orderMode.end(), orderMode.begin(), ::tolower);
+    background_order_auto = (orderMode == "auto");
+    if (!background_order_auto) background_order = (orderMode == "2") ? 2 : 1;
+  } else {
+    background_order = std::max(1, std::min(2, cfg.value("background_order", 1)));
+  }
+  double background_order2_min_delta_chi2 =
+      cfg.value("background_order2_min_delta_chi2", 0.5);
 
   if(enable_mt) EnableImplicitMTWithPreferredThreads();
 
-  std::unique_ptr<TFile> fAnalysis;
+  auto sideband_chi2ndf = [&](TH1D &h, RooRealVar &mass, RooAbsPdf &pdf,
+                              double lo1, double lo2, double hi1, double hi2) {
+    double chi2 = 0.0;
+    int nBins = 0;
+    for(int ib=1; ib<=h.GetNbinsX(); ++ib){
+      const double binLo = h.GetXaxis()->GetBinLowEdge(ib);
+      const double binHi = h.GetXaxis()->GetBinUpEdge(ib);
+      const bool inLo = (binLo >= lo1 && binHi <= lo2);
+      const bool inHi = (binLo >= hi1 && binHi <= hi2);
+      if(!(inLo || inHi)) continue;
+      mass.setRange("sbChi2Bin", binLo, binHi);
+      std::unique_ptr<RooAbsReal> integ(pdf.createIntegral(RooArgSet(mass), RooArgSet(mass), "sbChi2Bin"));
+      const double pred = integ ? h.Integral() * integ->getVal() : 0.0;
+      const double data = h.GetBinContent(ib);
+      if(pred <= 0.0 && data <= 0.0) continue;
+      chi2 += (data - pred) * (data - pred) / std::max(1.0, data);
+      ++nBins;
+    }
+    return (nBins > 1) ? chi2 / double(nBins - 1) : 999.0;
+  };
+
+  std::vector<std::unique_ptr<TFile>> fAnalysisFiles;
   std::unique_ptr<TFile> fSpectrum;
-  TH1 *hEvents = nullptr;
+  std::vector<TH1*> hEventsList;
   std::vector<TH1D*> hMcEffPtPerCent;
   if(mix_mode == "cen_pt"){
-    if(!analysisresults_path.empty()){
-      fAnalysis.reset(TFile::Open(analysisresults_path.c_str(), "READ"));
-      if(fAnalysis && !fAnalysis->IsZombie() && !n_events_hist.empty()){
-        hEvents = dynamic_cast<TH1*>(fAnalysis->Get(n_events_hist.c_str()));
-      }
-      if(!hEvents){
-        printf("[Warn] Cannot load n_events_hist: %s from %s\n", n_events_hist.c_str(), analysisresults_path.c_str());
+    if(!analysisresults_paths.empty()){
+      for(const auto &apath : analysisresults_paths){
+        std::unique_ptr<TFile> fTmp(TFile::Open(apath.c_str(), "READ"));
+        TH1 *hTmp = nullptr;
+        if(fTmp && !fTmp->IsZombie() && !n_events_hist.empty()){
+          hTmp = dynamic_cast<TH1*>(fTmp->Get(n_events_hist.c_str()));
+        }
+        if(hTmp){
+          hEventsList.push_back(hTmp);
+          fAnalysisFiles.push_back(std::move(fTmp));
+        } else {
+          printf("[Warn] Cannot load n_events_hist: %s from %s\n", n_events_hist.c_str(), apath.c_str());
+        }
       }
     }
-    if(!spectrum_file.empty()){
+    if(use_spectrum_expected && !spectrum_file.empty()){
       fSpectrum.reset(TFile::Open(spectrum_file.c_str(), "READ"));
       if(!fSpectrum || fSpectrum->IsZombie()){
         printf("[Warn] Cannot open spectrum_file: %s\n", spectrum_file.c_str());
       }
     }
-    if(!mc_path.empty()){
+    if(!mc_paths.empty()){
       TChain mcChain(tree_name_mc.c_str());
-      std::unique_ptr<TFile> fMC(TFile::Open(mc_path.c_str(), "READ"));
-      if(fMC && !fMC->IsZombie()){
-        fillChainFromAO2D(mcChain, fMC.get());
-        if(mcChain.GetEntries() > 0){
-          ROOT::RDataFrame rdfMc(mcChain);
-          auto readyMc = CorrectAndConvertRDF(rdfMc, false, true, false);
-          auto resPtPerCent = ComputeAcceptanceFlexible(
-              readyMc,
-              std::vector<double>{},
-              std::vector<double>{},
-              std::vector<std::vector<double>>{},
-              cen_bins,
-              pt_bins_by_centrality,
-              basic_selection_data);
-          hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent;
-          if(hMcEffPtPerCent.empty()){
-            hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent_matter;
-          }
-          if(hMcEffPtPerCent.empty()){
-            hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent_antimatter;
-          }
-          if(hMcEffPtPerCent.empty()){
-            printf("[Warn] MC efficiency histograms for cen_pt are empty from %s\n", mc_path.c_str());
-          }
+      std::vector<std::unique_ptr<TFile>> fMCFiles;
+      for(const auto &mpath : mc_paths){
+        std::unique_ptr<TFile> fMC(TFile::Open(mpath.c_str(), "READ"));
+        if(fMC && !fMC->IsZombie()){
+          fillChainFromAO2D(mcChain, fMC.get());
+          fMCFiles.push_back(std::move(fMC));
         } else {
-          printf("[Warn] No entries in MC chain for %s\n", mc_path.c_str());
+          printf("[Warn] Cannot open mc_path: %s\n", mpath.c_str());
+        }
+      }
+      if(mcChain.GetEntries() > 0){
+        ROOT::RDataFrame rdfMc(mcChain);
+        auto readyMc = CorrectAndConvertRDF(rdfMc, false, true, false);
+        auto resPtPerCent = ComputeAcceptanceFlexible(
+            readyMc,
+            std::vector<double>{},
+            std::vector<double>{},
+            std::vector<std::vector<double>>{},
+            cen_bins,
+            pt_bins_by_centrality,
+            basic_selection_data);
+        hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent;
+        if(hMcEffPtPerCent.empty()){
+          hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent_matter;
+        }
+        if(hMcEffPtPerCent.empty()){
+          hMcEffPtPerCent = resPtPerCent.acc_pt_per_cent_antimatter;
+        }
+        if(hMcEffPtPerCent.empty()){
+          printf("[Warn] MC efficiency histograms for cen_pt are empty from %zu mc_paths\n", mc_paths.size());
         }
       } else {
-        printf("[Warn] Cannot open mc_path: %s\n", mc_path.c_str());
+        printf("[Warn] No entries in MC chain from %zu mc_paths\n", mc_paths.size());
       }
     }
   }
@@ -462,14 +602,29 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       std::string score_path  = score_eff_dir   + "/score_efficiency_array_" + label + ".txt";
 
       // open data
-      if (gSystem->AccessPathName(snap_path.c_str())){ printf("  missing snapshot: %s\n", snap_path.c_str()); return -1; }
+      if (gSystem->AccessPathName(snap_path.c_str())){
+        const std::string msg = "missing data snapshot: " + snap_path;
+        printf("  %s\n", msg.c_str());
+        if (combinePeriod) throw std::runtime_error(msg);
+        return -1;
+      }
       // read only required columns to reduce IO on large snapshots
       ROOT::RDataFrame df(tree_name.c_str(), snap_path.c_str(), {"fMassH3L", "model_output"});
       bool has_mc_snapshot = (gSystem->AccessPathName(snap_path_mc.c_str()) == 0);
+      if (!has_mc_snapshot && combinePeriod) {
+        const std::string msg = "missing MC snapshot: " + snap_path_mc;
+        printf("  %s\n", msg.c_str());
+        throw std::runtime_error(msg);
+      }
 
       // read score-eff
       std::vector<double> scores, effs; read_score_eff_file(score_path, scores, effs);
-      if(scores.empty()) { printf("  missing score-eff: %s\n", score_path.c_str()); return -1; }
+      if(scores.empty()) {
+        const std::string msg = "missing score-eff: " + score_path;
+        printf("  %s\n", msg.c_str());
+        if (combinePeriod) throw std::runtime_error(msg);
+        return -1;
+      }
 
       // output ROOT file per-bin
       std::string out_root = out_dir + "/WP_" + label + ".root";
@@ -491,7 +646,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       double tail_nR = 2.0;
 
       double expected_signal_base = 0.0;
-      if(mix_mode == "cen_pt" && ctx.hasCen && ctx.hasPt && fSpectrum && !fSpectrum->IsZombie() && hEvents){
+      if(use_spectrum_expected && mix_mode == "cen_pt" && ctx.hasCen && ctx.hasPt && fSpectrum && !fSpectrum->IsZombie() && !hEventsList.empty()){
         constexpr double kBranchingRatio = 0.25;
         constexpr double kDeltaY = 2.0;
         constexpr double kMatterAntiFactor = 2.0;
@@ -501,8 +656,8 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         };
         std::string bw_name = std::string("BlastWave_") + edge_to_token(ctx.cenmin) + "_" + edge_to_token(ctx.cenmax);
         TF1 *bwFunc = dynamic_cast<TF1*>(fSpectrum->Get(bw_name.c_str()));
-        if(!bwFunc && std::fabs(ctx.cenmin - 50.0) < 1e-6 && std::fabs(ctx.cenmax - 80.0) < 1e-6){
-          const std::string bw_fallback = "BlastWave_50_90";
+        const std::string bw_fallback = "BlastWave_50_90";
+        if(!bwFunc){
           bwFunc = dynamic_cast<TF1*>(fSpectrum->Get(bw_fallback.c_str()));
           if(bwFunc){
             printf("  [Info] Missing %s, fallback to %s\n", bw_name.c_str(), bw_fallback.c_str());
@@ -511,9 +666,13 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         if(!bwFunc){
           printf("  [Warn] Missing BW function %s in %s\n", bw_name.c_str(), spectrum_file.c_str());
         } else {
-          int binMin = hEvents->GetXaxis()->FindBin(ctx.cenmin + 1e-6);
-          int binMax = hEvents->GetXaxis()->FindBin(ctx.cenmax - 1e-6);
-          double nEv = hEvents->Integral(binMin, binMax);
+          double nEv = 0.0;
+          for(auto *hEvents : hEventsList){
+            if(!hEvents) continue;
+            int binMin = hEvents->GetXaxis()->FindBin(ctx.cenmin + 1e-6);
+            int binMax = hEvents->GetXaxis()->FindBin(ctx.cenmax - 1e-6);
+            nEv += hEvents->Integral(binMin, binMax);
+          }
           double bwInt = bwFunc->Integral(ctx.ptmin, ctx.ptmax);
           double mcEff = 1.0;
           int cenIdx = -1;
@@ -548,6 +707,8 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
             printf("  [Warn] Non-positive BW expected yield\n");
           }
         }
+      } else if(mix_mode == "cen_pt" && ctx.hasCen && ctx.hasPt && !use_spectrum_expected) {
+        printf("  [Info] use_spectrum=false: expected signal counts will use pol0 fit to S(3#sigma)/eff.\n");
       }
 
       if(has_mc_snapshot){
@@ -613,6 +774,8 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       // store S3 and B3 per score for later expected-significance calculation
       std::vector<double> S3_vals(scores.size(), 0.0);
       std::vector<double> B3_vals(scores.size(), 0.0);
+      std::vector<double> B2_vals(scores.size(), 0.0);
+      std::vector<double> B4_vals(scores.size(), 0.0);
 
       // 预取该 bin 全部事件的质量与分数，避免每个 score 阈值重复扫描树
       // 使用 ForeachSlot 收集每个 slot 的局部向量，减少锁开销，再合并并按分数降序一次排序
@@ -629,6 +792,8 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         events.insert(events.end(), v.begin(), v.end());
       }
       std::sort(events.begin(), events.end(), [](const auto &a, const auto &b){ return a.first > b.first; });
+      printf("  [WP] %s: %zu events, %zu score points, prefit_sidebands=%d, save_score_fit_frames=%d\n",
+             label.c_str(), events.size(), scores.size(), int(prefit_sidebands), int(save_score_fit_frames));
       // 为真正增量：单一 RooDataSet，按降序遍历 score 阈值时只追加新事件（events 已降序）
       // 创建数据集（初始为空）
       RooArgSet global_vars(m_global);
@@ -651,6 +816,10 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       double prev_sigma = init_sigma;
 
       for(size_t ord=0; ord<idx_scores.size(); ++ord){
+        if(ord == 0 || ((int)ord + 1) % wp_progress_every == 0 || ord + 1 == idx_scores.size()){
+          printf("\r  [WP] %s score fits %zu/%zu", label.c_str(), ord + 1, idx_scores.size());
+          fflush(stdout);
+        }
         int original_index = idx_scores[ord];
         double sc = scores[original_index];
         // 追加新事件（score >= sc 且尚未添加）
@@ -664,20 +833,59 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
           ++ptr_added;
         }
         size_t nPass = dataSetIncremental.numEntries();
-        if(nPass < (size_t)min_entries_for_fit){ sig_vals[original_index]=0; chi2_ndf_vals[original_index]=999.0;  continue; }
-        // 构建此次拟合所需 PDF 变量（复用缓存初值）
-        RooRealVar c0("c0","c0", have_prev_fit?prev_c0:0.0, -10.0, 10.0);
-        RooRealVar c1("c1","c1", have_prev_fit?prev_c1:0.0, -10.0, 10.0);
-        RooArgList coeffs(c0, c1);
-        RooChebychev bkg("bkg","bkg", m_global, coeffs);
+        if(min_entries_for_fit > 0 && nPass < (size_t)min_entries_for_fit){ sig_vals[original_index]=0; chi2_ndf_vals[original_index]=999.0;  continue; }
+        RooDataHist dataHistBinned("dataHistBinned", "dataHistBinned", RooArgList(m_global), &hCum);
         double lo1 = side_low.size()>0 ? side_low[0] : 2.96;
         double lo2 = side_low.size()>1 ? side_low[1] : 2.98;
         double hi1 = side_high.size()>0 ? side_high[0] : 3.005;
         double hi2 = side_high.size()>1 ? side_high[1] : 3.04;
         m_global.setRange("side_lo", lo1, lo2);
         m_global.setRange("side_hi", hi1, hi2);
-        bkg.fitTo(dataSetIncremental, RooFit::Range("side_lo"), RooFit::PrintLevel(-1));
-        bkg.fitTo(dataSetIncremental, RooFit::Range("side_hi"), RooFit::PrintLevel(-1));
+        int selected_bkg_order = background_order_auto ? 1 : background_order;
+        double selected_side_chi2 = 999.0;
+        double selected_c0 = have_prev_fit ? prev_c0 : 0.0;
+        double selected_c1 = have_prev_fit ? prev_c1 : 0.0;
+        if(prefit_sidebands){
+          RooRealVar c0Test1("c0_test1","c0_test1", have_prev_fit?prev_c0:0.0, -10.0, 10.0);
+          RooArgList coeffsTest1(c0Test1);
+          RooChebychev bkgTest1("bkg_test1","bkg_test1", m_global, coeffsTest1);
+          std::unique_ptr<RooFitResult> sideRes1(
+              bkgTest1.fitTo(dataHistBinned, RooFit::Range("side_lo,side_hi"), RooFit::Save(true), RooFit::PrintLevel(-1)));
+          const double chi1 = sideband_chi2ndf(hCum, m_global, bkgTest1, lo1, lo2, hi1, hi2);
+          selected_bkg_order = 1;
+          selected_side_chi2 = chi1;
+          selected_c0 = c0Test1.getVal();
+          selected_c1 = 0.0;
+          if(background_order_auto || background_order >= 2){
+            RooRealVar c0Test2("c0_test2","c0_test2", have_prev_fit?prev_c0:selected_c0, -10.0, 10.0);
+            RooRealVar c1Test2("c1_test2","c1_test2", have_prev_fit?prev_c1:0.0, -10.0, 10.0);
+            RooArgList coeffsTest2(c0Test2, c1Test2);
+            RooChebychev bkgTest2("bkg_test2","bkg_test2", m_global, coeffsTest2);
+            std::unique_ptr<RooFitResult> sideRes2(
+                bkgTest2.fitTo(dataHistBinned, RooFit::Range("side_lo,side_hi"), RooFit::Save(true), RooFit::PrintLevel(-1)));
+            const double chi2sb = sideband_chi2ndf(hCum, m_global, bkgTest2, lo1, lo2, hi1, hi2);
+            const bool preferOrder2 = (background_order >= 2 && !background_order_auto) ||
+                                      (std::isfinite(chi2sb) &&
+                                       chi2sb + background_order2_min_delta_chi2 < chi1 &&
+                                       std::fabs(c1Test2.getVal()) < 9.5);
+            if(preferOrder2){
+              selected_bkg_order = 2;
+              selected_side_chi2 = chi2sb;
+              selected_c0 = c0Test2.getVal();
+              selected_c1 = c1Test2.getVal();
+            }
+          }
+        }
+        // 构建此次拟合所需 PDF 变量（复用边带选择结果作为固定背景形状）
+        RooRealVar c0("c0","c0", selected_c0, -10.0, 10.0);
+        RooRealVar c1("c1","c1", selected_c1, -10.0, 10.0);
+        RooArgList coeffs(c0);
+        if(selected_bkg_order >= 2) coeffs.add(c1);
+        RooChebychev bkg("bkg","bkg", m_global, coeffs);
+        if(prefit_sidebands){
+          c0.setConstant(true);
+          if(selected_bkg_order >= 2) c1.setConstant(true);
+        }
         RooRealVar mean("mean","mean", have_prev_fit?prev_mean:init_mean, 2.985, 3.005);
         RooRealVar sigma("sigma","sigma", have_prev_fit?prev_sigma:init_sigma, 1.4e-3, 2.0e-3);
         RooRealVar a1("a1","a1", tail_alphaL);
@@ -692,7 +900,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         RooRealVar nsig("nsig","nsig", have_prev_fit?prev_nsig:0.5 * nPass, 0.0, 5*nPass);
         RooRealVar nbkg("nbkg","nbkg", have_prev_fit?prev_nbkg:0.5 * nPass, 0.0, 5*nPass + 10.0);
         RooAddPdf totalPdf("totalPdf","signal+bkg", RooArgList(signal, bkg), RooArgList(nsig, nbkg));
-        RooFitResult *res = totalPdf.fitTo(dataSetIncremental, RooFit::Extended(true), RooFit::Save(true), RooFit::PrintLevel(-1));
+        std::unique_ptr<RooFitResult> res(totalPdf.fitTo(dataHistBinned, RooFit::Extended(true), RooFit::Save(true), RooFit::PrintLevel(-1)));
         if(!res){ sig_vals[original_index]=0; chi2_ndf_vals[original_index]=999.0;  continue; }
         // 缓存当前拟合参数用于下一次初值
         prev_c0 = c0.getVal();
@@ -702,20 +910,41 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         prev_nsig = nsig.getVal();
         prev_nbkg = nbkg.getVal();
         have_prev_fit = true;
-        RooPlot *fitFrame = m_global.frame(mass_nbins);
-        dataSetIncremental.plotOn(fitFrame, RooFit::Name("data"));
-        totalPdf.plotOn(fitFrame, RooFit::Name("pdf"));
-        double chi2ndf = fitFrame->chiSquare("pdf","data");
-        totalPdf.plotOn(fitFrame,
-                          RooFit::Components("bkg"),
-                          RooFit::LineStyle(kDashed),
-                          RooFit::LineColor(kRed+1),
-                          RooFit::Name("pdf_bkg"));
-        totalPdf.plotOn(fitFrame,
-                          RooFit::Components("signal"),
-                          RooFit::LineStyle(kDotted),
-                          RooFit::LineColor(kGreen+1),
-                          RooFit::Name("pdf_sig"));
+        double chi2 = 0.0;
+        int chi2Bins = 0;
+        for(int ib=1; ib<=hCum.GetNbinsX(); ++ib){
+          const double binLo = hCum.GetXaxis()->GetBinLowEdge(ib);
+          const double binHi = hCum.GetXaxis()->GetBinUpEdge(ib);
+          m_global.setRange("chi2BinRange", binLo, binHi);
+          std::unique_ptr<RooAbsReal> intB(bkg.createIntegral(RooArgSet(m_global), RooArgSet(m_global), "chi2BinRange"));
+          std::unique_ptr<RooAbsReal> intS(signal.createIntegral(RooArgSet(m_global), RooArgSet(m_global), "chi2BinRange"));
+          const double pred = (intS ? nsig.getVal() * intS->getVal() : 0.0) +
+                              (intB ? nbkg.getVal() * intB->getVal() : 0.0);
+          const double data = hCum.GetBinContent(ib);
+          if(pred <= 0.0 && data <= 0.0) continue;
+          chi2 += (data - pred) * (data - pred) / std::max(1.0, data);
+          ++chi2Bins;
+        }
+        const int nFitParams = 6;
+        double chi2ndf = (chi2Bins > nFitParams) ? chi2 / double(chi2Bins - nFitParams) : 999.0;
+        RooPlot *fitFrame = nullptr;
+        if(save_score_fit_frames){
+          fitFrame = m_global.frame(mass_nbins);
+          dataHistBinned.plotOn(fitFrame, RooFit::Name("data"));
+          totalPdf.plotOn(fitFrame, RooFit::Name("pdf"));
+          const double plotChi2 = fitFrame->chiSquare("pdf","data");
+          if(std::isfinite(plotChi2)) chi2ndf = plotChi2;
+          totalPdf.plotOn(fitFrame,
+                            RooFit::Components("bkg"),
+                            RooFit::LineStyle(kDashed),
+                            RooFit::LineColor(kRed+1),
+                            RooFit::Name("pdf_bkg"));
+          totalPdf.plotOn(fitFrame,
+                            RooFit::Components("signal"),
+                            RooFit::LineStyle(kDotted),
+                            RooFit::LineColor(kGreen+1),
+                            RooFit::Name("pdf_sig"));
+        }
         chi2_ndf_vals[original_index] = chi2ndf;
         double s_lo3 = mean.getVal() - 3.0 * sigma.getVal();
         double s_hi3 = mean.getVal() + 3.0 * sigma.getVal();
@@ -727,7 +956,9 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         // store S3 and B3 for later expected-significance computation
         S3_vals[original_index] = S3;
         B3_vals[original_index] = B3;
-        double Sfixed = (mix_mode == "cen_pt") ? expected_signal_base : S3;
+        const bool use_spectrum_for_precurve =
+            (mix_mode == "cen_pt" && use_spectrum_expected && expected_signal_base > 0.0);
+        double Sfixed = use_spectrum_for_precurve ? expected_signal_base : S3;
         double S3_err = intSig3 ? nsig.getError() * intSig3->getVal() : 0.0;
         double base_signif3 = (Sfixed+B3>0) ? Sfixed/std::sqrt(Sfixed+B3) : 0.0;
         double eff_here = (original_index < (int)effs.size() ? effs[original_index] : 1.0);
@@ -743,6 +974,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         double B2 = intBkg2 ? nbkg.getVal() * intBkg2->getVal() : 0.0;
         double base_signif2 = (Sfixed+B2>0) ? Sfixed/std::sqrt(Sfixed+B2) : 0.0;
         sig_vals_2sigma[original_index] = eff_here * base_signif2;
+        B2_vals[original_index] = B2;
         double s_lo4 = mean.getVal() - 4.0 * sigma.getVal();
         double s_hi4 = mean.getVal() + 4.0 * sigma.getVal();
         m_global.setRange("sigwin4", s_lo4, s_hi4);
@@ -750,6 +982,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         double B4 = intBkg4 ? nbkg.getVal() * intBkg4->getVal() : 0.0;
         double base_signif4 = (Sfixed+B4>0) ? Sfixed/std::sqrt(Sfixed+B4) : 0.0;
         sig_vals_4sigma[original_index] = eff_here * base_signif4;
+        B4_vals[original_index] = B4;
         // 侧带逐点（逐 bin）绝对残差均值：|data_bin - pred_bin| 在 sidebands 上的均值
         int nSideBins = 0; double sumAbsDiff = 0.0; double sumData = 0.0;
         for(int ib=1; ib<=hCum.GetNbinsX(); ++ib){
@@ -768,35 +1001,40 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         }
         double sideband_rel_diff = (nSideBins>0) ? std::fabs(sumAbsDiff / sumData) : 999.0;
         sideband_diff_vals[original_index] = sideband_rel_diff;
-        TPaveText *ptInfo = new TPaveText(0.14, 0.6, 0.42, 0.9, "NDC");
-        ptInfo->SetBorderSize(0); ptInfo->SetFillStyle(0); ptInfo->SetTextFont(42); ptInfo->SetTextAlign(11);
-        if (aliceperformance) ptInfo->AddText("ALICE Performance");
-        else ptInfo->AddText(period_text.c_str()); 
-        if(!additional_text.empty()) ptInfo->AddText(additional_text.c_str());
-        if(mix_mode == "cen_pt") ptInfo->AddText(Form("S_{base}(BW) = %.1f", Sfixed));
-        else ptInfo->AddText(Form("S_{base}(data) = %.1f", Sfixed));
-        ptInfo->AddText(Form("S(3#sigma)=%.1f", S3));
-        ptInfo->AddText(Form("B(3#sigma)=%.1f", B3));
-        ptInfo->AddText(Form("S/#sqrt{(S+B)} = %.2f", signifi_org));
-        ptInfo->AddText(Form("#chi^{2}/NDF=%.2f", chi2ndf));
-        ptInfo->AddText(Form("Side #Delta_{abs}^{avg}=%.3f", sideband_rel_diff));
-        ptInfo->AddText(Form("N_{s}/#sqrt{(N_{s}+N_{B})} #times #epsilon(#it{BDT}): %.2f", signif3_val));
-        ptInfo->AddText((chi2ndf <= max_chi2_ndf && sideband_rel_diff <= max_sideband_rel_diff) ? "Fit PASS" : "Fit FAIL(excluded)" );
-        fitFrame->addObject(ptInfo);
-        // 另起一个 Text：拟合参数与 BDT 信息
-        TPaveText *ptPars = new TPaveText(0.632, 0.5, 0.932, 0.85, "NDC");
-        ptPars->SetBorderSize(0); ptPars->SetFillStyle(0); ptPars->SetTextFont(42); ptPars->SetTextAlign(11);
-        ptPars->AddText(Form("BDT score>%.3f #epsilon(#it{BDT})=%.3f", sc, eff_here));
-        ptPars->AddText(Form("#mu=%.4f #sigma=%.4f", mean.getVal(), sigma.getVal()));
-        ptPars->AddText(Form("a1=%.2f n1=%.2f a2=%.2f n2=%.2f", a1.getVal(), n1.getVal(), a2.getVal(), n2.getVal()));
-        ptPars->AddText(Form("c0=%.3f c1=%.3f", c0.getVal(), c1.getVal()));
-        ptPars->AddText(Form("nsig_{fac}=%.1f nbkg_{fac}=%.1f", nsig.getVal(), nbkg.getVal()));
-        fitFrame->addObject(ptPars);
-        dFits->cd();
-        fitFrame->SetName(Form("frame_score_%0.3f", sc));
-        fitFrame->Write();
+        if(save_score_fit_frames && fitFrame){
+          TPaveText *ptInfo = new TPaveText(0.14, 0.6, 0.42, 0.9, "NDC");
+          ptInfo->SetBorderSize(0); ptInfo->SetFillStyle(0); ptInfo->SetTextFont(42); ptInfo->SetTextAlign(11);
+          if (aliceperformance) ptInfo->AddText("ALICE Performance");
+          else ptInfo->AddText(period_text.c_str());
+          if(!additional_text.empty()) ptInfo->AddText(additional_text.c_str());
+          if(mix_mode == "cen_pt") ptInfo->AddText(Form("S_{base}(BW) = %.1f", Sfixed));
+          else ptInfo->AddText(Form("S_{base}(data) = %.1f", Sfixed));
+          ptInfo->AddText(Form("S(3#sigma)=%.1f", S3));
+          ptInfo->AddText(Form("B(3#sigma)=%.1f", B3));
+          ptInfo->AddText(Form("S/#sqrt{(S+B)} = %.2f", signifi_org));
+          ptInfo->AddText(Form("#chi^{2}/NDF=%.2f", chi2ndf));
+          ptInfo->AddText(Form("Side #Delta_{abs}^{avg}=%.3f", sideband_rel_diff));
+          ptInfo->AddText(Form("N_{s}/#sqrt{(N_{s}+N_{B})} #times #epsilon(#it{BDT}): %.2f", signif3_val));
+          ptInfo->AddText((std::isfinite(chi2ndf) && chi2ndf <= max_chi2_ndf) ? "Fit PASS" : "Fit FAIL(excluded)" );
+          fitFrame->addObject(ptInfo);
+          TPaveText *ptPars = new TPaveText(0.632, 0.5, 0.932, 0.85, "NDC");
+          ptPars->SetBorderSize(0); ptPars->SetFillStyle(0); ptPars->SetTextFont(42); ptPars->SetTextAlign(11);
+          ptPars->AddText(Form("BDT score>%.3f #epsilon(#it{BDT})=%.3f", sc, eff_here));
+          ptPars->AddText(Form("#mu=%.4f #sigma=%.4f", mean.getVal(), sigma.getVal()));
+          ptPars->AddText(Form("a1=%.2f n1=%.2f a2=%.2f n2=%.2f", a1.getVal(), n1.getVal(), a2.getVal(), n2.getVal()));
+          ptPars->AddText(Form("bkg order=%d, side #chi^{2}/NDF=%.2f", selected_bkg_order, selected_side_chi2));
+          if(selected_bkg_order >= 2) ptPars->AddText(Form("c0=%.3f c1=%.3f", c0.getVal(), c1.getVal()));
+          else ptPars->AddText(Form("c0=%.3f", c0.getVal()));
+          ptPars->AddText(Form("nsig_{fac}=%.1f nbkg_{fac}=%.1f", nsig.getVal(), nbkg.getVal()));
+          fitFrame->addObject(ptPars);
+          dFits->cd();
+          fitFrame->SetName(Form("frame_score_%0.3f", sc));
+          fitFrame->Write();
+          delete fitFrame;
+        }
         if(chi2ndf > max_chi2_ndf){ sig_vals[original_index] = -1.0; }
       }
+      printf("\n");
       // 原循环已替换为增量式构建与拟合
 
       // significance vs score（仅包含通过 chi2/NDF 的点）+ band (2σ-4σ) + best point annotation
@@ -809,7 +1047,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       std::vector<double> passSig3Err; passSig3Err.reserve(scores.size());
       std::vector<int> passOrigIdx;   passOrigIdx.reserve(scores.size());
       for(size_t i=0;i<scores.size();++i){
-        if(sig_vals[i] >= 0.0 && chi2_ndf_vals[i] <= max_chi2_ndf && sideband_diff_vals[i] <= max_sideband_rel_diff){
+        if(sig_vals[i] >= 0.0 && std::isfinite(chi2_ndf_vals[i]) && chi2_ndf_vals[i] <= max_chi2_ndf){
           passScores.push_back(scores[i]);
           if(i < effs.size()) passEffs.push_back(effs[i]); else passEffs.push_back(0.0);
           passSig3.push_back(sig_vals[i]);
@@ -827,7 +1065,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         if(passSig3[i] >= 0.0 && passSig3[i] > bestSig){ bestSig = passSig3[i]; bestIdx = i; }
       }
       double bestS3OverEff = 0.0;
-      if(bestIdx >= 0){
+      if(save_score_fit_frames && bestIdx >= 0){
         bestScore = passScores[bestIdx];
         if((size_t)bestIdx < passEffs.size()) bestEff = passEffs[bestIdx];
         if((size_t)bestIdx < passS3OverEff.size()) bestS3OverEff = passS3OverEff[bestIdx];
@@ -886,8 +1124,8 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         hYieldEff.SetLineColor(kMagenta+1);
         hYieldEff.SetMarkerStyle(20);
         hYieldEff.SetMarkerColor(kMagenta+1);
-        // Always fit pol0 on S(3σ)/eff for display; only non-cen-pt uses it for expected significance.
-        const bool use_bw_expected = (mix_mode == "cen_pt");
+        // Always fit pol0 on S(3σ)/eff for display; use it when spectrum expected counts are disabled or unavailable.
+        const bool use_bw_expected = (mix_mode == "cen_pt" && use_spectrum_expected && expected_signal_base > 0.0);
         std::unique_ptr<TF1> fpol0 = std::make_unique<TF1>("fpol0","pol0");
         hYieldEff.Fit(fpol0.get(), "QS"); // quiet, store result
         double fit_c0 = fpol0->GetParameter(0);
@@ -907,34 +1145,68 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         if(!use_bw_expected){
           ptFit->AddText(Form("pol0 c0 = %.3f #pm %.3f", fit_c0, fit_c0_err));
           if(fit_chi2ndf>=0) ptFit->AddText(Form("#chi^{2}/ndf = %.2f", fit_chi2ndf));
+          if(mix_mode == "cen_pt" && use_spectrum_expected && expected_signal_base <= 0.0){
+            ptFit->AddText("BW unavailable: use pol0 expected S");
+          }
         } else {
           ptFit->AddText(Form("pol0 c0 = %.3f #pm %.3f", fit_c0, fit_c0_err));
           if(fit_chi2ndf>=0) ptFit->AddText(Form("#chi^{2}/ndf = %.2f", fit_chi2ndf));
           ptFit->AddText(Form("Use BW expected S_{base} = %.3f", expected_signal_base));
-          ptFit->AddText("Expected S = S_{base} #times #epsilon(#it{BDT})");
+          ptFit->AddText("Metric = S_{base}/#sqrt{S_{base}+N_{b}} #times #epsilon_{BDT}");
         }
         ptFit->Write();
         // compute expected significance per pass point
         std::vector<double> expSigVals(passScores.size(), 0.0);
+        std::vector<double> expSigVals2(passScores.size(), 0.0);
+        std::vector<double> expSigVals4(passScores.size(), 0.0);
+        const double expected_signal_base_for_wp = std::max(0.0, use_bw_expected ? expected_signal_base : fit_c0);
         for(int i=0;i<(int)passScores.size();++i){
           double eff_val = passEffs[i];
           int orig_idx = (i < (int)passOrigIdx.size()) ? passOrigIdx[i] : -1;
           double B3_here = (orig_idx>=0) ? B3_vals[orig_idx] : 0.0;
-          double expected_signal = use_bw_expected ? (expected_signal_base * eff_val) : (fit_c0 * eff_val);
-          double expSig = (expected_signal + B3_here>0) ? expected_signal / sqrt(expected_signal + B3_here) : 0.0;
+          double B2_here = (orig_idx>=0) ? B2_vals[orig_idx] : 0.0;
+          double B4_here = (orig_idx>=0) ? B4_vals[orig_idx] : 0.0;
+          double expSig = (expected_signal_base_for_wp + B3_here>0)
+                              ? eff_val * expected_signal_base_for_wp / sqrt(expected_signal_base_for_wp + B3_here)
+                              : 0.0;
+          double expSig2 = (expected_signal_base_for_wp + B2_here>0)
+                               ? eff_val * expected_signal_base_for_wp / sqrt(expected_signal_base_for_wp + B2_here)
+                               : 0.0;
+          double expSig4 = (expected_signal_base_for_wp + B4_here>0)
+                               ? eff_val * expected_signal_base_for_wp / sqrt(expected_signal_base_for_wp + B4_here)
+                               : 0.0;
           expSigVals[i] = expSig;
+          expSigVals2[i] = expSig2;
+          expSigVals4[i] = expSig4;
         }
+        for(int i=0;i<(int)passScores.size();++i){
+          grPass.SetPoint(i, passScores[i], expSigVals[i]);
+          grSigEff.SetPoint(i, passEffs[i], expSigVals[i]);
+        }
+        for(int i=0;i<npts_band;++i) band.SetPoint(i, passScores[i], expSigVals2[i]);
+        for(int i=0;i<npts_band;++i) band.SetPoint(npts_band + i, passScores[npts_band-1-i], expSigVals4[npts_band-1-i]);
+        for(int i=0;i<npts_eff;++i) bandEff.SetPoint(i, passEffs[i], expSigVals2[i]);
+        for(int i=0;i<npts_eff;++i) bandEff.SetPoint(npts_eff + i, passEffs[npts_eff-1-i], expSigVals4[npts_eff-1-i]);
+        grPass.SetTitle((ctx.desc + ";BDT score;Expected significance").c_str());
+        grSigEff.SetTitle((ctx.desc + ";BDT efficiency;Expected significance").c_str());
+        dSigs->cd();
+        grPass.Write("gr_expected_significance_vs_score");
+        grSigEff.Write("gr_expected_significance_vs_efficiency");
         // best point based on expected significance
         int bestExpIdx = -1; double bestExpSig = -1.0; double bestScoreExp = 0.0; double bestEffExp = 0.0;
         for(int i=0;i<(int)expSigVals.size();++i){
           int orig_idx = (i < (int)passOrigIdx.size()) ? passOrigIdx[i] : -1;
-          if(expSigVals[i] >= 0.0 && orig_idx >= 0 && chi2_ndf_vals[orig_idx] <= max_chi2_ndf && sideband_diff_vals[orig_idx] <= max_sideband_rel_diff){
+          if(expSigVals[i] >= 0.0 && orig_idx >= 0 && std::isfinite(chi2_ndf_vals[orig_idx]) && chi2_ndf_vals[orig_idx] <= max_chi2_ndf){
             if(expSigVals[i] > bestExpSig){ bestExpSig = expSigVals[i]; bestExpIdx = i; }
           }
         }
         if(bestExpIdx >= 0){
           bestScoreExp = passScores[bestExpIdx];
           bestEffExp = passEffs[bestExpIdx];
+          bestScore = bestScoreExp;
+          bestEff = bestEffExp;
+          bestSig = bestExpSig;
+          if((size_t)bestExpIdx < passS3OverEff.size()) bestS3OverEff = passS3OverEff[bestExpIdx];
         }
         TGraph grBest(1);
         grBest.SetPoint(0, bestScoreExp, bestExpSig);
@@ -944,6 +1216,119 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         grBest.SetMarkerSize(2.0);
         grBest.SetMarkerColor(kRed+1);
         grBest.Write();
+
+        auto make_best_fit_frame = [&](double scoreForFit, double effForFit, double sigForFit) {
+          RooArgSet bestVars(m_global);
+          RooDataSet bestData("bestData", "bestData", bestVars);
+          TH1D hBest("hBest", "hBest", mass_nbins, mmin, mmax);
+          for(const auto &ev : events){
+            if(ev.first < scoreForFit) break;
+            const double mv = ev.second;
+            if(mv < mmin || mv > mmax) continue;
+            m_global.setVal(mv);
+            bestData.add(bestVars);
+            hBest.Fill(mv);
+          }
+          if(bestData.numEntries() <= 0) return;
+          const double bestLo1 = side_low.size()>0 ? side_low[0] : 2.96;
+          const double bestLo2 = side_low.size()>1 ? side_low[1] : 2.98;
+          const double bestHi1 = side_high.size()>0 ? side_high[0] : 3.005;
+          const double bestHi2 = side_high.size()>1 ? side_high[1] : 3.04;
+          m_global.setRange("side_lo", bestLo1, bestLo2);
+          m_global.setRange("side_hi", bestHi1, bestHi2);
+          int selectedBestOrder = background_order_auto ? 1 : background_order;
+          double selectedBestSideChi2 = 999.0;
+          double selectedBestC0 = 0.0;
+          double selectedBestC1 = 0.0;
+          if(prefit_sidebands){
+            RooRealVar c0BestTest1("c0_best_test1","c0_best_test1", 0.0, -10.0, 10.0);
+            RooArgList coeffsBestTest1(c0BestTest1);
+            RooChebychev bkgBestTest1("bkg_best_test1","bkg_best_test1", m_global, coeffsBestTest1);
+            std::unique_ptr<RooFitResult> bestSideRes1(
+                bkgBestTest1.fitTo(bestData, RooFit::Range("side_lo,side_hi"), RooFit::Save(true), RooFit::PrintLevel(-1)));
+            const double bestChi1 = sideband_chi2ndf(hBest, m_global, bkgBestTest1, bestLo1, bestLo2, bestHi1, bestHi2);
+            selectedBestOrder = 1;
+            selectedBestSideChi2 = bestChi1;
+            selectedBestC0 = c0BestTest1.getVal();
+            if(background_order_auto || background_order >= 2){
+              RooRealVar c0BestTest2("c0_best_test2","c0_best_test2", selectedBestC0, -10.0, 10.0);
+              RooRealVar c1BestTest2("c1_best_test2","c1_best_test2", 0.0, -10.0, 10.0);
+              RooArgList coeffsBestTest2(c0BestTest2, c1BestTest2);
+              RooChebychev bkgBestTest2("bkg_best_test2","bkg_best_test2", m_global, coeffsBestTest2);
+              std::unique_ptr<RooFitResult> bestSideRes2(
+                  bkgBestTest2.fitTo(bestData, RooFit::Range("side_lo,side_hi"), RooFit::Save(true), RooFit::PrintLevel(-1)));
+              const double bestChi2Side = sideband_chi2ndf(hBest, m_global, bkgBestTest2, bestLo1, bestLo2, bestHi1, bestHi2);
+              const bool preferBestOrder2 = (background_order >= 2 && !background_order_auto) ||
+                                            (std::isfinite(bestChi2Side) &&
+                                             bestChi2Side + background_order2_min_delta_chi2 < bestChi1 &&
+                                             std::fabs(c1BestTest2.getVal()) < 9.5);
+              if(preferBestOrder2){
+                selectedBestOrder = 2;
+                selectedBestSideChi2 = bestChi2Side;
+                selectedBestC0 = c0BestTest2.getVal();
+                selectedBestC1 = c1BestTest2.getVal();
+              }
+            }
+          }
+          RooRealVar c0Best("c0_best","c0_best", selectedBestC0, -10.0, 10.0);
+          RooRealVar c1Best("c1_best","c1_best", selectedBestC1, -10.0, 10.0);
+          RooArgList coeffsBest(c0Best);
+          if(selectedBestOrder >= 2) coeffsBest.add(c1Best);
+          RooChebychev bkgBest("bkg_best","bkg_best", m_global, coeffsBest);
+          if(prefit_sidebands){
+            c0Best.setConstant(true);
+            if(selectedBestOrder >= 2) c1Best.setConstant(true);
+          }
+          RooRealVar meanBest("mean_best","mean_best", init_mean, 2.985, 3.005);
+          RooRealVar sigmaBest("sigma_best","sigma_best", init_sigma, 1.4e-3, 2.0e-3);
+          RooRealVar a1Best("a1_best","a1_best", tail_alphaL); a1Best.setConstant(true);
+          RooRealVar n1Best("n1_best","n1_best", tail_nL); n1Best.setConstant(true);
+          RooRealVar a2Best("a2_best","a2_best", tail_alphaR); a2Best.setConstant(true);
+          RooRealVar n2Best("n2_best","n2_best", tail_nR); n2Best.setConstant(true);
+          RooCrystalBall sigBest("signal_best","signal_best", m_global, meanBest, sigmaBest, a1Best, n1Best, a2Best, n2Best);
+          RooRealVar nsigBest("nsig_best","nsig_best", 0.5 * bestData.numEntries(), 0.0, 5.0 * bestData.numEntries());
+          RooRealVar nbkgBest("nbkg_best","nbkg_best", 0.5 * bestData.numEntries(), 0.0, 5.0 * bestData.numEntries() + 10.0);
+          RooAddPdf pdfBest("pdf_best","signal+bkg best", RooArgList(sigBest, bkgBest), RooArgList(nsigBest, nbkgBest));
+          std::unique_ptr<RooFitResult> fitBest(pdfBest.fitTo(bestData, RooFit::Extended(true), RooFit::Save(true), RooFit::PrintLevel(-1)));
+          if(!fitBest) return;
+          RooPlot *frBest = m_global.frame(mass_nbins);
+          bestData.plotOn(frBest, RooFit::Name("data"));
+          pdfBest.plotOn(frBest, RooFit::Name("pdf"));
+          const double bestChi2 = frBest->chiSquare("pdf", "data");
+          pdfBest.plotOn(frBest, RooFit::Components("bkg_best"), RooFit::LineStyle(kDashed),
+                         RooFit::LineColor(kRed+1), RooFit::Name("pdf_bkg"));
+          pdfBest.plotOn(frBest, RooFit::Components("signal_best"), RooFit::LineStyle(kDotted),
+                         RooFit::LineColor(kGreen+1), RooFit::Name("pdf_sig"));
+          const double sLo3 = meanBest.getVal() - 3.0 * sigmaBest.getVal();
+          const double sHi3 = meanBest.getVal() + 3.0 * sigmaBest.getVal();
+          m_global.setRange("best_sigwin3", sLo3, sHi3);
+          std::unique_ptr<RooAbsReal> intBBest(bkgBest.createIntegral(RooArgSet(m_global), RooArgSet(m_global), "best_sigwin3"));
+          std::unique_ptr<RooAbsReal> intSBest(sigBest.createIntegral(RooArgSet(m_global), RooArgSet(m_global), "best_sigwin3"));
+          const double b3Best = intBBest ? nbkgBest.getVal() * intBBest->getVal() : 0.0;
+          const double s3Best = intSBest ? nsigBest.getVal() * intSBest->getVal() : 0.0;
+          TPaveText *ptBest = new TPaveText(0.14, 0.58, 0.47, 0.9, "NDC");
+          ptBest->SetBorderSize(0); ptBest->SetFillStyle(0); ptBest->SetTextFont(42); ptBest->SetTextAlign(11);
+          if(aliceperformance) ptBest->AddText("ALICE Performance");
+          else ptBest->AddText(period_text.c_str());
+          if(!additional_text.empty()) ptBest->AddText(additional_text.c_str());
+          ptBest->AddText(Form("Best WP score = %.3f", scoreForFit));
+          ptBest->AddText(Form("#epsilon(#it{BDT}) = %.3f", effForFit));
+          ptBest->AddText(Form("Expected significance = %.2f", sigForFit));
+          ptBest->AddText(Form("S(3#sigma)=%.1f, B(3#sigma)=%.1f", s3Best, b3Best));
+          ptBest->AddText(Form("#chi^{2}/NDF = %.2f", bestChi2));
+          ptBest->AddText(Form("bkg order=%d, side #chi^{2}/NDF=%.2f", selectedBestOrder, selectedBestSideChi2));
+          ptBest->AddText(Form("#mu=%.4f, #sigma=%.4f", meanBest.getVal(), sigmaBest.getVal()));
+          frBest->addObject(ptBest);
+          dFits->cd();
+          frBest->SetName("frame_best_score");
+          frBest->Write();
+          TCanvas cbest("c_bestfit","c_bestfit",900,650);
+          cbest.SetLeftMargin(0.12); cbest.SetRightMargin(0.04); cbest.SetBottomMargin(0.12); cbest.SetTopMargin(0.08);
+          frBest->Draw();
+          cbest.SaveAs((out_dir+"/best_fit_"+label+".pdf").c_str());
+          delete frBest;
+        };
+        if(bestExpIdx >= 0) make_best_fit_frame(bestScore, bestEff, bestSig);
         fout.Close();
 
         // PDF rendering 仅在有通过点时绘制
@@ -953,6 +1338,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         band.SetTitle((ctx.desc + ";BDT score;Expected significance (3#sigma) #times eff").c_str());
         double yMaxScore = 0.0;
         for(double y : passSig2) yMaxScore = std::max(yMaxScore, y);
+        for(double y : expSigVals) yMaxScore = std::max(yMaxScore, y);
         if(yMaxScore <= 0.0) yMaxScore = 1.0;
         band.SetMinimum(0.0);
         band.SetMaximum(1.15 * yMaxScore);
@@ -969,7 +1355,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         // Legend
         TLegend leg(0.52,0.16,0.86,0.34);
         leg.SetBorderSize(0); leg.SetFillStyle(0); leg.SetTextFont(42);
-        leg.AddEntry(&grPass, "3#sigma curve", "l");
+        leg.AddEntry(&grPass, "Expected significance", "l");
         leg.AddEntry(&band,  "#pm1#sigma band", "f");
         leg.AddEntry(&grBestDraw, "Best WP", "p");
         leg.AddEntry(&lineWPScore, "WP vertical line", "l");
@@ -982,7 +1368,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         ptWP->SetTextAlign(11);
         ptWP->AddText(Form("WP score = %.3f", bestScore));
         ptWP->AddText(Form("#epsilon(#it{BDT}) = %.3f", bestEff));
-        ptWP->AddText(Form("N_{s}/#sqrt{(N_{s}+N_{B})} #times #epsilon(#it{BDT}) = %.2f", bestSig));
+        ptWP->AddText(Form("Expected significance = %.2f", bestSig));
         ptWP->Draw();
         c.Update();
         c.SaveAs((out_dir+"/sig_vs_score_"+label+".pdf").c_str());
@@ -991,6 +1377,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         cEff.SetGridx(0); cEff.SetGridy(0);
         double yMaxEff = 0.0;
         for(double y : passSig2) yMaxEff = std::max(yMaxEff, y);
+        for(double y : expSigVals) yMaxEff = std::max(yMaxEff, y);
         if(yMaxEff <= 0.0) yMaxEff = 1.0;
         bandEff.SetMinimum(0.0);
         bandEff.SetMaximum(1.15 * yMaxEff);
@@ -1006,7 +1393,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         lineWPEff.Draw("SAME");
         TLegend legEff(0.52,0.16,0.86,0.34);
         legEff.SetBorderSize(0); legEff.SetFillStyle(0); legEff.SetTextFont(42);
-        legEff.AddEntry(&grSigEff, "3#sigma curve", "l");
+        legEff.AddEntry(&grSigEff, "Expected significance", "l");
         legEff.AddEntry(&bandEff,  "#pm1#sigma band", "f");
         legEff.AddEntry(&grBestEff, "Best WP", "p");
         legEff.AddEntry(&lineWPEff, "WP vertical line", "l");
@@ -1018,7 +1405,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         ptEff->SetTextAlign(11);
         ptEff->AddText(Form("WP score = %.3f", bestScore));
         ptEff->AddText(Form("#epsilon(#it{BDT}) = %.3f", bestEff));
-        ptEff->AddText(Form("N_{s}/#sqrt{(N_{s}+N_{B})} #times #epsilon(#it{BDT}) = %.2f", bestSig));
+        ptEff->AddText(Form("Expected significance = %.2f", bestSig));
         ptEff->Draw();
         cEff.Update();
         cEff.SaveAs((out_dir+"/sig_vs_eff_"+label+".pdf").c_str());
@@ -1048,22 +1435,6 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
 
       // upsert working point line to summary vector (preserve other bins)
       upsert_wp_line(ctx.hasCen, ctx.hasPt, ctx.hasCt, ctx.cenmin, ctx.cenmax, ctx.ptmin, ctx.ptmax, ctx.ctmin, ctx.ctmax, bestScore, bestEff, bestSig);
-
-      // 保存最佳工作点对应的拟合图
-      if(bestIdx >= 0){
-        TFile fbest(out_root.c_str(), "READ");
-        TDirectory *dirFits = fbest.GetDirectory("Fits");
-        if(dirFits){
-          TString frName = Form("frame_score_%0.3f", bestScore);
-          RooPlot *frBest = (RooPlot*)dirFits->Get(frName);
-          if(frBest){
-            TCanvas cbest("c_bestfit","c_bestfit",900,650);
-            cbest.SetLeftMargin(0.12); cbest.SetRightMargin(0.04); cbest.SetBottomMargin(0.12); cbest.SetTopMargin(0.08);
-            frBest->Draw();
-            cbest.SaveAs((out_dir+"/best_fit_"+label+".pdf").c_str());
-          }
-        }
-      }
 
       return 1;
   };

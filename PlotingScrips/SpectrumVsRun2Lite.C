@@ -210,7 +210,7 @@ static TH1* GetHistWithCentrality(const std::string& path, const std::string& hi
 
 void SpectrumVsRun2Lite() {
     gStyle->SetOptStat(0);
-    std::string outputDir = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/SpectrumvsRun2";
+    std::string outputDir = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/PlotingScrips/SpectrumvsRun2";
     gSystem->mkdir(outputDir.c_str(), true);
     const std::string mcTag = "";
     const std::string saveSuffixName = "NCrossedRowsCompare";
@@ -218,8 +218,8 @@ void SpectrumVsRun2Lite() {
         {
           "0_10",
           {
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
+            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum_no_itscut/both/spectrum.root",
             //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
             //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_V0s_HadronPID/bdt_spectrum/both/spectrum.root"
           },
@@ -230,7 +230,7 @@ void SpectrumVsRun2Lite() {
           "(Anti)hypertriton spectrum in 0-10% V0M centrality class",
           "BlastWave_H3L_0_10",
           {
-            "23_pass4_CustomV0s_HadronPID",
+            //"23_pass4_CustomV0s_HadronPID",
             "23_pass5_CustomV0s_HadronPID",
             //"23_pass5_CustomV0s_HadronPID_TPCNcls",
             //"23_pass5_V0s_HadronPID_TPCNCls",
@@ -239,8 +239,8 @@ void SpectrumVsRun2Lite() {
         {
           "10_30",
           {
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
+            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum_no_itscut/both/spectrum.root",
             //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
             //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_V0s_HadronPID/bdt_spectrum/both/spectrum.root"
           },         
@@ -251,7 +251,7 @@ void SpectrumVsRun2Lite() {
           "(Anti)hypertriton spectrum in 10-30% V0M centrality class",
           "BlastWave_H3L_10_30",
           {
-            "23_pass4_CustomV0s_HadronPID",
+            //"23_pass4_CustomV0s_HadronPID",
             "23_pass5_CustomV0s_HadronPID",
             //"23_pass5_CustomV0s_HadronPID_TPCNcls",
             //"23_pass5_V0s_HadronPID_TPCNcls"
@@ -260,8 +260,8 @@ void SpectrumVsRun2Lite() {
         {
           "30_50",
           {
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
+            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum_no_itscut/both/spectrum.root",
             //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
             //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_V0s_HadronPID/bdt_spectrum/both/spectrum.root"
          },
@@ -272,7 +272,7 @@ void SpectrumVsRun2Lite() {
           "(Anti)hypertriton spectrum in 30-50% V0M centrality class",
           "BlastWave_H3L_30_50",
           {
-            "23_pass4_CustomV0s_HadronPID",
+            //"23_pass4_CustomV0s_HadronPID",
             "23_pass5_CustomV0s_HadronPID",
             //"23_pass5_CustomV0s_HadronPID_TPCNcls",
             //"23_pass5_V0s_HadronPID_TPCNcls"
@@ -281,8 +281,8 @@ void SpectrumVsRun2Lite() {
         {
           "50_80",
           {
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
+            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum_no_itscut/both/spectrum.root",
             //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
             //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_V0s_HadronPID/bdt_spectrum/both/spectrum.root"
           },
@@ -293,7 +293,7 @@ void SpectrumVsRun2Lite() {
           "(Anti)hypertriton spectrum in 50-80% V0M centrality class",
           "",
           {
-            "23_pass4_CustomV0s_HadronPID",
+            //"23_pass4_CustomV0s_HadronPID",
             "23_pass5_CustomV0s_HadronPID",
             //"23_pass5_CustomV0s_HadronPID_TPCNcls",
             //"23_pass5_V0s_HadronPID_TPCNcls"

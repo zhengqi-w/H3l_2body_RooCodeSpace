@@ -42,7 +42,7 @@ using namespace GeneralHelper;
 void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/NCrossedRows/reweighted/AO2D_CustomV0s_combined_reweighted.root",
                 const vector<string> &comparepaths = { "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/NCrossedRows/reweighted/AO2D_CustomV0s_combined_reweighted.root"},
                 const vector<bool> &TwoBodySelections = {true, true},
-                const vector<string> &labels = {"Pass5_NoClusterSizeCut",  "Pass5_ClusterSizeCut"},
+                const vector<string> &labels = {"Pass5_NoITSCut",  "Pass5_ITSCut"},
                 const vector<double> cenbins = {0, 10, 30, 50, 80},
                 const vector<vector<double>> ptbinsforcent = { 
                                            {2, 3, 3.5, 4, 4.5, 5, 6, 8},
@@ -57,8 +57,9 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
                                                              {1, 3, 6, 9, 15, 25},
                                                              {1, 3, 6, 10, 23} },
                 const vector<string> &basic_selection_data_for_mc_eff = {"fDecRad > 0.8", "fDecRad > 0.8 && fAvgClusterSizeHe > 5"},
-                const string &outputpath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MCEfficiency_ClusterSizeCheck",
-                const string &matterOpt = "both") {
+                const string &outputpath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/StandAloneChecks/MCEfficiency_ClusterSizeCheck",
+                const string &matterOpt = "both",
+                const string &plotNote = "") {
     // Basic MT setup
     if (!ROOT::IsImplicitMTEnabled()) {
         ROOT::EnableImplicitMT(std::clamp(std::thread::hardware_concurrency(), 2u, 12u));
@@ -74,10 +75,10 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
         ROOT::RDataFrame rdf(chain);
         auto ready = CorrectAndConvertRDF(rdf, false, true, false);
         // Separate calls for pt, ct, and ct-per-pt scenarios to satisfy API constraints
-        AcceptanceHelper::AcceptanceResult resPt      = AcceptanceHelper::ComputeAcceptanceFlexible(ready, ptbins, {}, {}, {}, {}, basicSel, {}, selTwoBody);
-        AcceptanceHelper::AcceptanceResult resCt      = AcceptanceHelper::ComputeAcceptanceFlexible(ready, {}, ctbins, {}, {}, {}, basicSel, {}, selTwoBody);
-        AcceptanceHelper::AcceptanceResult resCtPerPt = AcceptanceHelper::ComputeAcceptanceFlexible(ready, ptbinsforct, {}, ctbinsforpt, {}, {}, basicSel, {}, selTwoBody);
-        AcceptanceHelper::AcceptanceResult resPtPerCent = AcceptanceHelper::ComputeAcceptanceFlexible(ready, {}, {}, {}, cenbins, ptbinsforcent, basicSel, {}, selTwoBody);
+        AcceptanceHelper::AcceptanceResult resPt      = AcceptanceHelper::ComputeAcceptanceFlexible(ready, ptbins, {}, {}, {}, {}, basicSel, {}, {}, selTwoBody);
+        AcceptanceHelper::AcceptanceResult resCt      = AcceptanceHelper::ComputeAcceptanceFlexible(ready, {}, ctbins, {}, {}, {}, basicSel, {}, {}, selTwoBody);
+        AcceptanceHelper::AcceptanceResult resCtPerPt = AcceptanceHelper::ComputeAcceptanceFlexible(ready, ptbinsforct, {}, ctbinsforpt, {}, {}, basicSel, {}, {}, selTwoBody);
+        AcceptanceHelper::AcceptanceResult resPtPerCent = AcceptanceHelper::ComputeAcceptanceFlexible(ready, {}, {}, {}, cenbins, ptbinsforcent, basicSel, {}, {}, selTwoBody);
 
         AcceptanceHelper::AcceptanceResult out;
         // pt efficiencies
@@ -187,6 +188,20 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
     const Float_t prevEndErrorSize = gStyle->GetEndErrorSize();
     gStyle->SetEndErrorSize(4.0f);
 
+    auto drawPlotNote = [&]() {
+        if (plotNote.empty()) return;
+        TLatex text;
+        text.SetNDC();
+        text.SetTextFont(42);
+        text.SetTextSize(0.040);
+        text.SetTextColor(kGray + 2);
+        text.DrawLatex(0.60, 0.84, plotNote.c_str());
+    };
+    auto saveCanvas = [](TCanvas &canvas, const std::string &basePath) {
+        canvas.SaveAs((basePath + ".pdf").c_str());
+        canvas.SaveAs((basePath + ".png").c_str());
+    };
+
     auto drawSet = [&](const std::string &cname, const std::string &title,
                        TH1D *stdH, const std::vector<TH1D*> &compH,
                        const std::string &ratioTitle,
@@ -230,11 +245,14 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
         if (useTopBottomPads) pTop.cd();
         else pLeft.cd();
         bool isPtCanvas = (cname == "eff_pt");
+        const std::string prettyXAxis = (cname.find("ct") != std::string::npos)
+            ? std::string("#it{c}t (cm)")
+            : std::string("#it{p}_{T} (GeV/#it{c})");
         double legX1 = isPtCanvas ? 0.15 : 0.55;
         double legY1 = isPtCanvas ? 0.65 : 0.65;
         double legX2 = isPtCanvas ? 0.48 : 0.88;
         double legY2 = isPtCanvas ? 0.88 : 0.88;
-        stdH->SetTitle((title+";"+stdH->GetXaxis()->GetTitle()+";Efficiency").c_str());
+        stdH->SetTitle((title+";"+prettyXAxis+";Efficiency").c_str());
         stdH->SetStats(false);
         stdH->SetLineColor(colors[0]);
         stdH->SetMarkerColor(colors[0]);
@@ -268,6 +286,7 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
             stdH->SetMaximum(1.2*mx);
         }
         leg.Draw();
+        drawPlotNote();
 
         // Right: ratios (compare / std)
         if (useTopBottomPads) pBot.cd();
@@ -284,6 +303,7 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
             r->SetMarkerColor(colors[i+1]);
             r->SetMarkerStyle(markers[i+1]);
             r->GetYaxis()->SetTitle(ratioTitle.c_str());
+            r->GetXaxis()->SetTitle(prettyXAxis.c_str());
             if (useTopBottomPads) {
                 r->GetYaxis()->SetTitleSize(0.10);
                 r->GetYaxis()->SetTitleOffset(0.50);
@@ -308,7 +328,7 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
             ratioFrame->SetStats(false);
             ratioFrame->SetMinimum(rLow);
             ratioFrame->SetMaximum(rHigh);
-            ratioFrame->SetTitle((";" + std::string(stdH->GetXaxis()->GetTitle()) + ";" + ratioTitle).c_str());
+            ratioFrame->SetTitle((";" + prettyXAxis + ";" + ratioTitle).c_str());
             if (useTopBottomPads) {
                 ratioFrame->GetYaxis()->SetTitleSize(0.10);
                 ratioFrame->GetYaxis()->SetTitleOffset(0.50);
@@ -320,21 +340,19 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
             ratioFrame->Draw("HIST");
         }
 
-        bool firstDrawn = false;
         for (auto &r : ratioH) {
             if (!r) continue;
             r->SetMinimum(rLow);
             r->SetMaximum(rHigh);
             r->SetLineWidth(3);
-            if (!firstDrawn) { r->Draw("E1 P"); firstDrawn=true; }
-            else r->Draw("SAME E1 P");
+            r->Draw("SAME E1 P");
         }
         TLine line(stdH->GetXaxis()->GetXmin(),1,stdH->GetXaxis()->GetXmax(),1);
         line.SetLineColor(kBlack);
         line.SetLineStyle(2);
         line.SetLineWidth(3);
         line.Draw();
-        c.SaveAs((outputpath + "/" + cname + ".pdf").c_str());
+        saveCanvas(c, outputpath + "/" + cname);
     };
 
     // pt efficiency
@@ -480,6 +498,7 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
         }
         if (firstDrawnCent) {
             leg.Draw();
+            drawPlotNote();
 
             // Bottom pad: enable X error bars for ratio points.
             gStyle->SetErrorX(0.5);
@@ -576,8 +595,8 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
                 l.SetLineWidth(4);
                 l.DrawClone();
             }
-            const std::string pdfName = "eff_pt_cen_" + edgeToToken(cenbins[ic]) + "_" + edgeToToken(cenbins[ic + 1]) + ".pdf";
-            cCentBin.SaveAs((outputpath + "/" + pdfName).c_str());
+            const std::string baseName = "eff_pt_cen_" + edgeToToken(cenbins[ic]) + "_" + edgeToToken(cenbins[ic + 1]);
+            saveCanvas(cCentBin, outputpath + "/" + baseName);
         }
     }
 
@@ -625,8 +644,9 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
         }
         if (firstDrawnSet) {
             leg.Draw();
+            drawPlotNote();
             const std::string labelSuffix = sanitizeLabel(setLabel(iset));
-            cSet.SaveAs((outputpath + "/eff_pt_per_cent_" + labelSuffix + ".pdf").c_str());
+            saveCanvas(cSet, outputpath + "/eff_pt_per_cent_" + labelSuffix);
         }
     }
 
@@ -681,7 +701,8 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
 
     if (firstDrawn) {
         leg.Draw();
-        cCent.SaveAs((outputpath + "/eff_pt_per_cent_combined.pdf").c_str());
+        drawPlotNote();
+        saveCanvas(cCent, outputpath + "/eff_pt_per_cent_combined");
     }
 
     gStyle->SetEndErrorSize(prevEndErrorSize);

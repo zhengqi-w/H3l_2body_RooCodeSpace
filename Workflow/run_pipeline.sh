@@ -55,6 +55,13 @@ if [[ -z "$ROOT_CMD" ]]; then
   fi
 fi
 
+ROOT_DIR="$(cd "$(dirname "$ROOT_CMD")" && pwd -P)"
+export PATH="$ROOT_DIR:$PATH"
+export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/h3l_matplotlib_cache}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/h3l_xdg_cache}"
+export ROOT_RDF_SNAPSHOT_INFO="${ROOT_RDF_SNAPSHOT_INFO:-0}"
+mkdir -p "$MPLCONFIGDIR" "$XDG_CACHE_HOME"
+
 cd "$CODESPACE_DIR"
 echo "[run_pipeline] Config: $CFG_PATH"
 echo "[run_pipeline] Stage : $STAGE"

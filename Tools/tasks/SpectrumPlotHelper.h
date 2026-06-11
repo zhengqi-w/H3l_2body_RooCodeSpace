@@ -12,6 +12,7 @@
 #include <TLine.h>
 #include <TBox.h>
 #include <TF1.h>
+#include <TFitResultPtr.h>
 #include <TMath.h>
 
 #include <cmath>
@@ -41,6 +42,22 @@ struct TrailAnnotationInfo {
     double bdtEff{0.0};
     bool enabled{false};
 };
+
+inline double ComputeGaussianChi2Ndf(TF1 *f) {
+    if (!f || f->GetNDF() <= 0) return std::numeric_limits<double>::infinity();
+    return f->GetChisquare() / static_cast<double>(f->GetNDF());
+}
+
+inline bool AcceptSystematicGaussianFit(const TFitResultPtr &fitRes, TF1 *f, double maxChi2Ndf) {
+    const int fitStatus = static_cast<int>(fitRes);
+    const double chi2Ndf = ComputeGaussianChi2Ndf(f);
+    const double sigma = f ? std::abs(f->GetParameter(2)) : 0.0;
+    return fitStatus == 0 &&
+           std::isfinite(chi2Ndf) &&
+           chi2Ndf <= maxChi2Ndf &&
+           std::isfinite(sigma) &&
+           sigma > 0.0;
+}
 
 inline std::string BuildDecayString(const std::string &isMatter) {
     if (isMatter == "matter") {
@@ -213,7 +230,9 @@ inline std::unique_ptr<TCanvas> MakeSystematicsCorrDistCanvas(const std::string 
                                                               double stdCorrErr,
                                                               double cenMin,
                                                               double cenMax,
-                                                              const std::string &binLabel) {
+                                                              const std::string &binLabel,
+                                                              double gaussFitMaxChi2Ndf,
+                                                              double *usedUncertainty = nullptr) {
     auto c = std::make_unique<TCanvas>(name.c_str(), name.c_str(), 900, 700);
     if (!hCorrDist) return c;
 
@@ -227,9 +246,11 @@ inline std::unique_ptr<TCanvas> MakeSystematicsCorrDistCanvas(const std::string 
     TLine *lineCorr = nullptr;
     TBox *bandCorr = nullptr;
     TBox *bandGauss = nullptr;
-    TF1 *fgaus = nullptr;
+    std::unique_ptr<TF1> fgaus;
     double gausMean = std::numeric_limits<double>::quiet_NaN();
     double gausSigma = std::numeric_limits<double>::quiet_NaN();
+    double gausChi2Ndf = std::numeric_limits<double>::infinity();
+    bool gausAccepted = false;
 
     if (std::isfinite(stdCorr)) {
         const double ymax = std::max(1.0, hCorrDist->GetMaximum()) * 1.02;
@@ -248,14 +269,18 @@ inline std::unique_ptr<TCanvas> MakeSystematicsCorrDistCanvas(const std::string 
     if (hCorrDist->GetEntries() > 2) {
         const double initMean = hCorrDist->GetMean();
         const double initSigma = std::max(hCorrDist->GetRMS(), 1e-9);
-        TF1 gausFunc("gaus", "gaus", hCorrDist->GetXaxis()->GetXmin(), hCorrDist->GetXaxis()->GetXmax());
-        gausFunc.SetParameters(hCorrDist->GetMaximum(), initMean, initSigma);
-        auto fitRes = hCorrDist->Fit(&gausFunc, "QS");
-        fgaus = hCorrDist->GetFunction("gaus");
+        fgaus = std::make_unique<TF1>((name + "_gaus").c_str(),
+                                      "gaus",
+                                      hCorrDist->GetXaxis()->GetXmin(),
+                                      hCorrDist->GetXaxis()->GetXmax());
+        fgaus->SetParameters(hCorrDist->GetMaximum(), initMean, initSigma);
+        auto fitRes = hCorrDist->Fit(fgaus.get(), "QSN0");
+        gausChi2Ndf = ComputeGaussianChi2Ndf(fgaus.get());
         if (fitRes == 0 && fgaus) {
             fgaus->SetLineColor(kGreen + 3);
             fgaus->SetLineWidth(2);
-            fgaus->SetLineStyle(kSolid);
+            gausAccepted = AcceptSystematicGaussianFit(fitRes, fgaus.get(), gaussFitMaxChi2Ndf);
+            fgaus->SetLineStyle(gausAccepted ? kSolid : kDashed);
             gausMean = fgaus->GetParameter(1);
             gausSigma = std::abs(fgaus->GetParameter(2));
             bandGauss = new TBox(gausMean - gausSigma, 0.0, gausMean + gausSigma,
@@ -266,9 +291,15 @@ inline std::unique_ptr<TCanvas> MakeSystematicsCorrDistCanvas(const std::string 
         }
     }
 
+    if (usedUncertainty) {
+        *usedUncertainty = (gausAccepted && std::isfinite(gausSigma) && gausSigma > 0.0)
+                               ? gausSigma
+                               : hCorrDist->GetRMS();
+    }
+
     if (bandCorr) bandCorr->Draw("same");
     if (bandGauss) bandGauss->Draw("same");
-    if (fgaus) fgaus->Draw("same");
+    if (fgaus) fgaus->DrawCopy("same");
     if (lineCorr) lineCorr->Draw("same");
     hCorrDist->Draw("HIST SAME");
 
@@ -280,7 +311,7 @@ inline std::unique_ptr<TCanvas> MakeSystematicsCorrDistCanvas(const std::string 
     if (lineCorr) leg->AddEntry(lineCorr, "Std value", "l");
     if (bandCorr) leg->AddEntry(bandCorr, "Std stat band", "f");
     if (bandGauss) leg->AddEntry(bandGauss, "Gauss #pm1#sigma", "f");
-    if (fgaus) leg->AddEntry(fgaus, "Gauss fit", "l");
+    if (fgaus) leg->AddEntry(fgaus.get(), gausAccepted ? "Gauss fit" : "Gauss fit rejected", "l");
     leg->DrawClone();
 
     auto pave = std::make_unique<TPaveText>(0.14, 0.68, 0.47, 0.90, "NDC");
@@ -294,6 +325,11 @@ inline std::unique_ptr<TCanvas> MakeSystematicsCorrDistCanvas(const std::string 
         pave->AddText(Form("Gauss #sigma = %.3e", gausSigma));
     } else {
         pave->AddText("Gauss fit: n/a");
+    }
+    if (std::isfinite(gausChi2Ndf)) {
+        pave->AddText(Form("Gauss #chi^{2}/ndf = %.2f (%s)",
+                           gausChi2Ndf,
+                           gausAccepted ? "used" : "RMS used"));
     }
     pave->AddText(Form("RMS = %.3e", hCorrDist->GetRMS()));
     pave->AddText(Form("Central = %.3e", hCorrDist->GetMean()));
@@ -416,29 +452,27 @@ inline std::unique_ptr<TCanvas> MakeFinalSpectrumCanvas(const std::string &name,
         fStdFit->Draw("SAME");
     }
 
-    // Draw all text info at bottom left
-    TLatex latex;
-    latex.SetNDC();
-    latex.SetTextFont(42);
-    latex.SetTextSize(0.035);
-    latex.SetTextAlign(11);
-    double textY = 0.33;
+    // Draw all text info in one object.
+    TPaveText textBox(0.16, 0.18, 0.52, 0.38, "NDC");
+    textBox.SetBorderSize(0);
+    textBox.SetFillStyle(0);
+    textBox.SetTextAlign(12);
+    textBox.SetTextFont(42);
+    textBox.SetTextSize(0.035);
     const auto expLines = BuildExperimentLines(labelCfg);
     for (const auto &line : expLines) {
-        latex.DrawLatex(0.16, textY, line.c_str());
-        textY -= 0.045;
+        textBox.AddText(line.c_str());
     }
     const std::string decay = BuildDecayString(isMatter);
     if (!decay.empty()) {
-        latex.DrawLatex(0.16, textY, decay.c_str());
-        textY -= 0.045;
+        textBox.AddText(decay.c_str());
     }
     const std::string cenText = BuildCentralityText(extraText);
     if (!cenText.empty()) {
-        latex.DrawLatex(0.16, textY, cenText.c_str());
-        textY -= 0.045;
+        textBox.AddText(cenText.c_str());
     }
-    latex.DrawLatex(0.16, textY, BuildEventLine(nEvents).c_str());
+    textBox.AddText(BuildEventLine(nEvents).c_str());
+    textBox.DrawClone();
 
     // Draw Legend above text block
     TLegend *leg = new TLegend(0.16, 0.40, 0.50, 0.58);

@@ -14,7 +14,9 @@ void extract_bwfits() {
     {"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_backup/BdtSpectrum_LHC25g11_G4list/cen50-80/pt_analysis_pbpb.root", "BlastWave_H3L_50_80"}
   };
 
-  TFile out("/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/Ploting_scrips/H3L_BWFit_Run3_23.root", "RECREATE");
+  const char *outDir = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/PlotingScrips/extract_bwfits";
+  gSystem->mkdir(outDir, true);
+  TFile out(Form("%s/H3L_BWFit_Run3_23.root", outDir), "RECREATE");
   for (const auto &entry : files) {
     const std::string &inPath = entry.first;
     const std::string &outName = entry.second;
