@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -36,6 +37,7 @@
 #include <mutex>
 #include <random>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -48,12 +50,17 @@ using SpectrumParLimit = std::pair<double, double>;
 struct SpectrumFunctionConfig {
     std::vector<double> initial;
     std::vector<SpectrumParLimit> limits;
+    std::vector<bool> fixed;
 };
 
 struct IntegralYieldConfig {
     std::string nominalFitFunc{"fBGBW"};
+    std::map<std::string, std::string> nominalFitFuncByCentrality;
     std::vector<std::string> fitFuncCandidates;
+    std::map<std::string, std::vector<std::string>> fitFuncCandidatesByCentrality;
     std::map<std::string, SpectrumFunctionConfig> fitFuncParameters;
+    std::map<std::string, std::map<std::string, SpectrumFunctionConfig>> fitFuncParametersByCentrality;
+    std::map<std::string, bool> fitFixByCentrality;
     bool doSystematics{true};
     int nTrailsForIntegralSyst{1000};
     int nCombinationsForExtrapolation{500};
@@ -65,6 +72,7 @@ struct IntegralYieldConfig {
     double fitFuncFallbackFraction{0.20};
     double gaussFitMaxChi2Ndf{3.0};
     double extrapToyMaxChi2Ndf{-1.0};
+    double statFitCovMaxFraction{0.20};
     double fitRangeMin{0.0};
     double fitRangeMax{10.0};
     double lowPtMaxFactor{10.0};
@@ -101,6 +109,7 @@ struct IntegralFitParameterRow {
     double limitMin{0.0};
     double limitMax{0.0};
     bool hasLimits{false};
+    bool isFixed{false};
     double chi2{0.0};
     int ndf{0};
     double chi2Ndf{0.0};
@@ -137,7 +146,6 @@ struct IntegralYieldResult {
     std::unique_ptr<TCanvas> cNominalAndFunctions;
     std::unique_ptr<TCanvas> cFitFunctionParameters;
     std::unique_ptr<TCanvas> cExtrapolation;
-    std::unique_ptr<TCanvas> cAbsorption;
     std::unique_ptr<TCanvas> cAbsorptionYieldScan;
     std::unique_ptr<TCanvas> cTrails;
     std::unique_ptr<TCanvas> cSources;
@@ -288,6 +296,30 @@ inline std::pair<double, double> ComputeMeanRms(const std::vector<double> &value
     return {mean, std::sqrt(std::max(0.0, var / static_cast<double>(n)))};
 }
 
+inline double ComputeQuantileHalfWidth(const std::vector<double> &values,
+                                       double lowQuantile = 0.16,
+                                       double highQuantile = 0.84) {
+    std::vector<double> finite;
+    finite.reserve(values.size());
+    for (double v : values) {
+        if (std::isfinite(v)) finite.push_back(v);
+    }
+    if (finite.size() < 2) return 0.0;
+    std::sort(finite.begin(), finite.end());
+    auto pickQuantile = [&](double q) {
+        q = std::clamp(q, 0.0, 1.0);
+        const double pos = q * static_cast<double>(finite.size() - 1);
+        const size_t lo = static_cast<size_t>(std::floor(pos));
+        const size_t hi = std::min(finite.size() - 1, lo + 1);
+        const double frac = pos - static_cast<double>(lo);
+        return finite[lo] * (1.0 - frac) + finite[hi] * frac;
+    };
+    const double lo = pickQuantile(lowQuantile);
+    const double hi = pickQuantile(highQuantile);
+    const double halfWidth = 0.5 * (hi - lo);
+    return (std::isfinite(halfWidth) && halfWidth > 0.0) ? halfWidth : 0.0;
+}
+
 inline bool PassLowPtExtrapolationGuard(TH1D *h,
                                         TF1 *f,
                                         const IntegralYieldConfig &cfg,
@@ -382,12 +414,58 @@ inline double IntegrateFunctionRanges(TF1 *f,
     return sum;
 }
 
+inline double ComputeExtrapolatedIntegral(TF1 *f,
+                                          TH1D *h,
+                                          const IntegralYieldConfig &cfg,
+                                          const std::vector<double> *measuredEdges = nullptr) {
+    if (!f) return 0.0;
+    return IntegrateFunctionRanges(f, BuildExtrapolationRanges(h, cfg, measuredEdges));
+}
+
+inline bool IsFitShapeFiniteOnRanges(TF1 *f,
+                                     const std::vector<std::pair<double, double>> &ranges) {
+    if (!f) return false;
+    for (const auto &range : ranges) {
+        if (!(range.second > range.first)) continue;
+        const double integral = IntegrateFunction(f, range.first, range.second);
+        if (!std::isfinite(integral)) return false;
+        for (int i = 0; i <= 8; ++i) {
+            const double x = range.first + (range.second - range.first) * static_cast<double>(i) / 8.0;
+            const double y = f->Eval(x);
+            if (!std::isfinite(y)) return false;
+        }
+    }
+    return true;
+}
+
+inline bool HasUsableFitCovariance(TF1 *f,
+                                   const TFitResultPtr &fitResult,
+                                   const std::vector<std::pair<double, double>> &ranges) {
+    if (!f || !fitResult.Get() || ranges.empty()) return false;
+    if (!IsFitShapeFiniteOnRanges(f, ranges)) return false;
+    const int npar = f->GetNpar();
+    if (npar <= 0) return false;
+
+    bool hasPositiveVariance = false;
+    for (int ip = 0; ip < npar; ++ip) {
+        for (int jp = 0; jp < npar; ++jp) {
+            const double cov = fitResult->CovMatrix(ip, jp);
+            if (!std::isfinite(cov)) return false;
+            if (ip == jp) {
+                if (cov < -1e-24) return false;
+                if (cov > 0.0 && f->GetParError(ip) > 0.0) hasPositiveVariance = true;
+            }
+        }
+    }
+    return hasPositiveVariance;
+}
+
 inline double ComputeFitIntegralErrorFromCovariance(TF1 *f,
                                                     const TFitResultPtr &fitResult,
                                                     const std::vector<std::pair<double, double>> &ranges) {
     if (!f || !fitResult.Get()) return 0.0;
-    if (static_cast<int>(fitResult) != 0) return 0.0;
     if (ranges.empty()) return 0.0;
+    if (!HasUsableFitCovariance(f, fitResult, ranges)) return 0.0;
     const int npar = f->GetNpar();
     if (npar <= 0) return 0.0;
 
@@ -456,6 +534,10 @@ inline SpectrumFunctionConfig DefaultSpectrumFunctionConfig(const std::string &f
         return SpectrumFunctionConfig{{0.76, 0.16, 1.003, 1.0, 0.03},
                                       {{0.0, 0.95}, {0.005, 0.6}, {1.000001, 1.3}, {1e-10, 1e12}, {0.001, 2.0}}};
     }
+    if (funcName == "fLogPolyPt" || funcName == "fLogPolyMt") {
+        return SpectrumFunctionConfig{{-12.0, -1.0, 0.0},
+                                      {{-50.0, 10.0}, {-20.0, 10.0}, {-10.0, 5.0}}};
+    }
     return SpectrumFunctionConfig{};
 }
 
@@ -467,7 +549,81 @@ inline SpectrumFunctionConfig ResolveSpectrumFunctionConfig(
     if (it == configured.end()) return out;
     if (!it->second.initial.empty()) out.initial = it->second.initial;
     if (!it->second.limits.empty()) out.limits = it->second.limits;
+    if (!it->second.fixed.empty()) out.fixed = it->second.fixed;
     return out;
+}
+
+inline std::string NormalizeCentralityConfigKey(std::string key) {
+    if (key.rfind("cen_", 0) == 0) key.erase(0, 4);
+    std::replace(key.begin(), key.end(), '-', '_');
+    key.erase(std::remove_if(key.begin(), key.end(), [](unsigned char c) {
+                  return std::isspace(c) != 0 || c == '%';
+              }),
+              key.end());
+    return key;
+}
+
+inline std::string FormatCentralityConfigKey(double cenMin, double cenMax) {
+    auto fmt = [](double v) {
+        std::ostringstream os;
+        os << std::setprecision(12) << std::defaultfloat << v;
+        std::string s = os.str();
+        if (s.find('.') != std::string::npos) {
+            while (!s.empty() && s.back() == '0') s.pop_back();
+            if (!s.empty() && s.back() == '.') s.pop_back();
+        }
+        return s;
+    };
+    return fmt(cenMin) + "_" + fmt(cenMax);
+}
+
+inline bool IsFitFixEnabledForCentrality(const IntegralYieldConfig &cfg,
+                                         double cenMin,
+                                         double cenMax) {
+    const std::string target = NormalizeCentralityConfigKey(FormatCentralityConfigKey(cenMin, cenMax));
+    for (const auto &kv : cfg.fitFixByCentrality) {
+        if (NormalizeCentralityConfigKey(kv.first) == target) return kv.second;
+    }
+    return false;
+}
+
+inline std::map<std::string, SpectrumFunctionConfig> ResolveCentralityFitFunctionParameters(
+    const IntegralYieldConfig &cfg,
+    double cenMin,
+    double cenMax) {
+    std::map<std::string, SpectrumFunctionConfig> out = cfg.fitFuncParameters;
+    const std::string target = NormalizeCentralityConfigKey(FormatCentralityConfigKey(cenMin, cenMax));
+    for (const auto &centKv : cfg.fitFuncParametersByCentrality) {
+        if (NormalizeCentralityConfigKey(centKv.first) != target) continue;
+        for (const auto &funcKv : centKv.second) out[funcKv.first] = funcKv.second;
+        break;
+    }
+    if (!IsFitFixEnabledForCentrality(cfg, cenMin, cenMax)) {
+        for (auto &kv : out) kv.second.fixed.clear();
+    }
+    return out;
+}
+
+inline std::vector<std::string> ResolveCentralityFitFunctionCandidates(
+    const IntegralYieldConfig &cfg,
+    double cenMin,
+    double cenMax) {
+    const std::string target = NormalizeCentralityConfigKey(FormatCentralityConfigKey(cenMin, cenMax));
+    for (const auto &kv : cfg.fitFuncCandidatesByCentrality) {
+        if (NormalizeCentralityConfigKey(kv.first) == target && !kv.second.empty()) return kv.second;
+    }
+    return cfg.fitFuncCandidates;
+}
+
+inline std::string ResolveCentralityNominalFitFunction(
+    const IntegralYieldConfig &cfg,
+    double cenMin,
+    double cenMax) {
+    const std::string target = NormalizeCentralityConfigKey(FormatCentralityConfigKey(cenMin, cenMax));
+    for (const auto &kv : cfg.nominalFitFuncByCentrality) {
+        if (NormalizeCentralityConfigKey(kv.first) == target && !kv.second.empty()) return kv.second;
+    }
+    return cfg.nominalFitFunc;
 }
 
 inline int GetCanonicalParameterIndex(const std::string &funcName, int iCanonical) {
@@ -489,6 +645,9 @@ inline int GetCanonicalParameterIndex(const std::string &funcName, int iCanonica
         // canonical: beta, T, q, norm, ymax; AliPWGFunc: mass, beta, T, q, norm, ymax
         return (iCanonical >= 0 && iCanonical < 5) ? iCanonical + 1 : -1;
     }
+    if (funcName == "fLogPolyPt" || funcName == "fLogPolyMt") {
+        return (iCanonical >= 0 && iCanonical < 3) ? iCanonical : -1;
+    }
     return iCanonical;
 }
 
@@ -509,6 +668,10 @@ inline std::string GetCanonicalParameterName(const std::string &funcName, int iC
         static const char *names[] = {"#beta", "T", "q", "Norm", "ymax"};
         return (iCanonical >= 0 && iCanonical < 5) ? names[iCanonical] : Form("p%d", iCanonical);
     }
+    if (funcName == "fLogPolyPt" || funcName == "fLogPolyMt") {
+        static const char *names[] = {"a_{0}", "a_{1}", "a_{2}"};
+        return (iCanonical >= 0 && iCanonical < 3) ? names[iCanonical] : Form("p%d", iCanonical);
+    }
     return Form("p%d", iCanonical);
 }
 
@@ -519,14 +682,14 @@ inline std::vector<std::string> BuildSpectrumParameterTextLines(
     std::vector<std::string> lines;
     if (!f) return lines;
     const SpectrumFunctionConfig parCfg = ResolveSpectrumFunctionConfig(funcName, configuredPars);
-    const size_t nCanon = std::max(parCfg.initial.size(), parCfg.limits.size());
+    const size_t nCanon = std::max({parCfg.initial.size(), parCfg.limits.size(), parCfg.fixed.size()});
     lines.push_back(funcName);
     for (size_t i = 0; i < nCanon; ++i) {
         const int ip = GetCanonicalParameterIndex(funcName, static_cast<int>(i));
         if (ip < 0 || ip >= f->GetNpar()) continue;
         const double value = f->GetParameter(ip);
-        std::string range = "free";
-        if (i < parCfg.limits.size() && parCfg.limits[i].second > parCfg.limits[i].first) {
+        std::string range = (i < parCfg.fixed.size() && parCfg.fixed[i]) ? "fixed" : "free";
+        if (range != "fixed" && i < parCfg.limits.size() && parCfg.limits[i].second > parCfg.limits[i].first) {
             range = Form("[%.3g, %.3g]", parCfg.limits[i].first, parCfg.limits[i].second);
         }
         lines.push_back(Form("  %s = %.4g, range %s",
@@ -551,7 +714,7 @@ inline std::vector<IntegralFitParameterRow> BuildIntegralFitParameterRows(
     if (!f) return rows;
 
     const SpectrumFunctionConfig parCfg = ResolveSpectrumFunctionConfig(funcName, configuredPars);
-    const size_t nCanon = std::max(parCfg.initial.size(), parCfg.limits.size());
+    const size_t nCanon = std::max({parCfg.initial.size(), parCfg.limits.size(), parCfg.fixed.size()});
     const double chi2 = f->GetChisquare();
     const int ndf = f->GetNDF();
     const double chi2Ndf = ndf > 0 ? chi2 / static_cast<double>(ndf) : std::numeric_limits<double>::infinity();
@@ -564,8 +727,9 @@ inline std::vector<IntegralFitParameterRow> BuildIntegralFitParameterRows(
         row.parameterName = GetCanonicalParameterName(funcName, static_cast<int>(i));
         row.parameterIndex = ip;
         row.value = f->GetParameter(ip);
-        row.error = f->GetParError(ip);
-        if (!(std::isfinite(row.error) && row.error > 0.0) && fitResult && fitResult->Get()) {
+        row.isFixed = i < parCfg.fixed.size() && parCfg.fixed[i];
+        row.error = row.isFixed ? 0.0 : f->GetParError(ip);
+        if (!row.isFixed && !(std::isfinite(row.error) && row.error > 0.0) && fitResult && fitResult->Get()) {
             const double fitErr = (*fitResult)->ParError(ip);
             if (std::isfinite(fitErr) && fitErr > 0.0) row.error = fitErr;
             if (!(std::isfinite(row.error) && row.error > 0.0)) {
@@ -576,7 +740,7 @@ inline std::vector<IntegralFitParameterRow> BuildIntegralFitParameterRows(
                 }
             }
         }
-        if (!(std::isfinite(row.error) && row.error > 0.0)) {
+        if (!row.isFixed && !(std::isfinite(row.error) && row.error > 0.0)) {
             row.error = ParameterFallbackSigma(f, ip);
         }
         if (i < parCfg.limits.size() && parCfg.limits[i].second > parCfg.limits[i].first) {
@@ -609,6 +773,13 @@ inline void ApplySpectrumFunctionConfig(TF1 *f,
         const auto &lim = cfg.limits[i];
         if (lim.second > lim.first) f->SetParLimits(ip, lim.first, lim.second);
     }
+    for (size_t i = 0; i < cfg.fixed.size(); ++i) {
+        if (!cfg.fixed[i]) continue;
+        const int ip = GetCanonicalParameterIndex(funcName, static_cast<int>(i));
+        if (ip < 0 || ip >= f->GetNpar()) continue;
+        const double value = (i < cfg.initial.size()) ? cfg.initial[i] : f->GetParameter(ip);
+        f->FixParameter(ip, value);
+    }
 }
 
 inline int GetCanonicalNormIndex(const std::string &funcName) {
@@ -616,6 +787,7 @@ inline int GetCanonicalNormIndex(const std::string &funcName) {
     if (funcName == "fLevi") return 2;
     if (funcName == "fBoltzmann" || funcName == "fPtExp") return 1;
     if (funcName == "fTsallisBW") return 3;
+    if (funcName == "fLogPolyPt" || funcName == "fLogPolyMt") return 0;
     return -1;
 }
 
@@ -636,7 +808,8 @@ inline void SeedSpectrumNormFromHistogram(TH1D *h,
     if (iCanonNorm < 0 || iParNorm < 0 || iParNorm >= f->GetNpar()) return;
 
     const double oldNorm = f->GetParameter(iParNorm);
-    f->SetParameter(iParNorm, 1.0);
+    const bool logNorm = (funcName == "fLogPolyPt" || funcName == "fLogPolyMt");
+    f->SetParameter(iParNorm, logNorm ? 0.0 : 1.0);
     double num = 0.0;
     double den = 0.0;
     for (int ib = 1; ib <= h->GetNbinsX(); ++ib) {
@@ -653,7 +826,11 @@ inline void SeedSpectrumNormFromHistogram(TH1D *h,
     }
 
     double seededNorm = (den > 0.0) ? (num / den) : oldNorm;
-    if (!std::isfinite(seededNorm) || seededNorm <= 0.0) seededNorm = oldNorm;
+    if (logNorm) {
+        seededNorm = (std::isfinite(seededNorm) && seededNorm > 0.0) ? std::log(seededNorm) : oldNorm;
+    } else if (!std::isfinite(seededNorm) || seededNorm <= 0.0) {
+        seededNorm = oldNorm;
+    }
     if (static_cast<size_t>(iCanonNorm) < cfg.limits.size()) {
         seededNorm = ClampToSpectrumLimit(seededNorm, cfg.limits[static_cast<size_t>(iCanonNorm)]);
     }
@@ -686,6 +863,10 @@ inline std::vector<std::vector<double>> BuildSpectrumSeedGrid(const std::string 
                 for (double q : {1.0005, 1.002, 1.005, 1.010, 1.030, 1.080})
                     for (double ymax : {0.01, 0.03, 0.10, 0.50})
                         seeds.push_back({beta, temp, q, 1.0, ymax});
+    } else if (funcName == "fLogPolyPt" || funcName == "fLogPolyMt") {
+        for (double a1 : {-2.5, -1.8, -1.2, -0.8, -0.4, 0.0})
+            for (double a2 : {-0.40, -0.20, -0.08, 0.0, 0.05})
+                seeds.push_back({-12.0, a1, a2});
     }
     return seeds;
 }
@@ -709,6 +890,8 @@ inline void FixCanonicalSpectrumParameter(TF1 *f, const std::string &funcName, i
     if (ip >= 0 && ip < f->GetNpar()) f->FixParameter(ip, f->GetParameter(ip));
 }
 
+inline bool IsParameterFixedByLimits(TF1 *f, int ip);
+
 inline void StabilizeSparseSpectrumFit(TH1D *h,
                                        TF1 *f,
                                        const std::string &funcName,
@@ -717,11 +900,25 @@ inline void StabilizeSparseSpectrumFit(TH1D *h,
     const int nPoints = CountPositiveSpectrumPoints(h, fitMin, fitMax);
     if (nPoints <= 0 || !f) return;
     const int maxFree = std::max(1, nPoints - 1);
-    int nFree = static_cast<int>(ResolveSpectrumFunctionConfig(funcName, {}).initial.size());
-    if (nFree <= 0) nFree = f->GetNpar();
+    const SpectrumFunctionConfig parCfg = ResolveSpectrumFunctionConfig(funcName, {});
+    const int nCanonical = static_cast<int>(parCfg.initial.size());
+    int nFree = 0;
+    if (nCanonical > 0) {
+        for (int iCanonical = 0; iCanonical < nCanonical; ++iCanonical) {
+            const int ip = GetCanonicalParameterIndex(funcName, iCanonical);
+            if (ip >= 0 && ip < f->GetNpar() && !IsParameterFixedByLimits(f, ip)) ++nFree;
+        }
+    } else {
+        for (int ip = 0; ip < f->GetNpar(); ++ip) {
+            if (!IsParameterFixedByLimits(f, ip)) ++nFree;
+        }
+    }
+    if (nFree <= 0) return;
 
     auto fixAndCount = [&](int iCanonical) {
         if (nFree <= maxFree) return;
+        const int ip = GetCanonicalParameterIndex(funcName, iCanonical);
+        if (ip < 0 || ip >= f->GetNpar() || IsParameterFixedByLimits(f, ip)) return;
         FixCanonicalSpectrumParameter(f, funcName, iCanonical);
         --nFree;
     };
@@ -767,6 +964,31 @@ inline std::unique_ptr<TF1> BuildSpectrumFunction(const std::string &funcName,
     } else if (funcName == "fTsallisBW") {
         raw = helper->GetTsallisBW(mass, 0.76, 0.16, 1.003, 1.0, 0.03,
                                    ("fTsallisBW_" + nameTag).c_str());
+    } else if (funcName == "fLogPolyPt") {
+        raw = new TF1(("fLogPolyPt_" + nameTag).c_str(),
+                      [](double *x, double *p) {
+                          const double pt = x[0];
+                          if (pt <= 0.0) return 0.0;
+                          const double expo = p[0] + p[1] * pt + p[2] * pt * pt;
+                          return pt * std::exp(expo);
+                      },
+                      0.0,
+                      10.0,
+                      3);
+        raw->SetParNames("a0", "a1", "a2");
+    } else if (funcName == "fLogPolyMt") {
+        raw = new TF1(("fLogPolyMt_" + nameTag).c_str(),
+                      [mass](double *x, double *p) {
+                          const double pt = x[0];
+                          if (pt <= 0.0) return 0.0;
+                          const double mtMinusM = std::sqrt(pt * pt + mass * mass) - mass;
+                          const double expo = p[0] + p[1] * mtMinusM + p[2] * mtMinusM * mtMinusM;
+                          return pt * std::exp(expo);
+                      },
+                      0.0,
+                      10.0,
+                      3);
+        raw->SetParNames("a0", "a1", "a2");
     }
 
     if (!raw) {
@@ -860,6 +1082,15 @@ inline std::unique_ptr<TF1> FitSpectrumFunctionBestSeed(
     for (const auto &seed : BuildSpectrumSeedGrid(funcName, baseCfg.initial)) {
         SpectrumFunctionConfig seedCfg = baseCfg;
         seedCfg.initial = seed;
+        for (size_t i = 0; i < seedCfg.initial.size() && i < seedCfg.limits.size(); ++i) {
+            seedCfg.initial[i] = ClampToSpectrumLimit(seedCfg.initial[i], seedCfg.limits[i]);
+        }
+        for (size_t i = 0; i < seedCfg.fixed.size() && i < baseCfg.initial.size(); ++i) {
+            if (seedCfg.fixed[i]) {
+                if (i >= seedCfg.initial.size()) seedCfg.initial.resize(i + 1, 0.0);
+                seedCfg.initial[i] = baseCfg.initial[i];
+            }
+        }
         std::map<std::string, SpectrumFunctionConfig> seedMap;
         seedMap[funcName] = seedCfg;
         auto f = BuildSpectrumFunction(funcName, tag + Form("_seed%d", iSeed), seedMap);
@@ -901,16 +1132,6 @@ inline double IntegrateFunction(TF1 *f, double xMin, double xMax) {
         sum += w * y;
     }
     return sum * h / 3.0;
-}
-
-inline double ComputeRmsAroundReference(const std::vector<double> &vals, double ref) {
-    if (vals.empty()) return 0.0;
-    double sum2 = 0.0;
-    for (double v : vals) {
-        const double d = v - ref;
-        sum2 += d * d;
-    }
-    return std::sqrt(sum2 / static_cast<double>(vals.size()));
 }
 
 inline double ExtractAbsorptionMultiplier(const std::string &label) {
@@ -959,6 +1180,14 @@ inline bool IsNearActiveParLimit(TF1 *f, int ip) {
     const double value = f->GetParameter(ip);
     const double tol = std::max(1e-9, 1e-3 * (hi - lo));
     return std::abs(value - lo) < tol || std::abs(value - hi) < tol;
+}
+
+inline bool IsParameterFixedByLimits(TF1 *f, int ip) {
+    if (!f || ip < 0 || ip >= f->GetNpar()) return false;
+    double lo = 0.0;
+    double hi = 0.0;
+    f->GetParLimits(ip, lo, hi);
+    return lo == hi && lo != 0.0;
 }
 
 inline double ParameterFallbackSigma(TF1 *f, int ip) {
@@ -1032,10 +1261,18 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
     double measuredMin = histMin;
     double measuredMax = histMax;
     GetMeasuredRange(h, measuredEdges, measuredMin, measuredMax);
+    const auto activeFitFuncParameters =
+        ResolveCentralityFitFunctionParameters(cfg, input.cenMin, input.cenMax);
+    const auto activeFitFuncCandidates =
+        ResolveCentralityFitFunctionCandidates(cfg, input.cenMin, input.cenMax);
+    const std::string activeNominalFitFunc =
+        ResolveCentralityNominalFitFunction(cfg, input.cenMin, input.cenMax);
+    const bool fixEnabled = IsFitFixEnabledForCentrality(cfg, input.cenMin, input.cenMax);
 
     std::cout << "[Info] IntegralYield: start group " << input.groupTag
               << " (cen " << input.cenMin << "-" << input.cenMax << "%)"
-              << ", nominal=" << cfg.nominalFitFunc
+              << ", nominal=" << activeNominalFitFunc
+              << ", fixedPars=" << (fixEnabled ? "enabled" : "disabled")
               << ", doSystematics=" << (cfg.doSystematics ? "true" : "false")
               << ", nTrails=" << cfg.nTrailsForIntegralSyst
               << ", fitRange=[" << fitMin << "," << fitMax << "]"
@@ -1044,13 +1281,13 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
               << std::endl;
 
     std::vector<std::string> nominalTryList;
-    nominalTryList.push_back(cfg.nominalFitFunc);
-    for (const auto &name : cfg.fitFuncCandidates) {
+    nominalTryList.push_back(activeNominalFitFunc);
+    for (const auto &name : activeFitFuncCandidates) {
         if (std::find(nominalTryList.begin(), nominalTryList.end(), name) == nominalTryList.end()) {
             nominalTryList.push_back(name);
         }
     }
-    const std::vector<std::string> defaults = {"fBGBW", "fLevi", "fBoltzmann", "fPtExp", "fTsallisBW"};
+    const std::vector<std::string> defaults = {"fBGBW", "fLevi", "fBoltzmann", "fPtExp", "fTsallisBW", "fLogPolyPt", "fLogPolyMt"};
     for (const auto &name : defaults) {
         if (std::find(nominalTryList.begin(), nominalTryList.end(), name) == nominalTryList.end()) {
             nominalTryList.push_back(name);
@@ -1065,7 +1302,7 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
         auto fTry = FitSpectrumFunctionBestSeed(h,
                                                 tryName,
                                                 input.groupTag + "_nominal_" + tryName,
-                                                cfg.fitFuncParameters,
+                                                activeFitFuncParameters,
                                                 fitMin,
                                                 fitMax,
                                                 &fitRes,
@@ -1088,17 +1325,39 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
     }
 
     const double yNom = ComputeHybridIntegral(h, fNom.get(), cfg, measuredEdges);
+    const double yMeasured = ComputeHistogramIntegral(h);
+    const double yExtrap = ComputeExtrapolatedIntegral(fNom.get(), h, cfg, measuredEdges);
     const double yStatHist = ComputeHistogramIntegralError(h);
     std::vector<std::pair<double, double>> statFitRanges = BuildExtrapolationRanges(h, cfg, measuredEdges);
-    const double yStatFit = ComputeFitIntegralErrorFromCovariance(fNom.get(),
-                                                                  nominalFitResult,
-                                                                  statFitRanges);
+    double yStatFit = ComputeFitIntegralErrorFromCovariance(fNom.get(),
+                                                            nominalFitResult,
+                                                            statFitRanges);
+    const double yAbs = std::abs(yNom);
+    const double yExtrapAbs = std::abs(yExtrap);
+    const double relMeasuredStat = (std::abs(yMeasured) > 0.0) ? yStatHist / std::abs(yMeasured) : 0.0;
+    const double yStatFitFallback = yExtrapAbs * relMeasuredStat;
+    const bool rejectFitCovStat =
+        std::isfinite(yStatFit) &&
+        ((cfg.statFitCovMaxFraction > 0.0 && yAbs > 0.0 && yStatFit > cfg.statFitCovMaxFraction * yAbs) ||
+         (yExtrapAbs > 0.0 && yStatFit > yExtrapAbs));
+    const bool invalidFitCovStat = !std::isfinite(yStatFit) || yStatFit < 0.0;
+    std::string statFitMethod = "fitCov";
+    if (invalidFitCovStat || rejectFitCovStat) {
+        yStatFit = yStatFitFallback;
+        statFitMethod = invalidFitCovStat ? "measuredRelFallback(invalidCov)"
+                                          : "measuredRelFallback(unstableCov)";
+    }
     const double yStat = std::hypot(yStatHist, yStatFit);
     std::cout << "[Info] IntegralYield: stat error for " << input.groupTag
               << " hist=" << yStatHist
-              << ", fitCov=" << yStatFit
+              << ", extrapStat=" << yStatFit
+              << ", extrapStatMethod=" << statFitMethod
+              << ", fitCovMaxFraction=" << cfg.statFitCovMaxFraction
+              << ", measured=" << yMeasured
+              << ", extrapolated=" << yExtrap
               << ", used=" << yStat
-              << " (measured bins summed directly; fit covariance propagated only outside measured pT range)" << std::endl;
+              << " (measured bins summed directly; extrapolated stat uses fit covariance only when stable)"
+              << std::endl;
 
     out.value = yNom;
     out.statErr = yStat;
@@ -1106,7 +1365,7 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
     {
         auto rows = BuildIntegralFitParameterRows(usedNominalName,
                                                   out.fNominal.get(),
-                                                  cfg.fitFuncParameters,
+                                                  activeFitFuncParameters,
                                                   &nominalFitResult,
                                                   true,
                                                   false,
@@ -1117,8 +1376,9 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
     }
 
     // Fit-function systematic and fit comparison canvas.
-    std::vector<double> fitFuncIntegrals;
-    std::vector<std::string> fitNames = cfg.doSystematics ? cfg.fitFuncCandidates
+    std::vector<double> fitFuncIntegrals{yNom};
+    int nAcceptedNonNominalFitFuncs = 0;
+    std::vector<std::string> fitNames = cfg.doSystematics ? activeFitFuncCandidates
                                                           : std::vector<std::string>{usedNominalName};
     if (fitNames.empty()) fitNames.push_back(usedNominalName);
 
@@ -1202,7 +1462,9 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
         {"fLevi", kAzure + 2},
         {"fBoltzmann", kGreen + 2},
         {"fPtExp", kMagenta + 2},
-        {"fTsallisBW", kViolet + 1}};
+        {"fTsallisBW", kViolet + 1},
+        {"fLogPolyPt", kOrange + 7},
+        {"fLogPolyMt", kRed + 3}};
     const double nominalFitFuncChi2Ndf = ComputeSpectrumChi2Ndf(h, out.fNominal.get(), fitMin, fitMax);
     const double fitFuncMaxChi2Ndf =
         (std::isfinite(cfg.fitFuncMaxChi2Ndf) && cfg.fitFuncMaxChi2Ndf > 0.0)
@@ -1217,7 +1479,7 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
         auto f = FitSpectrumFunctionBestSeed(h,
                                              name,
                                              input.groupTag + "_" + name,
-                                             cfg.fitFuncParameters,
+                                             activeFitFuncParameters,
                                              fitMin,
                                              fitMax,
                                              &fitRes,
@@ -1276,11 +1538,11 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
         if (rejectedByChi2 || rejectedByLowPt) legLabel += " (rejected)";
         leg.AddEntry(curveGraphs.back().get(), legLabel.c_str(), "l");
         curveLabels.push_back(legLabel);
-        parameterTextBlocks.push_back(BuildSpectrumParameterTextLines(name, f.get(), cfg.fitFuncParameters));
+        parameterTextBlocks.push_back(BuildSpectrumParameterTextLines(name, f.get(), activeFitFuncParameters));
         if (name != usedNominalName) {
             auto rows = BuildIntegralFitParameterRows(name,
                                                       f.get(),
-                                                      cfg.fitFuncParameters,
+                                                      activeFitFuncParameters,
                                                       &fitRes,
                                                       false,
                                                       rejectedByChi2,
@@ -1290,19 +1552,29 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
                                         std::make_move_iterator(rows.end()));
         }
         const double yi = ComputeHybridIntegral(h, f.get(), cfg, measuredEdges);
-        if (name != usedNominalName && !rejectedByChi2 && !rejectedByLowPt) fitFuncIntegrals.push_back(yi);
+        if (name != usedNominalName && !rejectedByChi2 && !rejectedByLowPt) {
+            fitFuncIntegrals.push_back(yi);
+            ++nAcceptedNonNominalFitFuncs;
+        }
         out.fFitCandidates.push_back(std::move(f));
     }
     leg.DrawClone();
     auto fitText = MakeIntegralLabelBox(input, cfg, 0.16, 0.68, 0.50, 0.90);
     fitText->DrawClone();
-    out.systFitFunction = ComputeRmsAroundReference(fitFuncIntegrals, yNom);
-    if (cfg.doSystematics && fitFuncIntegrals.empty() && fitNames.size() > 1) {
+    const auto [fitFuncMeanYield, fitFuncRmsYield] = ComputeMeanRms(fitFuncIntegrals);
+    out.systFitFunction = fitFuncRmsYield;
+    if (cfg.doSystematics && nAcceptedNonNominalFitFuncs <= 0 && fitNames.size() > 1) {
         out.systFitFunction = std::abs(yNom) * std::max(0.0, cfg.fitFuncFallbackFraction);
         chi2Lines.push_back(Form("Fit-func fallback syst = %.1f%%", 100.0 * cfg.fitFuncFallbackFraction));
         std::cout << "[Warn] IntegralYield: no accepted non-nominal fit functions in "
                   << input.groupTag << ", use fallback fit-function systematic "
                   << 100.0 * cfg.fitFuncFallbackFraction << "%" << std::endl;
+    } else if (cfg.doSystematics) {
+        chi2Lines.push_back(Form("Fit-func syst: RMS(all yields)=%.3e", out.systFitFunction));
+        std::cout << "[Info] IntegralYield: fit-function systematic for " << input.groupTag
+                  << " uses RMS of " << fitFuncIntegrals.size()
+                  << " integrated yields, mean=" << fitFuncMeanYield
+                  << ", rms=" << out.systFitFunction << std::endl;
     }
     auto chi2Text = std::make_unique<TPaveText>(0.16, 0.46, 0.50, 0.66, "NDC");
     chi2Text->SetBorderSize(0);
@@ -1391,16 +1663,13 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
         if (nPar > 0) {
             TMatrixDSym cov = nominalFitResult->GetCovarianceMatrix();
             const SpectrumFunctionConfig nominalParCfg =
-                ResolveSpectrumFunctionConfig(usedNominalName, cfg.fitFuncParameters);
+                ResolveSpectrumFunctionConfig(usedNominalName, activeFitFuncParameters);
             const int normParIndex =
                 GetCanonicalParameterIndex(usedNominalName, GetCanonicalNormIndex(usedNominalName));
             std::vector<int> freePars;
             for (int ip = 0; ip < nPar; ++ip) {
                 if (ip == normParIndex) continue;
-                double lo = 0.0;
-                double hi = 0.0;
-                out.fNominal->GetParLimits(ip, lo, hi);
-                const bool fixedPar = lo == hi && lo != 0.0;
+                const bool fixedPar = IsParameterFixedByLimits(out.fNominal.get(), ip);
                 const double tf1Err = out.fNominal->GetParError(ip);
                 const double fitErr = nominalFitResult->ParError(ip);
                 const double covErr = (ip < cov.GetNrows() && cov(ip, ip) > 0.0) ? std::sqrt(cov(ip, ip)) : 0.0;
@@ -1679,7 +1948,9 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
                   << input.groupTag << " because execution.do_systematics=false" << std::endl;
     }
 
-    // Absorption systematic: each variant rescales all bins coherently, then refit.
+    // Absorption systematic: each variant rescales all measured bins coherently.
+    // Keep the nominal extrapolation shape fixed so this source does not absorb
+    // fit-function/extrapolation instabilities from low-statistics spectra.
     struct AbsorptionScanPoint {
         double multiplier;
         std::string label;
@@ -1687,50 +1958,16 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
     };
     std::vector<AbsorptionScanPoint> absorptionScanPoints;
     if (cfg.doSystematics) {
-        out.cAbsorption = std::make_unique<TCanvas>(("c_integral_absorption_" + input.groupTag).c_str(), "", 900, 700);
-        out.cAbsorption->cd();
-        out.cAbsorption->SetLogy(true);
-        h->SetLineColor(kBlack);
-        h->SetMarkerColor(kBlack);
-        h->SetMarkerStyle(20);
-        h->Draw("E1");
-        TLegend legAb(0.46, 0.60, 0.90, 0.90);
-        legAb.SetBorderSize(0);
-        legAb.SetFillStyle(0);
-        legAb.AddEntry(h, "Std corrected counts", "lep");
-
-        int abColor = kMagenta + 1;
         for (size_t i = 0; i < input.absorptionVariants.size(); ++i) {
             TH1D *hv = input.absorptionVariants[i];
             if (!hv) continue;
-            auto f = BuildSpectrumFunction(usedNominalName, input.groupTag + "_abso_" + std::to_string(i), cfg.fitFuncParameters);
-            if (!f) continue;
-            if (!FitHistogramWithFunction(hv, f.get(), fitMin, fitMax)) continue;
-            hv->SetMarkerColor(abColor);
-            hv->SetLineColor(abColor);
-            hv->SetMarkerStyle(24 + static_cast<int>(i % 4));
-            hv->SetLineWidth(2);
-            f->SetLineColor(abColor);
-            f->SetLineStyle(static_cast<int>(i % 3) + 1);
-            f->SetLineWidth(2);
-            hv->DrawCopy("E1 SAME");
-            f->DrawCopy("SAME");
             const std::string label = (i < input.absorptionVariantLabels.size() && !input.absorptionVariantLabels[i].empty())
                                           ? input.absorptionVariantLabels[i]
                                           : ("var_" + std::to_string(i));
-            legAb.AddEntry(f.get(), (label + " " + usedNominalName).c_str(), "l");
             absorptionScanPoints.push_back(AbsorptionScanPoint{
                 ExtractAbsorptionMultiplier(label),
                 label,
-                ComputeHybridIntegral(hv, f.get(), cfg, measuredEdges)});
-            abColor += 2;
-        }
-        legAb.Draw();
-        {
-            TLatex lab;
-            lab.SetNDC();
-            lab.SetTextSize(0.035);
-            lab.DrawLatex(0.15, 0.88, Form("%s, cen %.0f-%.0f%%", input.groupTag.c_str(), input.cenMin, input.cenMax));
+                ComputeHybridIntegral(hv, fNom.get(), cfg, measuredEdges)});
         }
     } else {
         out.systAbsorption = 0.0;
@@ -1788,7 +2025,7 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
                     }
                 }
             }
-            auto f = BuildSpectrumFunction(usedNominalName, input.groupTag + "_trail_" + std::to_string(it), cfg.fitFuncParameters);
+            auto f = BuildSpectrumFunction(usedNominalName, input.groupTag + "_trail_" + std::to_string(it), activeFitFuncParameters);
             if (!f) continue;
             SeedFitParametersFromReference(f.get(), out.fNominal.get());
             if (!FitHistogramWithFunction(hTrial.get(), f.get(), fitMin, fitMax)) continue;
@@ -1809,11 +2046,42 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
 
     if (!trailIntegrals.empty()) {
         const auto [trailRawMean, trailRawRms] = ComputeMeanRms(trailIntegrals);
-        auto [vMin, vMax] = ComputeRobustDisplayRange(trailIntegrals,
-                                                       yNom,
-                                                       std::max(1e-12, yStat),
-                                                       0.01,
-                                                       0.99);
+        const double trailQuantileSigma = ComputeQuantileHalfWidth(trailIntegrals, 0.16, 0.84);
+        double trailWindowSigma = trailQuantileSigma;
+        if (!(std::isfinite(trailWindowSigma) && trailWindowSigma > 0.0)) {
+            trailWindowSigma = trailRawRms;
+        }
+        if (!(std::isfinite(trailWindowSigma) && trailWindowSigma > 0.0)) {
+            trailWindowSigma = std::max({std::abs(yStat), 0.02 * std::abs(yNom), 1e-12});
+        }
+        const double trailWindowMin = yNom - 5.0 * trailWindowSigma;
+        const double trailWindowMax = yNom + 5.0 * trailWindowSigma;
+        std::vector<double> trailIntegralsForRms;
+        trailIntegralsForRms.reserve(trailIntegrals.size());
+        int trailRejectedByWindow = 0;
+        for (double v : trailIntegrals) {
+            if (!std::isfinite(v)) continue;
+            if (v >= trailWindowMin && v <= trailWindowMax) {
+                trailIntegralsForRms.push_back(v);
+            } else {
+                ++trailRejectedByWindow;
+            }
+        }
+        if (trailIntegralsForRms.empty()) {
+            trailIntegralsForRms = trailIntegrals;
+            trailRejectedByWindow = 0;
+        }
+        const auto [trailShownMean, trailShownRms] = ComputeMeanRms(trailIntegralsForRms);
+        double vMin = std::max(0.0, trailWindowMin);
+        double vMax = trailWindowMax;
+        if (!(vMax > vMin)) {
+            std::tie(vMin, vMax) = ComputeRobustDisplayRange(trailIntegralsForRms,
+                                                             yNom,
+                                                             std::max(1e-12, yStat),
+                                                             0.01,
+                                                             0.99);
+            vMin = std::max(0.0, vMin);
+        }
         out.hIntegralTrailDist = std::make_unique<TH1D>(("h_integral_trails_" + input.groupTag).c_str(),
                                                         ";Integrated yield;Entries",
                                                         60,
@@ -1821,7 +2089,8 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
                                                         vMax);
         out.hIntegralTrailDist->SetDirectory(nullptr);
         out.hIntegralTrailDist->SetStats(false);
-        for (double v : trailIntegrals) out.hIntegralTrailDist->Fill(v);
+        out.hIntegralTrailDist->GetXaxis()->SetRangeUser(vMin, vMax);
+        for (double v : trailIntegralsForRms) out.hIntegralTrailDist->Fill(v);
 
         out.cTrails = std::make_unique<TCanvas>(("c_integral_trails_" + input.groupTag).c_str(), "", 900, 700);
         out.cTrails->cd();
@@ -1835,7 +2104,7 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
         lineStdTrail->SetLineWidth(2);
         TBox *bandStdTrail = nullptr;
         if (yStat > 0.0) {
-            bandStdTrail = new TBox(yNom - yStat, 0.0, yNom + yStat, yTopTrail);
+            bandStdTrail = new TBox(std::max(0.0, yNom - yStat), 0.0, yNom + yStat, yTopTrail);
             bandStdTrail->SetFillStyle(3004);
             bandStdTrail->SetFillColor(kOrange - 2);
             bandStdTrail->SetLineColor(kRed + 2);
@@ -1864,7 +2133,7 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
             gausMeanTrail = fgausTrail->GetParameter(1);
             gausSigmaTrail = std::abs(fgausTrail->GetParameter(2));
             if (std::isfinite(gausMeanTrail) && std::isfinite(gausSigmaTrail) && gausSigmaTrail > 0.0) {
-                bandGaussTrail = new TBox(gausMeanTrail - gausSigmaTrail, 0.0, gausMeanTrail + gausSigmaTrail, yTopTrail);
+                bandGaussTrail = new TBox(std::max(0.0, gausMeanTrail - gausSigmaTrail), 0.0, gausMeanTrail + gausSigmaTrail, yTopTrail);
                 bandGaussTrail->SetFillStyle(3005);
                 bandGaussTrail->SetFillColor(kGreen + 1);
                 bandGaussTrail->SetLineColor(kGreen + 3);
@@ -1909,12 +2178,14 @@ inline IntegralYieldResult ComputeIntegralYield(const IntegralYieldInput &input,
         paveTrail->AddText(Form("Raw Mean = %.3e", trailRawMean));
         paveTrail->AddText(Form("Shown RMS = %.3e", out.hIntegralTrailDist->GetRMS()));
         paveTrail->AddText(Form("Raw RMS = %.3e", trailRawRms));
+        paveTrail->AddText(Form("Window: std #pm 5#sigma, #sigma=%.3e", trailWindowSigma));
+        paveTrail->AddText(Form("Window rejected = %d/%zu", trailRejectedByWindow, trailIntegrals.size()));
         paveTrail->DrawClone();
 
         if (gausAcceptedTrail && std::isfinite(gausSigmaTrail) && gausSigmaTrail > 0.0) {
             out.systTrails = gausSigmaTrail;
         } else {
-            out.systTrails = trailRawRms;
+            out.systTrails = trailShownRms;
         }
     }
 

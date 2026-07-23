@@ -213,15 +213,14 @@ void SpectrumVsRun2Lite() {
     std::string outputDir = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/PlotingScrips/SpectrumvsRun2";
     gSystem->mkdir(outputDir.c_str(), true);
     const std::string mcTag = "";
-    const std::string saveSuffixName = "NCrossedRowsCompare";
+    const std::string saveSuffixName = "PeriodCompare";
     std::vector<LiteSpec> specs = {
         {
           "0_10",
           {
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum_no_itscut/both/spectrum.root",
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_V0s_HadronPID/bdt_spectrum/both/spectrum.root"
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC24ar_pass3_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC25_PbPb_pass1_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root"
           },
           "/Users/zhengqingwang/alice/data/h3l_spec_run2/h3l_0_10.root",
           "Graph1D_y1",
@@ -230,19 +229,17 @@ void SpectrumVsRun2Lite() {
           "(Anti)hypertriton spectrum in 0-10% V0M centrality class",
           "BlastWave_H3L_0_10",
           {
-            //"23_pass4_CustomV0s_HadronPID",
-            "23_pass5_CustomV0s_HadronPID",
-            //"23_pass5_CustomV0s_HadronPID_TPCNcls",
-            //"23_pass5_V0s_HadronPID_TPCNCls",
+            "LHC23_PbPb_pass5",
+            "LHC24ar_pass3",
+            "LHC25_PbPb_pass1"
           } 
         },
         {
           "10_30",
           {
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum_no_itscut/both/spectrum.root",
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_V0s_HadronPID/bdt_spectrum/both/spectrum.root"
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC24ar_pass3_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC25_PbPb_pass1_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root"
           },         
           "/Users/zhengqingwang/alice/data/h3l_spec_run2/h3l_10_30.root",
           "Graph1D_y1",
@@ -251,19 +248,17 @@ void SpectrumVsRun2Lite() {
           "(Anti)hypertriton spectrum in 10-30% V0M centrality class",
           "BlastWave_H3L_10_30",
           {
-            //"23_pass4_CustomV0s_HadronPID",
-            "23_pass5_CustomV0s_HadronPID",
-            //"23_pass5_CustomV0s_HadronPID_TPCNcls",
-            //"23_pass5_V0s_HadronPID_TPCNcls"
+            "LHC23_PbPb_pass5",
+            "LHC24ar_pass3",
+            "LHC25_PbPb_pass1"
           }
         },
         {
           "30_50",
           {
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum_no_itscut/both/spectrum.root",
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_V0s_HadronPID/bdt_spectrum/both/spectrum.root"
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC24ar_pass3_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC25_PbPb_pass1_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root"
          },
           "/Users/zhengqingwang/alice/data/h3l_spec_run2/h3l_30_50.root",
           "Graph1D_y1",
@@ -272,19 +267,17 @@ void SpectrumVsRun2Lite() {
           "(Anti)hypertriton spectrum in 30-50% V0M centrality class",
           "BlastWave_H3L_30_50",
           {
-            //"23_pass4_CustomV0s_HadronPID",
-            "23_pass5_CustomV0s_HadronPID",
-            //"23_pass5_CustomV0s_HadronPID_TPCNcls",
-            //"23_pass5_V0s_HadronPID_TPCNcls"
+            "LHC23_PbPb_pass5",
+            "LHC24ar_pass3",
+            "LHC25_PbPb_pass1"
           }
         },
         {
           "50_80",
           {
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass4_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum/both/spectrum.root",
-            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID_NCrossedRows/bdt_spectrum_no_itscut/both/spectrum.root",
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
-            //"/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_V0s_HadronPID/bdt_spectrum/both/spectrum.root"
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC24ar_pass3_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
+            "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC25_PbPb_pass1_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root"
           },
           "", // skip Run2 spectrum here
           "",
@@ -293,10 +286,9 @@ void SpectrumVsRun2Lite() {
           "(Anti)hypertriton spectrum in 50-80% V0M centrality class",
           "",
           {
-            //"23_pass4_CustomV0s_HadronPID",
-            "23_pass5_CustomV0s_HadronPID",
-            //"23_pass5_CustomV0s_HadronPID_TPCNcls",
-            //"23_pass5_V0s_HadronPID_TPCNcls"
+            "LHC23_PbPb_pass5",
+            "LHC24ar_pass3",
+            "LHC25_PbPb_pass1"
           }
         }
     };
@@ -419,8 +411,8 @@ void SpectrumVsRun2Lite() {
             header.SetNDC();
             double headerX = isPeripheral ? 0.60 : legX1;
             double headerY = isPeripheral ? 0.87 : std::min(legY2 + 0.025, 0.95);
-            header.DrawLatex(headerX, headerY, "LHC23_PbPb_pass5");
             std::string subTitle = spec.legendNames.size() > idx ? spec.legendNames[idx] : Form("Run3_%zu", idx);
+            header.DrawLatex(headerX, headerY, subTitle.c_str());
             std::string out = outputDir + "/Spectrum_vs_run2_lite_" + spec.label + "_" + saveSuffixName + "_" + subTitle + ".pdf";
             c.SaveAs(out.c_str());
         }

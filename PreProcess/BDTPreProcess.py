@@ -57,6 +57,19 @@ def normalize_mix_mode(mode_raw, default_mode='pt_ct'):
     return aliases.get(mode, mode)
 
 
+def join_selection_parts(*parts):
+    clean = []
+    for part in parts:
+        if part in (None, ''):
+            continue
+        text = str(part).strip()
+        if text:
+            clean.append(text)
+    if not clean:
+        return None
+    return ' && '.join(f'({part})' for part in clean)
+
+
 def format_bin_edge(value):
     return f"{float(value):g}"
 
@@ -71,6 +84,7 @@ def resolve_bdt_config(raw_config):
 
     cfg = dict(preprocess['bdt'])
     common = raw_config.get('common', {}) if isinstance(raw_config.get('common', {}), dict) else {}
+    analysis = raw_config.get('analysis', {}) if isinstance(raw_config.get('analysis', {}), dict) else {}
     execution = raw_config.get('execution', {}) if isinstance(raw_config.get('execution', {}), dict) else {}
     paths = common.get('path', {}) if isinstance(common.get('path', {}), dict) else {}
     binning = common.get('binning', {}) if isinstance(common.get('binning', {}), dict) else {}
@@ -111,21 +125,29 @@ def resolve_bdt_config(raw_config):
             if cfg.get(key):
                 cfg[key] = combined_sub_dir(cfg[key], tag)
 
-    if 'basic_selection_data' not in cfg:
+    if 'mix_mode' not in cfg and isinstance(execution, dict):
+        training_mode = execution.get('training_mode', None)
+        if training_mode is not None:
+            cfg['mix_mode'] = training_mode
+    mix_mode = normalize_mix_mode(cfg.get('mix_mode', None), 'pt_ct')
+
+    mode_profiles = analysis.get('mode_profiles', {}) if isinstance(analysis.get('mode_profiles', {}), dict) else {}
+    mode_profile = mode_profiles.get(mix_mode, {}) if isinstance(mode_profiles.get(mix_mode, {}), dict) else {}
+    analysis_selection = analysis.get('selection', {}) if isinstance(analysis.get('selection', {}), dict) else {}
+    basic_sel = cfg.get('basic_selection_data', None)
+    if not basic_sel:
         basic_sel = selection.get('basic_selection_data', None)
-        if basic_sel:
-            cfg['basic_selection_data'] = basic_sel
+    cfg['basic_selection_data'] = join_selection_parts(
+        basic_sel,
+        analysis_selection.get('additional_data_selection_general', None),
+        mode_profile.get('additional_data_selection', None),
+    )
 
     for key in ['cen_bins', 'pt_bins_by_centrality', 'pt_bins', 'ct_bins_single', 'pt_bins_single']:
         if key not in cfg and key in binning:
             cfg[key] = binning[key]
     if 'ct_bins' not in cfg and 'ct_bins_by_pt' in binning:
         cfg['ct_bins'] = binning['ct_bins_by_pt']
-
-    if 'mix_mode' not in cfg and isinstance(execution, dict):
-        training_mode = execution.get('training_mode', None)
-        if training_mode is not None:
-            cfg['mix_mode'] = training_mode
     return cfg
 
 
@@ -185,10 +207,15 @@ class BDTPreProcess:
             )
         self.make_training_qa = bool(config.get('make_training_qa', True))
         self.qa_plot_bins = int(config.get('qa_plot_bins', 100))
-        self.use_score_efficiency_fallback = bool(config.get('use_score_efficiency_fallback', False))
+        self.skip_existing_training_outputs = bool(config.get('skip_existing_training_outputs', False))
+        self.score_efficiency_max_retrain_attempts = int(config.get('score_efficiency_max_retrain_attempts', 5))
+        if self.score_efficiency_max_retrain_attempts < 1:
+            self.score_efficiency_max_retrain_attempts = 1
         self.side_band_edges = config.get('side_band_edges', [2.95, 3.02])
         self.cen_bins = config.get('cen_bins', None)
         self.pt_bins_by_centrality = config.get('pt_bins_by_centrality', None)
+        self.target_cen_ranges = config.get('target_cen_ranges', config.get('target_centrality_ranges', []))
+        self.target_pt_ranges = config.get('target_pt_ranges', config.get('target_pt_range', []))
         self.snapshot_dir = Path(config.get('snapshot_dir', 'snapshots'))
         self.models_dir = Path(config.get('model_dir', 'models'))
         self.QA_dir = Path(config.get('QA_dir', 'QAPlots'))
@@ -251,28 +278,107 @@ class BDTPreProcess:
             for override in self.training_overrides:
                 if not isinstance(override, dict):
                     continue
+                if not self._override_enabled(override):
+                    continue
                 override_vars = override.get('training_variables', None)
                 if isinstance(override_vars, list):
                     variables.extend(override_vars)
         return self._unique_columns(variables)
 
     @staticmethod
-    def _centrality_override_matches(override, cen_range):
-        if not isinstance(override, dict) or cen_range is None or None in cen_range:
+    def _override_enabled(override):
+        if not isinstance(override, dict):
             return False
-        cen_min, cen_max = float(cen_range[0]), float(cen_range[1])
-        ranges = override.get('centrality_ranges', override.get('cen_ranges', []))
-        if not isinstance(ranges, list):
+        return bool(override.get('enable', override.get('enabled', True)))
+
+    @staticmethod
+    def _normalise_override_modes(raw_modes):
+        if raw_modes in (None, '', []):
+            return []
+        if isinstance(raw_modes, str):
+            raw_modes = [raw_modes]
+        if not isinstance(raw_modes, list):
+            return []
+        return [normalize_mix_mode(mode) for mode in raw_modes]
+
+    @staticmethod
+    def _normalise_override_bins(override):
+        if not isinstance(override, dict):
+            return []
+        bins = override.get('bins', None)
+        if bins is None:
+            bins = []
+            for key in ('cen_pt', 'pt_ct', 'ct_single', 'pt_single', 'pt_ct_single'):
+                if key in override and isinstance(override[key], dict):
+                    bins.append({'type': key, **override[key]})
+            legacy = {}
+            if 'centrality_ranges' in override or 'cen_ranges' in override:
+                legacy['centrality_ranges'] = override.get('centrality_ranges', override.get('cen_ranges', []))
+            if 'pt_ranges' in override or 'pt_bins' in override:
+                legacy['pt_ranges'] = override.get('pt_ranges', override.get('pt_bins', []))
+            if 'ct_ranges' in override or 'ct_bins' in override:
+                legacy['ct_ranges'] = override.get('ct_ranges', override.get('ct_bins', []))
+            if legacy:
+                legacy['type'] = override.get('type', override.get('binning', None))
+                bins.append(legacy)
+        if isinstance(bins, dict):
+            bins = [bins]
+        if not isinstance(bins, list):
+            return []
+        return [bin_cfg for bin_cfg in bins if isinstance(bin_cfg, dict)]
+
+    @staticmethod
+    def _range_matches(configured_ranges, actual_range):
+        if configured_ranges is None:
+            return True
+        if actual_range is None or None in actual_range:
             return False
-        for rng in ranges:
+        if not isinstance(configured_ranges, list):
+            return False
+        actual_min, actual_max = float(actual_range[0]), float(actual_range[1])
+        for rng in configured_ranges:
             if not isinstance(rng, (list, tuple)) or len(rng) != 2:
                 continue
             lo, hi = float(rng[0]), float(rng[1])
-            if abs(cen_min - lo) < 1e-6 and abs(cen_max - hi) < 1e-6:
+            if abs(actual_min - lo) < 1e-6 and abs(actual_max - hi) < 1e-6:
                 return True
         return False
 
-    def _active_training_config(self, cen_range=None):
+    @staticmethod
+    def _bin_type_compatible(bin_type, mix_mode):
+        if bin_type in (None, '', 'any', 'all'):
+            return True
+        return normalize_mix_mode(bin_type) == normalize_mix_mode(mix_mode)
+
+    def _override_matches(self, override, cen_range=None, pt_range=None, ct_range=None):
+        if not isinstance(override, dict):
+            return False
+        if not self._override_enabled(override):
+            return False
+        modes = self._normalise_override_modes(override.get('modes', override.get('mode', None)))
+        if modes and normalize_mix_mode(self.mix_mode) not in modes:
+            return False
+
+        bins = self._normalise_override_bins(override)
+        if not bins:
+            return True
+
+        for bin_cfg in bins:
+            if not self._bin_type_compatible(bin_cfg.get('type', bin_cfg.get('binning', None)), self.mix_mode):
+                continue
+            cen_ranges = bin_cfg.get('centrality_ranges', bin_cfg.get('cen_ranges', None))
+            pt_ranges = bin_cfg.get('pt_ranges', bin_cfg.get('pt_bins', None))
+            ct_ranges = bin_cfg.get('ct_ranges', bin_cfg.get('ct_bins', None))
+            if not self._range_matches(cen_ranges, cen_range):
+                continue
+            if not self._range_matches(pt_ranges, pt_range):
+                continue
+            if not self._range_matches(ct_ranges, ct_range):
+                continue
+            return True
+        return False
+
+    def _active_training_config(self, cen_range=None, pt_range=None, ct_range=None):
         cfg = {
             'name': 'default',
             'training_variables': list(self.training_variables),
@@ -283,11 +389,13 @@ class BDTPreProcess:
             'efficiency_min': self.efficiency_min,
             'efficiency_max': self.efficiency_max,
             'npoints_for_effi': self.npoints_for_effi,
+            'score_efficiency_max_retrain_attempts': self.score_efficiency_max_retrain_attempts,
             'mc_use_full_centrality': False,
+            'mc_centrality_range': None,
         }
         if self.use_training_overrides:
             for override in self.training_overrides:
-                if not self._centrality_override_matches(override, cen_range):
+                if not self._override_matches(override, cen_range, pt_range, ct_range):
                     continue
                 cfg['name'] = override.get('name', cfg['name'])
                 if isinstance(override.get('training_variables', None), list):
@@ -300,16 +408,19 @@ class BDTPreProcess:
                     merged = dict(cfg['hyperparams'])
                     merged.update(override['hyperparams'])
                     cfg['hyperparams'] = merged
-                for key in ('test_set_size', 'efficiency_min', 'efficiency_max', 'npoints_for_effi'):
+                for key in ('test_set_size', 'efficiency_min', 'efficiency_max', 'npoints_for_effi', 'score_efficiency_max_retrain_attempts'):
                     if key in override:
                         cfg[key] = override[key]
                 if 'mc_use_full_centrality' in override:
                     cfg['mc_use_full_centrality'] = bool(override['mc_use_full_centrality'])
+                if isinstance(override.get('mc_centrality_range', None), list) and len(override['mc_centrality_range']) == 2:
+                    cfg['mc_centrality_range'] = list(override['mc_centrality_range'])
                 break
         cfg['npoints_for_effi'] = int(cfg['npoints_for_effi'])
         cfg['efficiency_min'] = float(cfg['efficiency_min'])
         cfg['efficiency_max'] = float(cfg['efficiency_max'])
         cfg['test_set_size'] = float(cfg['test_set_size'])
+        cfg['score_efficiency_max_retrain_attempts'] = max(1, int(cfg['score_efficiency_max_retrain_attempts']))
         return cfg
 
     @staticmethod
@@ -480,6 +591,36 @@ class BDTPreProcess:
             parts.append(f"ct {ct_range[0]}-{ct_range[1]} cm")
         return ", ".join(parts) if parts else "full phase space"
 
+    @staticmethod
+    def _valid_output_file(path):
+        try:
+            path = Path(path)
+            return path.exists() and path.is_file() and path.stat().st_size > 0
+        except Exception:
+            return False
+
+    def _has_completed_training_outputs(self, label):
+        required = [
+            self.snapshot_dir / f"data_{label}.root",
+            self.snapshot_dir / f"mc_{label}.root",
+            self.models_dir / f"Model_BDT_{label}.json",
+            self.models_dir / f"Model_BDT_{label}.pkl",
+            self.WP_dir / f"score_efficiency_array_{label}.txt",
+        ]
+        return all(self._valid_output_file(path) for path in required)
+
+    def _load_existing_model_handler(self, label):
+        model_path = self.models_dir / f"Model_BDT_{label}.pkl"
+        if not self._valid_output_file(model_path):
+            return None
+        try:
+            model_hdl = ModelHandler()
+            model_hdl.load_model_handler(str(model_path))
+            return model_hdl
+        except Exception as e:
+            print(f"Warning: failed to load existing model handler for {label}: {e}")
+            return None
+
     def _ensure_range(self, rng, name):
         if rng is None:
             raise ValueError(f"{name} range is required for this mode.")
@@ -488,7 +629,7 @@ class BDTPreProcess:
         return rng[0], rng[1]
 
     def _make_snapshot_for_bin(self, pt_range=None, ct_range=None, cen_range=None, label=None, active_cfg=None):
-        active_cfg = active_cfg or self._active_training_config(cen_range)
+        active_cfg = active_cfg or self._active_training_config(cen_range, pt_range, ct_range)
         pt_min, pt_max = pt_range if pt_range else (None, None)
         ct_min, ct_max = ct_range if ct_range else (None, None)
         cen_min, cen_max = cen_range if cen_range else (None, None)
@@ -505,7 +646,10 @@ class BDTPreProcess:
             sel_mc_parts.append(f"fGenCt > {ct_min} && fGenCt < {ct_max}")
         if cen_min is not None and cen_max is not None:
             sel_data_parts.append(f"fCentralityFT0C > {cen_min} && fCentralityFT0C < {cen_max}")
-            if not active_cfg.get('mc_use_full_centrality', False):
+            mc_centrality_range = active_cfg.get('mc_centrality_range', None)
+            if isinstance(mc_centrality_range, (list, tuple)) and len(mc_centrality_range) == 2:
+                sel_mc_parts.append(f"fCentralityFT0C > {mc_centrality_range[0]} && fCentralityFT0C < {mc_centrality_range[1]}")
+            elif not active_cfg.get('mc_use_full_centrality', False):
                 sel_mc_parts.append(f"fCentralityFT0C > {cen_min} && fCentralityFT0C < {cen_max}")
 
         sel_data = " && ".join(sel_data_parts) if sel_data_parts else "1"
@@ -634,7 +778,21 @@ class BDTPreProcess:
         bin_data_hdl.set_data_frame(df_dataH)
 
         try:
+            df_mc_before_range = bin_mc_hdl.get_data_frame().copy()
+            df_data_before_range = bin_data_hdl.get_data_frame().copy()
             self._cut_elements_to_same_range(bin_mc_hdl, bin_data_hdl, training_variables)
+            if len(bin_mc_hdl) < 20 or len(bin_data_hdl) < 20:
+                print(
+                    "Warning: common-range cuts left too few candidates "
+                    f"(MC={len(bin_mc_hdl)}, Data={len(bin_data_hdl)}); "
+                    "falling back to pre-range-cut samples."
+                )
+                if 'fCt' in df_mc_before_range.columns:
+                    df_mc_before_range = df_mc_before_range[df_mc_before_range['fCt'] < 50]
+                if 'fCt' in df_data_before_range.columns:
+                    df_data_before_range = df_data_before_range[df_data_before_range['fCt'] < 50]
+                bin_mc_hdl.set_data_frame(df_mc_before_range)
+                bin_data_hdl.set_data_frame(df_data_before_range)
             if self.period_weight_mode == 'equal_period':
                 self._equalize_periods(bin_mc_hdl)
                 self._equalize_periods(bin_data_hdl)
@@ -662,22 +820,6 @@ class BDTPreProcess:
             out = pd.concat(pieces, ignore_index=True).sample(frac=1.0, random_state=self.random_state).reset_index(drop=True)
             handler.set_data_frame(out)
 
-    @staticmethod
-    def _score_from_efficiency_quantile(labels, scores, effi_arr):
-        labels = np.asarray(labels)
-        scores = np.asarray(scores, dtype=float)
-        effi_arr = np.asarray(effi_arr, dtype=float)
-        sig_scores = scores[labels == 1]
-        sig_scores = sig_scores[np.isfinite(sig_scores)]
-        if sig_scores.size == 0:
-            return np.array([])
-        out = []
-        for eff in effi_arr:
-            eff_clamped = float(np.clip(eff, 0.0, 1.0))
-            # Threshold for selecting candidates with score >= threshold.
-            out.append(float(np.quantile(sig_scores, 1.0 - eff_clamped)))
-        return np.asarray(out, dtype=float)
-
     def _derive_score_efficiency_array(self, test_labels, y_pred_test, train_labels, y_pred_train, effi_arr, pretty_label):
         try:
             score_arr = au.score_from_efficiency_array(test_labels, y_pred_test, effi_arr)
@@ -687,39 +829,11 @@ class BDTPreProcess:
             print(f"Warning: invalid hipe4ml score-efficiency array for {pretty_label}.")
         except Exception as e:
             print(f"Warning: failed to derive score-efficiency array with hipe4ml for {pretty_label}: {e}")
-
-        if not self.use_score_efficiency_fallback:
-            print(f"Warning: score-efficiency fallback is disabled for {pretty_label}.")
-            return np.array([])
-
-        score_arr = self._score_from_efficiency_quantile(test_labels, y_pred_test, effi_arr)
-        if score_arr.size == effi_arr.size and np.all(np.isfinite(score_arr)):
-            print(f"Warning: used test-sample quantile fallback for score-efficiency array in {pretty_label}.")
-            return score_arr
-
-        score_arr = self._score_from_efficiency_quantile(train_labels, y_pred_train, effi_arr)
-        if score_arr.size == effi_arr.size and np.all(np.isfinite(score_arr)):
-            print(f"Warning: used train-sample quantile fallback for score-efficiency array in {pretty_label}.")
-            return score_arr
-
         return np.array([])
 
     def _train_and_save_model_per_bin(self, bin_mc_hdl, bin_data_hdl, label, pretty_label, active_cfg=None):
         active_cfg = active_cfg or self._active_training_config(None)
         training_variables = active_cfg['training_variables']
-        try:
-            train_test_data = au.train_test_generator([bin_mc_hdl, bin_data_hdl], [1, 0],
-                                                     test_size=active_cfg['test_set_size'], random_state=self.random_state)
-        except Exception as e:
-            msg = f"Failed to generate train/test for {pretty_label}: {e}"
-            print(msg)
-            self.training_failures.append(msg)
-            return
-
-        train_features = train_test_data[0]
-        train_labels = train_test_data[1]
-        test_features = train_test_data[2]
-        test_labels = train_test_data[3]
 
         if self.make_training_qa:
             distr = pu.plot_distr([bin_mc_hdl, bin_data_hdl], training_variables + ["fMassH3L"], bins=self.qa_plot_bins, labels=['Signal',"Background"],colors=["red","blue"], log=True, density=True, figsize=(18, 13), alpha=0.5, grid=False)
@@ -731,19 +845,68 @@ class BDTPreProcess:
             corr[1].savefig(f"{self.QA_dir}/correlations_data_{label}.pdf", bbox_inches='tight')
             plt.close("all")
 
-        try:
-            model_hdl = ModelHandler(xgb.XGBClassifier(), training_variables)
-            model_hdl.set_model_params(active_cfg['hyperparams'])
-            model_hdl.train_test_model(train_test_data, False, output_margin=True)
-        except Exception as e:
-            msg = f"Training failed for {pretty_label}: {e}"
-            print(msg)
-            self.training_failures.append(msg)
-            return
+        effi_arr = np.unique(np.round(np.linspace(active_cfg['efficiency_min'], active_cfg['efficiency_max'], active_cfg['npoints_for_effi']), 3))
+        if effi_arr.size < active_cfg['npoints_for_effi']:
+            print(f"Warning: rounded efficiency grid has {effi_arr.size} unique points instead of {active_cfg['npoints_for_effi']}.")
 
-        y_pred_test = model_hdl.predict(test_features, output_margin = True)
-        y_pred_train = model_hdl.predict(train_features, output_margin = True)
-        if self.make_training_qa:
+        model_hdl = None
+        train_test_data = None
+        train_features = train_labels = test_features = test_labels = None
+        y_pred_test = y_pred_train = None
+        score_arr = np.array([])
+        max_attempts = active_cfg['score_efficiency_max_retrain_attempts']
+        base_random_state = int(self.random_state)
+        base_hyperparams = dict(active_cfg['hyperparams'])
+
+        for attempt in range(max_attempts):
+            attempt_no = attempt + 1
+            attempt_random_state = base_random_state + attempt
+            try:
+                train_test_data = au.train_test_generator(
+                    [bin_mc_hdl, bin_data_hdl], [1, 0],
+                    test_size=active_cfg['test_set_size'],
+                    random_state=attempt_random_state)
+            except Exception as e:
+                msg = f"Failed to generate train/test for {pretty_label} (attempt {attempt_no}/{max_attempts}): {e}"
+                print(msg)
+                self.training_failures.append(msg)
+                return
+
+            train_features = train_test_data[0]
+            train_labels = train_test_data[1]
+            test_features = train_test_data[2]
+            test_labels = train_test_data[3]
+
+            try:
+                model_hdl = ModelHandler(xgb.XGBClassifier(), training_variables)
+                attempt_hyperparams = dict(base_hyperparams)
+                if 'seed' in attempt_hyperparams:
+                    attempt_hyperparams['seed'] = int(attempt_hyperparams['seed']) + attempt
+                else:
+                    attempt_hyperparams['seed'] = attempt_random_state
+                if 'random_state' in attempt_hyperparams:
+                    attempt_hyperparams['random_state'] = int(attempt_hyperparams['random_state']) + attempt
+                model_hdl.set_model_params(attempt_hyperparams)
+                model_hdl.train_test_model(train_test_data, False, output_margin=True)
+            except Exception as e:
+                msg = f"Training failed for {pretty_label} (attempt {attempt_no}/{max_attempts}): {e}"
+                print(msg)
+                self.training_failures.append(msg)
+                return
+
+            y_pred_test = model_hdl.predict(test_features, output_margin=True)
+            y_pred_train = model_hdl.predict(train_features, output_margin=True)
+            score_arr = self._derive_score_efficiency_array(
+                test_labels, y_pred_test, train_labels, y_pred_train, effi_arr,
+                f"{pretty_label} attempt {attempt_no}/{max_attempts}")
+            if score_arr.size > 0:
+                if attempt > 0:
+                    print(f"Info: score-efficiency array recovered after retraining {pretty_label} on attempt {attempt_no}/{max_attempts}.")
+                break
+            if attempt + 1 < max_attempts:
+                print(f"Warning: retrying training for {pretty_label} because score-efficiency array generation failed ({attempt_no}/{max_attempts}).")
+
+        if self.make_training_qa and model_hdl is not None and train_test_data is not None:
             bdt_out_plot = pu.plot_output_train_test(model_hdl, train_test_data, self.qa_plot_bins, True, ["Background", "Signal"], True, density=True)
             bdt_out_plot.savefig(f"{self.QA_dir}/bdt_output_{label}.pdf")
             plt.close("all")
@@ -759,12 +922,6 @@ class BDTPreProcess:
             roc_plot.savefig(f"{self.QA_dir}/roc_test_vs_train_{label}.pdf")
             plt.close("all")
 
-        effi_arr = np.unique(np.round(np.linspace(active_cfg['efficiency_min'], active_cfg['efficiency_max'], active_cfg['npoints_for_effi']), 3))
-        if effi_arr.size < active_cfg['npoints_for_effi']:
-            print(f"Warning: rounded efficiency grid has {effi_arr.size} unique points instead of {active_cfg['npoints_for_effi']}.")
-        score_arr = self._derive_score_efficiency_array(
-            test_labels, y_pred_test, train_labels, y_pred_train, effi_arr, pretty_label)
-
         if score_arr.size > 0:
             score_eff_path = self.WP_dir / f"score_efficiency_array_{label}.txt"
             np.savetxt(score_eff_path, np.column_stack((score_arr, effi_arr)))
@@ -778,7 +935,7 @@ class BDTPreProcess:
             plt.savefig(f"{self.QA_dir}/efficiency_vs_score_{label}.pdf", bbox_inches='tight')
             plt.close("all")
         else:
-            msg = f"No score array available to plot/save for {pretty_label} ({label})."
+            msg = f"No score array available to plot/save for {pretty_label} ({label}) after {max_attempts} training attempt(s)."
             print(msg)
             self.training_failures.append(msg)
 
@@ -893,13 +1050,24 @@ class BDTPreProcess:
     def _process_training_unit(self, pt_range=None, ct_range=None, cen_range=None):
         label = self._make_label(pt_range, ct_range, cen_range)
         pretty_label = self._make_description(pt_range, ct_range, cen_range)
+        if self.skip_existing_training_outputs and self._has_completed_training_outputs(label):
+            score_eff_path = self.WP_dir / f"score_efficiency_array_{label}.txt"
+            self.score_efficiency_files.append(str(score_eff_path))
+            print(f"[SNAPSHOT+ML] Skipping completed training outputs for {pretty_label} ({label})")
+            model_hdl = self._load_existing_model_handler(label)
+            data_root = self.snapshot_dir / f"data_{label}.root"
+            if model_hdl is not None:
+                self._predict_and_rewrite_data_file(data_root, model_hdl, column_name="model_output")
+            return
         print(f"[SNAPSHOT+ML] Processing {pretty_label}")
-        active_cfg = self._active_training_config(cen_range)
+        active_cfg = self._active_training_config(cen_range, pt_range, ct_range)
         print(
             f"Training config for {pretty_label}: {active_cfg['name']} "
             f"(side_band_edges={active_cfg['side_band_edges']}, "
             f"bkg_fraction_max={active_cfg['bkg_fraction_max']}, "
+            f"efficiency={active_cfg['efficiency_min']:.3f}-{active_cfg['efficiency_max']:.3f}, "
             f"mc_use_full_centrality={active_cfg['mc_use_full_centrality']}, "
+            f"mc_centrality_range={active_cfg['mc_centrality_range']}, "
             f"variables={active_cfg['training_variables']})"
         )
 
@@ -954,7 +1122,8 @@ class BDTPreProcess:
         print("mix_mode:", self.mix_mode)
         print(f"BDT efficiency grid: {self.efficiency_min:.3f} -> {self.efficiency_max:.3f} ({self.npoints_for_effi} points)")
         print(f"Training QA plots: {'enabled' if self.make_training_qa else 'disabled'}")
-        print(f"Score-efficiency fallback: {'enabled' if self.use_score_efficiency_fallback else 'disabled'}")
+        print(f"Skip existing training outputs: {'enabled' if self.skip_existing_training_outputs else 'disabled'}")
+        print(f"Score-efficiency retraining attempts: {self.score_efficiency_max_retrain_attempts}")
 
         if self.mix_mode == 'pt_ct':
             if self.pt_bins is None or self.ct_bins is None:
@@ -975,6 +1144,8 @@ class BDTPreProcess:
             if len(self.cen_bins) < 2:
                 raise ValueError("cen_bins must contain at least two edges.")
             for i_cen, (cen_min, cen_max) in enumerate(zip(self.cen_bins[:-1], self.cen_bins[1:])):
+                if self.target_cen_ranges and not self._range_matches(self.target_cen_ranges, (cen_min, cen_max)):
+                    continue
                 if i_cen >= len(pt_by_cen):
                     print(f"Warning: pt bins for centrality index {i_cen} not found, skip.")
                     continue
@@ -983,6 +1154,8 @@ class BDTPreProcess:
                     print(f"Warning: pt bins for centrality index {i_cen} invalid, skip.")
                     continue
                 for pt_min, pt_max in zip(pt_edges[:-1], pt_edges[1:]):
+                    if self.target_pt_ranges and not self._range_matches(self.target_pt_ranges, (pt_min, pt_max)):
+                        continue
                     self._process_training_unit((pt_min, pt_max), None, (cen_min, cen_max))
 
         elif self.mix_mode == 'pt_ct_single':

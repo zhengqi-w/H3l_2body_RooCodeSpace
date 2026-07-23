@@ -1,13 +1,13 @@
 {
   "common": {
     "path": {
-      "data_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_pass5/data/NCrossedRows/AO2D_CustomV0s_HadronPID.root",
-      "analysisresults_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_pass5/data/NCrossedRows/AnalysisResults_CustomV0s_HadronPID.root",
-      "mc_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_pass5/mc/LHC25g11_G4list/NCrossedRows/reweighted/AO2D_CustomV0s_combined_reweighted.root",
-      "snapshot_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/SnapShotsData/LHC23_PbPb_pass5_LHC24ar_pass3_LHC25_PbPb_pass1",
-      "wp_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_LHC24ar_pass3_LHC25_PbPb_pass1/WorkingPoint",
-      "model_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_LHC24ar_pass3_LHC25_PbPb_pass1/TrainedModels",
-      "qa_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC23_PbPb_pass5_LHC24ar_pass3_LHC25_PbPb_pass1/QAPlots",
+      "data_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC25_PbPb_pass1/data/AO2D_CustomV0s_HadronPID.root",
+      "analysisresults_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC25_PbPb_pass1/data/AnalysisResults_CustomV0s_HadronPID.root",
+      "mc_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC25_PbPb_pass1/mc/LHC26e6_G4list/reweighted/AO2D_combined_reweighted.root",
+      "snapshot_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/SnapShotsData/LHC25_PbPb_pass1_CustomV0s_HadronPID",
+      "wp_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC25_PbPb_pass1_CustomV0s_HadronPID/WorkingPoint",
+      "model_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC25_PbPb_pass1_CustomV0s_HadronPID/TrainedModels",
+      "qa_dir": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/MLProcess/LHC25_PbPb_pass1_CustomV0s_HadronPID/QAPlots",
       "mc_file_for_absorption": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/AbsorptionTrees/absorption_tree_x1.5.root",
       "spectrum_file": "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/configs/ReweightFunc.root",
       "event_signal_loss_file": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_pass5/mc/LHC25g11_G4list/EventLoss/AnalysisResults.root",
@@ -24,13 +24,13 @@
         "tag": "LHC24ar_pass3",
         "data_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC24ar_pass3/data/AO2D_CustomV0s_HadronPID.root",
         "analysisresults_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC24ar_pass3/data/AnalysisResults_CustomV0s_HadronPID.root",
-        "mc_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_pass5/mc/LHC25g11_G4list/NCrossedRows/reweighted/AO2D_CustomV0s_combined_reweighted.root"
+        "mc_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC24ar_pass3/mc/LHC26e5_G4list/reweighted/AO2D_combined_reweighted.root"
       },
       {
         "tag": "LHC25_PbPb_pass1",
         "data_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC25_PbPb_pass1/data/AO2D_CustomV0s_HadronPID.root",
         "analysisresults_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC25_PbPb_pass1/data/AnalysisResults_CustomV0s_HadronPID.root",
-        "mc_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_pass5/mc/LHC25g11_G4list/NCrossedRows/reweighted/AO2D_CustomV0s_combined_reweighted.root"
+        "mc_path": "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC25_PbPb_pass1/mc/LHC26e6_G4list/reweighted/AO2D_combined_reweighted.root"
       }
     ],
     "wp_files": {
@@ -48,7 +48,7 @@
       "collision_energy": "#sqrt{#it{s_{NN}}} 5.36 TeV",
       "use_performance": false,
       "performance_label": "ALICE Performance",
-      "period": "LHC23_PbPb_pass5",
+      "period": "LHC25_PbPb_pass1",
       "period_mark": "CustomV0s_HadronPID"
     },
     "parameters": {
@@ -70,19 +70,14 @@
       "mc_acceptance_require_two_body": true
     },
     "binning": {
-      "cen_bins": [0, 5, 10, 20, 30, 40, 50, 60, 70, 90],
-      "related_multiplicity_center": [2047, 1668, 1253, 848, 559, 351, 205, 110, 38.1],
-      "related_multiplicity_uncertainty": [54, 42, 33, 25, 19, 14, 11, 8, 2.9],
+      "cen_bins": [0, 10, 30, 50, 80],
+      "related_multiplicity_center": [1857, 1050, 455, 137],
+      "related_multiplicity_uncertainty": [54, 33, 19, 8],
       "pt_bins_by_centrality": [
-        [1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8],
-        [1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8],
-        [1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8],
-        [1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8],
-        [1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
-        [1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 8],
-        [1.5, 2.2, 2.9, 3.6, 4.4, 5.2, 6.1, 7],
-        [1.5, 2.2, 2.9, 3.8, 5, 6.5],
-        [1.5, 2.5, 3.5, 6]
+        [2, 3, 3.5, 4, 4.5, 5, 6, 8],
+        [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
+        [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
+        [2, 2.5, 3, 3.5, 4, 5, 8]
       ],
       "pt_bins": [2, 2.5, 3, 3.5, 4, 4.8, 5.5, 8],
       "ct_bins_by_pt": [
@@ -94,7 +89,7 @@
         [1, 1.8, 2.6, 3.5, 4.6, 6.2, 9, 15, 35],
         [1, 2.6, 4.6, 8, 15, 35]
       ],
-      "ct_bins_single": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 25, 30, 40],
+      "ct_bins_single": [1, 3, 5, 7, 9, 11, 13, 15, 17, 21, 27, 33],
       "pt_bins_single": [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8]
     },
     "event_hist": {
@@ -103,12 +98,12 @@
   },
   "execution": {
     "enable": true,
-    "combine_period": true,
-    "training_mode": "bdt_spectrum",
-    "wp_mode": "bdt_spectrum",
-    "analysis_mode": "bdt_spectrum",
+    "combine_period": false,
+    "training_mode": "ct_single",
+    "wp_mode": "ct_single",
+    "analysis_mode": "ct_single",
     "enable_implicit_mt": true,
-    "do_systematics": true,
+    "do_systematics": false,
     "save_results_to_pdf": true
   },
   "preprocess": {
@@ -142,7 +137,7 @@
       "skip_existing_training_outputs": false,
       "target_cen_ranges": [],
       "period_weight_mode": "equal_period",
-      "use_training_overrides": true,
+      "use_training_overrides": false,
       "training_overrides": [
         {
           "name": "central_high_background",
@@ -153,7 +148,7 @@
           ],
           "mc_use_full_centrality": true,
           "side_band_edges": [2.98, 3.005],
-          "training_variables": ["fDcaV0Daug", "fDcaHe", "fDcaPi", "fCosPA", "fNSigmaHe", "fDecRad", "fNTPCCrossedRowsHe", "fNTPCCrossedRowsPi", "fCt"],
+          "training_variables": ["fDcaV0Daug", "fDcaHe", "fDcaPi", "fCosPA", "fNSigmaHe", "fCt"],
           "bkg_fraction_max": 15,
           "hyperparams": {
             "max_depth": 4,
@@ -162,45 +157,6 @@
             "subsample": 0.85,
             "colsample_bytree": 0.85
           }
-        },
-        {
-          "name": "midcentral_lowpt_hard_bdt",
-          "enable": true,
-          "centrality_ranges": [
-            [10, 20],
-            [20, 30],
-            [30, 40]
-          ],
-          "pt_ranges": [
-            [1.5, 2]
-          ],
-          "side_band_edges": [2.985, 3.0],
-          "training_variables": ["fDcaV0Daug", "fDcaHe", "fDcaPi", "fCosPA", "fNSigmaHe", "fDecRad", "fNTPCCrossedRowsHe", "fNTPCCrossedRowsPi", "fCt"],
-          "bkg_fraction_max": 10,
-          "efficiency_min": 0.25,
-          "efficiency_max": 0.62,
-          "npoints_for_effi": 160,
-          "hyperparams": {
-            "max_depth": 4,
-            "n_estimators": 700,
-            "min_child_weight": 6,
-            "subsample": 0.85,
-            "colsample_bytree": 0.85,
-            "gamma": 2.5
-          }
-        },
-        {
-          "name": "low_pt_extended_variables",
-          "enable": true,
-          "centrality_ranges": [
-            [10, 20],
-            [20, 30],
-            [30, 40],
-            [40, 50],
-            [50, 60],
-            [60, 70]
-          ],
-          "training_variables": ["fDcaV0Daug", "fDcaHe", "fDcaPi", "fCosPA", "fNSigmaHe", "fDecRad", "fNTPCCrossedRowsHe", "fNTPCCrossedRowsPi", "fCt"]
         }
       ]
     },
@@ -275,36 +231,7 @@
           ]
         }
       },
-      "integral_fit_parameters_by_centrality": {
-        "60_70": {
-          "fBGBW": {
-            "initial": [0.660234551802, 0.164201019907, 1, 500],
-            "limits": [
-              [0.2, 0.9],
-              [0.1, 0.6],
-              [0.01, 5],
-              [1e-08, 100000000.0]
-            ],
-            "fixed": [true, true, false, false]
-          }
-        },
-        "70_90": {
-          "fBGBW": {
-            "initial": [0.660234551802, 0.164201019907, 1, 500],
-            "limits": [
-              [0.2, 0.9],
-              [0.1, 0.6],
-              [0.01, 5],
-              [1e-08, 100000000.0]
-            ],
-            "fixed": [true, true, false, false]
-          }
-        }
-      },
-      "integral_fit_fix_parameters_by_centrality": {
-        "60_70": true,
-        "70_90": true
-      }
+      "integral_fit_parameters_by_centrality": {}
     },
     "systematics": {
       "random_seed": 40,
@@ -332,14 +259,7 @@
       "integrated_yield_range": [0, 100],
       "integral_lowpt_max_factor": 10,
       "integral_fit_use_minos_errors": true,
-      "integral_fit_funcs": ["fBGBW", "fLevi", "fBoltzmann", "fTsallisBW"],
-      "integral_fit_funcs_by_centrality": {
-        "30_40": ["fBGBW", "fLevi", "fBoltzmann"],
-        "40_50": ["fBGBW", "fLevi", "fBoltzmann"],
-        "50_60": ["fBGBW", "fLevi", "fBoltzmann"],
-        "60_70": ["fBGBW", "fLevi", "fBoltzmann"],
-        "70_90": ["fBGBW", "fLevi", "fBoltzmann"]
-      }
+      "integral_fit_funcs": ["fBGBW", "fLevi", "fBoltzmann", "fTsallisBW"]
     },
     "mode_profiles": {
       "bdt_spectrum": {
@@ -364,7 +284,7 @@
       },
       "ct_single": {
         "dimensions": ["ct"],
-        "additional_data_selection": "fPt > 2",
+        "additional_data_selection": "",
         "centrality_selection": "",
         "add_absorption_correction": true
       }

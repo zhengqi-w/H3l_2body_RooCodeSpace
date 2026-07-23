@@ -27,12 +27,12 @@ ROOTWorkFlow/Outputs/StandAloneChecks/
 
 | Macro | Entry point | Purpose | Typical output |
 | --- | --- | --- | --- |
-| `AcceptanceRecoMCCollisionCompare.C` | `AcceptanceRecoMCCollisionCompare(...)` | Compares acceptance with and without the `fIsRecoMCCollision` denominator requirement for each centrality and pT bin. | `AcceptanceRecoMCCollisionCompare/acceptance_reco_mc_collision_compare.csv` |
+| `AcceptanceRecoMCCollisionCompare.C` | `AcceptanceRecoMCCollisionCompare(...)` | Compares acceptance with and without the `fIsRecoMCCollision` denominator requirement for each centrality and pT bin. Reads `common.selection.mc_acceptance_require_two_body` by default. | `AcceptanceRecoMCCollisionCompare/acceptance_reco_mc_collision_compare.csv` |
 | `DrawMcCtEfficiency.C` | `DrawMcCtEfficiency(...)` | Checks the generated decay-radius / ct dependence of the MC efficiency. | `MCEfficiency/mc_eff_ct.pdf` and per-ct decay-radius PDFs |
 | `EventSignalLossCheck.C` | `EventSignalLossCheck(...)` | Validates the combined event-loss, event-splitting, and signal-loss corrections from `EventSignalLossHelper`. Supports multiplicity and impact-parameter methods. | `EventSignalLoss/event_signal_loss_check.root`, event-loss and signal-loss QA PDFs |
 | `FitSpectrumFunctionsSimple.C` | `FitSpectrumFunctionsSimple(...)` | Tests spectrum fit functions, parameter seeds, limits, chi2 behavior, and extrapolation shapes on corrected spectra. | `FitFunctionScan/fit_function_scan_*.pdf`, `fit_results.txt`, `fit_results.root` |
 | `KolmogorovDecRad.C` | `KolmogorovDecRad(...)` | Runs a Kolmogorov test between reconstructed MC decay-radius and workflow candidate decay-radius histograms. | Console p-value |
-| `MCEffCheck.C` | `MCEffCheck(...)` | Compares MC efficiency / acceptance between two MC inputs, with configurable centrality and pT binning. | `MCEfficiency_*/` comparison plots |
+| `MCEffCheck.C` | `MCEffCheck(...)` | Compares MC efficiency / acceptance between two MC inputs, with configurable centrality and pT binning. Reads `common.selection.mc_acceptance_require_two_body` when `TwoBodySelections` is not supplied. | `MCEfficiency_*/` comparison plots |
 | `RunMCEffCheck_FT0C_0_90.C` | `RunMCEffCheck_FT0C_0_90()` | Convenience wrapper around `MCEffCheck` for the FT0C 0-90% comparison setup. | `MCEfficiency_FT0C_0_90_Compare4/` |
 
 ## Notes

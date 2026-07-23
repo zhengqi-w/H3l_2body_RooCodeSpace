@@ -13,10 +13,12 @@
 #include <TDirectory.h>
 #include <TMath.h>
 #include <TGraph.h>
+#include <TGraphErrors.h>
 #include <TPaveText.h>
 #include <TLegend.h>
 #include <TLine.h>
 #include <TStyle.h>
+#include <TKey.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -26,6 +28,7 @@
 #include <unordered_map>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <filesystem>
 
 #include <nlohmann/json.hpp>
@@ -101,6 +104,168 @@ static std::vector<std::string> JsonStringVector(const json &j) {
     }
   }
   return out;
+}
+
+static std::string EdgeToToken(double x) {
+  if (std::fabs(x - std::round(x)) < 1e-6) return std::to_string((int)std::llround(x));
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%g", x);
+  return std::string(buf);
+}
+
+struct WpUseSpectrumRule {
+  bool useSpectrum = true;
+  std::vector<std::pair<double, double>> centralityRanges;
+  std::vector<std::string> modes;
+};
+
+static bool RangeMatches(double lo, double hi, double targetLo, double targetHi) {
+  return std::fabs(lo - targetLo) < 1e-6 && std::fabs(hi - targetHi) < 1e-6;
+}
+
+static std::vector<std::pair<double, double>> ParseRangeList(const json &j) {
+  std::vector<std::pair<double, double>> ranges;
+  if (!j.is_array()) return ranges;
+
+  auto append_if_range = [&](const json &r) {
+    if (!r.is_array() || r.size() != 2 || !r[0].is_number() || !r[1].is_number()) return;
+    const double lo = r[0].get<double>();
+    const double hi = r[1].get<double>();
+    if (std::isfinite(lo) && std::isfinite(hi) && hi > lo) ranges.emplace_back(lo, hi);
+  };
+
+  if (j.size() == 2 && j[0].is_number() && j[1].is_number()) {
+    append_if_range(j);
+  } else {
+    for (const auto &r : j) append_if_range(r);
+  }
+  return ranges;
+}
+
+static std::vector<std::string> ParseModeList(const json &j) {
+  std::vector<std::string> modes;
+  if (j.is_string()) {
+    modes.push_back(NormalizeMixMode(j.get<std::string>()));
+  } else if (j.is_array()) {
+    for (const auto &v : j) {
+      if (v.is_string()) modes.push_back(NormalizeMixMode(v.get<std::string>()));
+    }
+  }
+  return modes;
+}
+
+static bool ModesMatch(const std::vector<std::string> &modes, const std::string &mixMode) {
+  if (modes.empty()) return true;
+  const std::string normalized = NormalizeMixMode(mixMode);
+  return std::find(modes.begin(), modes.end(), normalized) != modes.end();
+}
+
+static std::vector<WpUseSpectrumRule> ParseUseSpectrumRules(const json &j) {
+  std::vector<WpUseSpectrumRule> rules;
+  if (!j.is_array()) return rules;
+  for (const auto &entry : j) {
+    if (!entry.is_object()) continue;
+    WpUseSpectrumRule rule;
+    rule.useSpectrum = entry.value("use_spectrum", entry.value("enabled", true));
+    if (entry.contains("centrality_range")) {
+      rule.centralityRanges = ParseRangeList(entry["centrality_range"]);
+    } else if (entry.contains("centrality_ranges")) {
+      rule.centralityRanges = ParseRangeList(entry["centrality_ranges"]);
+    } else if (entry.contains("cen_range")) {
+      rule.centralityRanges = ParseRangeList(entry["cen_range"]);
+    } else if (entry.contains("cen_ranges")) {
+      rule.centralityRanges = ParseRangeList(entry["cen_ranges"]);
+    }
+    if (entry.contains("modes")) rule.modes = ParseModeList(entry["modes"]);
+    else if (entry.contains("mode")) rule.modes = ParseModeList(entry["mode"]);
+    rules.push_back(rule);
+  }
+  return rules;
+}
+
+struct SpectrumFunctionMatch {
+  TF1 *func = nullptr;
+  std::string name;
+  double cenMin = 0.0;
+  double cenMax = 0.0;
+  bool exact = false;
+};
+
+static bool ParseBlastWaveCentralityName(const std::string &name, double &cenMin, double &cenMax) {
+  const std::string prefix = "BlastWave_";
+  if (name.rfind(prefix, 0) != 0) return false;
+  const std::string rest = name.substr(prefix.size());
+  const auto pos = rest.find('_');
+  if (pos == std::string::npos) return false;
+  try {
+    cenMin = std::stod(rest.substr(0, pos));
+    cenMax = std::stod(rest.substr(pos + 1));
+  } catch (...) {
+    return false;
+  }
+  return std::isfinite(cenMin) && std::isfinite(cenMax) && cenMax > cenMin;
+}
+
+static SpectrumFunctionMatch FindBestBlastWaveForCentrality(TFile *file,
+                                                            double targetCenMin,
+                                                            double targetCenMax) {
+  SpectrumFunctionMatch match;
+  if (!file || file->IsZombie()) return match;
+
+  const std::string exactName = std::string("BlastWave_") + EdgeToToken(targetCenMin) + "_" + EdgeToToken(targetCenMax);
+  if (auto *exact = dynamic_cast<TF1 *>(file->Get(exactName.c_str()))) {
+    match.func = exact;
+    match.name = exactName;
+    match.cenMin = targetCenMin;
+    match.cenMax = targetCenMax;
+    match.exact = true;
+    return match;
+  }
+
+  double bestLeft = -std::numeric_limits<double>::infinity();
+  double bestWidth = std::numeric_limits<double>::infinity();
+  double bestAbsDistance = std::numeric_limits<double>::infinity();
+  SpectrumFunctionMatch fallbackNearest;
+
+  TIter next(file->GetListOfKeys());
+  while (auto *obj = next()) {
+    auto *key = dynamic_cast<TKey *>(obj);
+    if (!key) continue;
+    const std::string name = key->GetName();
+    double cenMin = 0.0;
+    double cenMax = 0.0;
+    if (!ParseBlastWaveCentralityName(name, cenMin, cenMax)) continue;
+
+    auto *func = dynamic_cast<TF1 *>(file->Get(name.c_str()));
+    if (!func) continue;
+
+    const double width = cenMax - cenMin;
+    const double absDistance = std::fabs(cenMin - targetCenMin);
+    if (absDistance < bestAbsDistance ||
+        (std::fabs(absDistance - bestAbsDistance) < 1e-6 && width < (fallbackNearest.cenMax - fallbackNearest.cenMin))) {
+      bestAbsDistance = absDistance;
+      fallbackNearest.func = func;
+      fallbackNearest.name = name;
+      fallbackNearest.cenMin = cenMin;
+      fallbackNearest.cenMax = cenMax;
+      fallbackNearest.exact = false;
+    }
+
+    if (cenMin - targetCenMin > 1e-6) continue;
+    if (cenMin > bestLeft + 1e-6 ||
+        (std::fabs(cenMin - bestLeft) < 1e-6 && width < bestWidth)) {
+      bestLeft = cenMin;
+      bestWidth = width;
+      match.func = func;
+      match.name = name;
+      match.cenMin = cenMin;
+      match.cenMax = cenMax;
+      match.exact = false;
+    }
+  }
+
+  if (!match.func) match = fallbackNearest;
+  return match;
 }
 
 static std::string SanitizePeriodTag(std::string tag) {
@@ -356,7 +521,18 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
   std::vector<double> target_ct_range = cfg.value("target_ct_range", std::vector<double>{});
   std::vector<double> target_cen_range = cfg.value("target_cen_range", std::vector<double>{});
   std::vector<double> yield_eff_range = cfg.value("yield_eff_range", std::vector<double>{0.5, 0.9});
-  bool use_spectrum_expected = cfg.value("use_spectrum", true);
+  bool use_spectrum_default = cfg.value("use_spectrum", true);
+  std::vector<WpUseSpectrumRule> use_spectrum_rules;
+  if (cfg.contains("use_spectrum_override") && cfg["use_spectrum_override"].is_array()) {
+    use_spectrum_rules = ParseUseSpectrumRules(cfg["use_spectrum_override"]);
+  }
+  bool use_spectrum_may_be_needed = use_spectrum_default;
+  for (const auto &rule : use_spectrum_rules) {
+    if (rule.useSpectrum) {
+      use_spectrum_may_be_needed = true;
+      break;
+    }
+  }
   bool enable_mt = cfg.value("enable_implicit_mt", false);
   bool prefit_sidebands = cfg.value("prefit_sidebands", false);
   bool save_score_fit_frames = cfg.value("save_score_fit_frames", false);
@@ -417,7 +593,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         }
       }
     }
-    if(use_spectrum_expected && !spectrum_file.empty()){
+    if(use_spectrum_may_be_needed && !spectrum_file.empty()){
       fSpectrum.reset(TFile::Open(spectrum_file.c_str(), "READ"));
       if(!fSpectrum || fSpectrum->IsZombie()){
         printf("[Warn] Cannot open spectrum_file: %s\n", spectrum_file.c_str());
@@ -590,8 +766,29 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
     std::string desc;
   };
 
+  auto use_spectrum_for_context = [&](const BinContext &ctx) {
+    bool value = use_spectrum_default;
+    for (const auto &rule : use_spectrum_rules) {
+      if (!ModesMatch(rule.modes, mix_mode)) continue;
+      if (!rule.centralityRanges.empty()) {
+        if (!ctx.hasCen) continue;
+        bool matchedCen = false;
+        for (const auto &range : rule.centralityRanges) {
+          if (RangeMatches(range.first, range.second, ctx.cenmin, ctx.cenmax)) {
+            matchedCen = true;
+            break;
+          }
+        }
+        if (!matchedCen) continue;
+      }
+      value = rule.useSpectrum;
+    }
+    return value;
+  };
+
   auto process_one_bin = [&](const BinContext &ctx){
       printf("[WP] mode %d | %s\n", ctx.mode, ctx.desc.c_str());
+      const bool use_spectrum_this_bin = use_spectrum_for_context(ctx);
 
       std::string label = ctx.label.empty() ? make_label(ctx.hasCen, ctx.hasPt, ctx.hasCt,
                                                          ctx.cenmin, ctx.cenmax, ctx.ptmin, ctx.ptmax, ctx.ctmin, ctx.ctmax)
@@ -646,26 +843,20 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       double tail_nR = 2.0;
 
       double expected_signal_base = 0.0;
-      if(use_spectrum_expected && mix_mode == "cen_pt" && ctx.hasCen && ctx.hasPt && fSpectrum && !fSpectrum->IsZombie() && !hEventsList.empty()){
+      if(use_spectrum_this_bin && mix_mode == "cen_pt" && ctx.hasCen && ctx.hasPt && fSpectrum && !fSpectrum->IsZombie() && !hEventsList.empty()){
         constexpr double kBranchingRatio = 0.25;
         constexpr double kDeltaY = 2.0;
         constexpr double kMatterAntiFactor = 2.0;
-        auto edge_to_token = [](double x){
-          if(std::fabs(x - std::round(x)) < 1e-6) return std::to_string((int)std::llround(x));
-          char buf[32]; snprintf(buf, sizeof(buf), "%g", x); return std::string(buf);
-        };
-        std::string bw_name = std::string("BlastWave_") + edge_to_token(ctx.cenmin) + "_" + edge_to_token(ctx.cenmax);
-        TF1 *bwFunc = dynamic_cast<TF1*>(fSpectrum->Get(bw_name.c_str()));
-        const std::string bw_fallback = "BlastWave_50_90";
-        if(!bwFunc){
-          bwFunc = dynamic_cast<TF1*>(fSpectrum->Get(bw_fallback.c_str()));
-          if(bwFunc){
-            printf("  [Info] Missing %s, fallback to %s\n", bw_name.c_str(), bw_fallback.c_str());
-          }
-        }
+        std::string bw_name = std::string("BlastWave_") + EdgeToToken(ctx.cenmin) + "_" + EdgeToToken(ctx.cenmax);
+        SpectrumFunctionMatch bwMatch = FindBestBlastWaveForCentrality(fSpectrum.get(), ctx.cenmin, ctx.cenmax);
+        TF1 *bwFunc = bwMatch.func;
         if(!bwFunc){
           printf("  [Warn] Missing BW function %s in %s\n", bw_name.c_str(), spectrum_file.c_str());
         } else {
+          if(!bwMatch.exact){
+            printf("  [Info] Missing %s, use nearest-left BW %s for expected signal\n",
+                   bw_name.c_str(), bwMatch.name.c_str());
+          }
           double nEv = 0.0;
           for(auto *hEvents : hEventsList){
             if(!hEvents) continue;
@@ -701,13 +892,13 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
           double extYield = bwInt * nEv * mcEff * kBranchingRatio * kDeltaY * kMatterAntiFactor;
           if(std::isfinite(extYield) && extYield > 0.0){
             expected_signal_base = extYield;
-            printf("  [Info] expected_signal_base from BW: N_ev=%.0f, Int(BW)=%.6g, eff=%.6g, BR=%.2f, dy=%.1f, M+A=%.1f, S=%.6g\n",
-                   nEv, bwInt, mcEff, kBranchingRatio, kDeltaY, kMatterAntiFactor, extYield);
+            printf("  [Info] expected_signal_base from BW %s: N_ev=%.0f, Int(BW)=%.6g, eff=%.6g, BR=%.2f, dy=%.1f, M+A=%.1f, S=%.6g\n",
+                   bwMatch.name.c_str(), nEv, bwInt, mcEff, kBranchingRatio, kDeltaY, kMatterAntiFactor, extYield);
           } else {
             printf("  [Warn] Non-positive BW expected yield\n");
           }
         }
-      } else if(mix_mode == "cen_pt" && ctx.hasCen && ctx.hasPt && !use_spectrum_expected) {
+      } else if(mix_mode == "cen_pt" && ctx.hasCen && ctx.hasPt && !use_spectrum_this_bin) {
         printf("  [Info] use_spectrum=false: expected signal counts will use pol0 fit to S(3#sigma)/eff.\n");
       }
 
@@ -776,6 +967,10 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       std::vector<double> B3_vals(scores.size(), 0.0);
       std::vector<double> B2_vals(scores.size(), 0.0);
       std::vector<double> B4_vals(scores.size(), 0.0);
+      std::vector<double> mean_vals(scores.size(), 0.0);
+      std::vector<double> sigma_vals(scores.size(), 0.0);
+      std::vector<double> mean_err_vals(scores.size(), 0.0);
+      std::vector<double> sigma_err_vals(scores.size(), 0.0);
 
       // 预取该 bin 全部事件的质量与分数，避免每个 score 阈值重复扫描树
       // 使用 ForeachSlot 收集每个 slot 的局部向量，减少锁开销，再合并并按分数降序一次排序
@@ -946,6 +1141,10 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
                             RooFit::Name("pdf_sig"));
         }
         chi2_ndf_vals[original_index] = chi2ndf;
+        mean_vals[original_index] = mean.getVal();
+        sigma_vals[original_index] = sigma.getVal();
+        mean_err_vals[original_index] = mean.getError();
+        sigma_err_vals[original_index] = sigma.getError();
         double s_lo3 = mean.getVal() - 3.0 * sigma.getVal();
         double s_hi3 = mean.getVal() + 3.0 * sigma.getVal();
         m_global.setRange("sigwin3", s_lo3, s_hi3);
@@ -957,7 +1156,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         S3_vals[original_index] = S3;
         B3_vals[original_index] = B3;
         const bool use_spectrum_for_precurve =
-            (mix_mode == "cen_pt" && use_spectrum_expected && expected_signal_base > 0.0);
+            (mix_mode == "cen_pt" && use_spectrum_this_bin && expected_signal_base > 0.0);
         double Sfixed = use_spectrum_for_precurve ? expected_signal_base : S3;
         double S3_err = intSig3 ? nsig.getError() * intSig3->getVal() : 0.0;
         double base_signif3 = (Sfixed+B3>0) ? Sfixed/std::sqrt(Sfixed+B3) : 0.0;
@@ -1046,6 +1245,10 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       std::vector<double> passS3OverEff;  passS3OverEff.reserve(scores.size());
       std::vector<double> passSig3Err; passSig3Err.reserve(scores.size());
       std::vector<int> passOrigIdx;   passOrigIdx.reserve(scores.size());
+      std::vector<double> passMean; passMean.reserve(scores.size());
+      std::vector<double> passSigma; passSigma.reserve(scores.size());
+      std::vector<double> passMeanErr; passMeanErr.reserve(scores.size());
+      std::vector<double> passSigmaErr; passSigmaErr.reserve(scores.size());
       for(size_t i=0;i<scores.size();++i){
         if(sig_vals[i] >= 0.0 && std::isfinite(chi2_ndf_vals[i]) && chi2_ndf_vals[i] <= max_chi2_ndf){
           passScores.push_back(scores[i]);
@@ -1056,6 +1259,10 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
           passS3OverEff.push_back(s3_over_eff_vals[i]);
           passSig3Err.push_back(s3_over_eff_vals_err[i]);
           passOrigIdx.push_back((int)i);
+          passMean.push_back(mean_vals[i]);
+          passSigma.push_back(sigma_vals[i]);
+          passMeanErr.push_back(mean_err_vals[i]);
+          passSigmaErr.push_back(sigma_err_vals[i]);
         }
       }
 
@@ -1069,6 +1276,16 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         bestScore = passScores[bestIdx];
         if((size_t)bestIdx < passEffs.size()) bestEff = passEffs[bestIdx];
         if((size_t)bestIdx < passS3OverEff.size()) bestS3OverEff = passS3OverEff[bestIdx];
+      }
+      std::vector<double> passEffErr(passEffs.size(), 0.0);
+      for(size_t i=0; i<passEffs.size(); ++i){
+        double nearestStep = std::numeric_limits<double>::infinity();
+        for(size_t j=0; j<passEffs.size(); ++j){
+          if(i == j) continue;
+          const double step = std::fabs(passEffs[i] - passEffs[j]);
+          if(step > 0.0 && std::isfinite(step)) nearestStep = std::min(nearestStep, step);
+        }
+        passEffErr[i] = std::isfinite(nearestStep) ? 0.5 * nearestStep : 0.0;
       }
 
       dSigs->cd();
@@ -1100,6 +1317,26 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         grSigEff.SetLineWidth(2);
         grSigEff.SetLineColor(kBlue+1);
         grSigEff.Write();
+        TGraphErrors grMean((int)passEffs.size());
+        TGraphErrors grSigma((int)passEffs.size());
+        for(int i=0;i<(int)passEffs.size();++i){
+          grMean.SetPoint(i, passEffs[i], passMean[i]);
+          grMean.SetPointError(i, passEffErr[i], passMeanErr[i]);
+          grSigma.SetPoint(i, passEffs[i], passSigma[i]);
+          grSigma.SetPointError(i, passEffErr[i], passSigmaErr[i]);
+        }
+        grMean.SetName("gr_fit_mean_vs_efficiency");
+        grMean.SetTitle((ctx.desc + ";BDT efficiency;Fitted mean (GeV/#it{c}^{2})").c_str());
+        grMean.SetMarkerStyle(25);
+        grMean.SetMarkerColor(kBlue+1);
+        grMean.SetLineColor(kBlue+1);
+        grMean.Write();
+        grSigma.SetName("gr_fit_sigma_vs_efficiency");
+        grSigma.SetTitle((ctx.desc + ";BDT efficiency;Fitted #sigma (GeV/#it{c}^{2})").c_str());
+        grSigma.SetMarkerStyle(25);
+        grSigma.SetMarkerColor(kRed+1);
+        grSigma.SetLineColor(kRed+1);
+        grSigma.Write();
         // ±1σ band for significance vs efficiency (upper: 2σ window, lower: 4σ window)
         TGraph bandEff;
         int npts_eff = (int)passEffs.size();
@@ -1125,7 +1362,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         hYieldEff.SetMarkerStyle(20);
         hYieldEff.SetMarkerColor(kMagenta+1);
         // Always fit pol0 on S(3σ)/eff for display; use it when spectrum expected counts are disabled or unavailable.
-        const bool use_bw_expected = (mix_mode == "cen_pt" && use_spectrum_expected && expected_signal_base > 0.0);
+        const bool use_bw_expected = (mix_mode == "cen_pt" && use_spectrum_this_bin && expected_signal_base > 0.0);
         std::unique_ptr<TF1> fpol0 = std::make_unique<TF1>("fpol0","pol0");
         hYieldEff.Fit(fpol0.get(), "QS"); // quiet, store result
         double fit_c0 = fpol0->GetParameter(0);
@@ -1145,7 +1382,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         if(!use_bw_expected){
           ptFit->AddText(Form("pol0 c0 = %.3f #pm %.3f", fit_c0, fit_c0_err));
           if(fit_chi2ndf>=0) ptFit->AddText(Form("#chi^{2}/ndf = %.2f", fit_chi2ndf));
-          if(mix_mode == "cen_pt" && use_spectrum_expected && expected_signal_base <= 0.0){
+          if(mix_mode == "cen_pt" && use_spectrum_this_bin && expected_signal_base <= 0.0){
             ptFit->AddText("BW unavailable: use pol0 expected S");
           }
         } else {
@@ -1409,9 +1646,62 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         ptEff->Draw();
         cEff.Update();
         cEff.SaveAs((out_dir+"/sig_vs_eff_"+label+".pdf").c_str());
+        TCanvas cShape("c_shape_scan","c_shape_scan",900,800);
+        cShape.Divide(1,2,0.0,0.0);
+        auto drawShapeGraph = [&](int pad, TGraphErrors &gr, const char *yTitle, Color_t color){
+          cShape.cd(pad);
+          gPad->SetLeftMargin(0.12);
+          gPad->SetRightMargin(0.04);
+          gPad->SetBottomMargin(pad == 2 ? 0.16 : 0.06);
+          gPad->SetTopMargin(pad == 1 ? 0.08 : 0.03);
+          gr.SetTitle("");
+          gr.GetXaxis()->SetTitle(pad == 2 ? "BDT efficiency" : "");
+          gr.GetYaxis()->SetTitle(yTitle);
+          gr.GetYaxis()->SetTitleOffset(1.2);
+          gr.SetMarkerStyle(25);
+          gr.SetMarkerColor(color);
+          gr.SetLineColor(color);
+          gr.SetFillStyle(0);
+          if(pad == 1){
+            gr.SetMinimum(2.988);
+            gr.SetMaximum(2.998);
+          } else {
+            gr.SetMinimum(1.2e-3);
+            gr.SetMaximum(2.2e-3);
+          }
+          gr.Draw("AP");
+          double ymin = gr.GetYaxis()->GetXmin();
+          double ymax = gr.GetYaxis()->GetXmax();
+          TLine *line = new TLine(bestEff, ymin, bestEff, ymax);
+          line->SetLineColor(kRed+1);
+          line->SetLineStyle(2);
+          line->SetLineWidth(2);
+          line->Draw("SAME");
+          TPaveText *ptShape = new TPaveText(0.16, 0.76, 0.48, 0.9, "NDC");
+          ptShape->SetBorderSize(0);
+          ptShape->SetFillStyle(0);
+          ptShape->SetTextFont(42);
+          ptShape->SetTextAlign(11);
+          if(pad == 1) ptShape->AddText(ctx.desc.c_str());
+          ptShape->AddText(Form("Best #epsilon = %.3f", bestEff));
+          ptShape->AddText("X err: half #Delta#epsilon scan");
+          ptShape->AddText("Y err: fit parameter error");
+          ptShape->Draw("SAME");
+        };
+        drawShapeGraph(1, grMean, "Fitted mean (GeV/#it{c}^{2})", kBlue+1);
+        drawShapeGraph(2, grSigma, "Fitted #sigma (GeV/#it{c}^{2})", kRed+1);
+        cShape.SaveAs((out_dir+"/mean_sigma_vs_efficiency_"+label+".pdf").c_str());
         TCanvas cYield("c_s3eff","c_s3eff",900,650);
         cYield.SetLeftMargin(0.12); cYield.SetRightMargin(0.04); cYield.SetBottomMargin(0.12); cYield.SetTopMargin(0.08);
         cYield.SetGridx(); cYield.SetGridy();
+        double yMaxYieldContent = 0.0;
+        for(int ib=1; ib<=hYieldEff.GetNbinsX(); ++ib){
+          const double val = hYieldEff.GetBinContent(ib);
+          if(std::isfinite(val) && val > yMaxYieldContent) yMaxYieldContent = val;
+        }
+        if(yMaxYieldContent <= 0.0) yMaxYieldContent = 1.0;
+        hYieldEff.SetMinimum(0.0);
+        hYieldEff.SetMaximum(1.25 * yMaxYieldContent);
         hYieldEff.Draw("PE");
         TGraph grBestYield(1); grBestYield.SetPoint(0, bestEff, bestS3OverEff);
         grBestYield.SetMarkerStyle(29); grBestYield.SetMarkerSize(2.0); grBestYield.SetMarkerColor(kRed+1);
@@ -1472,7 +1762,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       double cenmin = cen_bins[i_c];
       double cenmax = cen_bins[i_c+1];
       if(target_cen_range.size()==2){
-        if( !(fabs(cenmin - target_cen_range[0])<1e-6 && fabs(cenmax - target_cen_range[1])<1e-6) ) continue;
+        if(cenmin + 1e-6 < target_cen_range[0] || cenmax - 1e-6 > target_cen_range[1]) continue;
       }
       std::vector<double> pt_edges;
       if(!pt_by_cen.empty()){
@@ -1485,6 +1775,9 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       for(size_t i_pt=0; i_pt+1<pt_edges.size(); ++i_pt){
         double ptmin = pt_edges[i_pt];
         double ptmax = pt_edges[i_pt+1];
+        if(target_pt_range.size()==2){
+          if( !(fabs(ptmin - target_pt_range[0])<1e-6 && fabs(ptmax - target_pt_range[1])<1e-6) ) continue;
+        }
         BinContext ctx; ctx.hasCen=true; ctx.hasPt=true; ctx.hasCt=false; ctx.mode=3;
         ctx.cenmin=cenmin; ctx.cenmax=cenmax; ctx.ptmin=ptmin; ctx.ptmax=ptmax; ctx.ctmin=0; ctx.ctmax=0;
         ctx.label = make_label(true,true,false,cenmin,cenmax,ptmin,ptmax,0,0);

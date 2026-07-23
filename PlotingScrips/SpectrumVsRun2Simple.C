@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+R__LOAD_LIBRARY(libGpad)
+
 struct Run2Ref {
     const char *centTag;
     const char *run2File;
@@ -358,4 +360,69 @@ void SpectrumVsRun2Simple(
     fOut.Close();
 
     std::cout << "[SpectrumVsRun2Simple] Saved comparison ROOT file: " << outPath << std::endl;
+}
+
+void ExportSpectrumVsRun2SimpleCanvases(const char *rootPath,
+                                        const char *periodTag,
+                                        const char *outputDir) {
+    const std::array<const char *, 4> cents = {{"cen_0_10", "cen_10_30", "cen_30_50", "cen_50_80"}};
+
+    std::unique_ptr<TFile> f(TFile::Open(rootPath, "READ"));
+    if (!f || f->IsZombie()) {
+        std::cerr << "[ExportSpectrumVsRun2SimpleCanvases] Cannot open: " << rootPath << std::endl;
+        return;
+    }
+
+    gSystem->mkdir(outputDir, true);
+    for (const auto *cent : cents) {
+        auto *c = dynamic_cast<TCanvas *>(f->Get((std::string(cent) + "/c_final_spectrum").c_str()));
+        if (!c) {
+            std::cerr << "[ExportSpectrumVsRun2SimpleCanvases] Missing canvas for " << cent
+                      << " in " << rootPath << std::endl;
+            continue;
+        }
+        const std::string outPdf = std::string(outputDir) + "/Run3_vs_Run2_" + periodTag + "_" + cent + ".pdf";
+        c->SaveAs(outPdf.c_str());
+        std::cout << "[Info] Saved: " << outPdf << std::endl;
+    }
+}
+
+void SpectrumVsRun2SimplePeriodCompare(
+    const char *run2BaseDir = "/Users/zhengqingwang/alice/data/h3l_spec_run2",
+    const char *run2BWRoot = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/H3l_2body_spectrum/utils/H3L_BWFit.root",
+    const char *outputDir = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/SpectrumvsRun2") {
+
+    struct PeriodSpec {
+        const char *tag;
+        const char *path;
+        const char *rootName;
+    };
+
+    const std::array<PeriodSpec, 3> periods = {{
+        {"LHC23_PbPb_pass5",
+         "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC23_PbPb_pass5_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
+         "Spectrum_vs_run2_simple_LHC23_PbPb_pass5.root"},
+        {"LHC24ar_pass3",
+         "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC24ar_pass3_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
+         "Spectrum_vs_run2_simple_LHC24ar_pass3.root"},
+        {"LHC25_PbPb_pass1",
+         "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/LHC25_PbPb_pass1_CustomV0s_HadronPID/bdt_spectrum/both/spectrum.root",
+         "Spectrum_vs_run2_simple_LHC25_PbPb_pass1.root"}
+    }};
+
+    for (const auto &period : periods) {
+        SpectrumVsRun2Simple(period.path,
+                             run2BaseDir,
+                             "Graph1D_y1",
+                             "",
+                             run2BWRoot,
+                             "BlastWave_H3L_10_30",
+                             -1.0,
+                             -1.0,
+                             outputDir,
+                             period.rootName);
+
+        const std::string rootPath = std::string(outputDir) + "/" + period.rootName;
+        ExportSpectrumVsRun2SimpleCanvases(rootPath.c_str(), period.tag, outputDir);
+    }
 }

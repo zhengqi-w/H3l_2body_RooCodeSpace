@@ -11,6 +11,7 @@
 #include <RooPlot.h>
 #include <TCanvas.h>
 #include <TBox.h>
+#include <TChain.h>
 #include <TClass.h>
 #include <TDirectory.h>
 #include <TFile.h>
@@ -23,6 +24,8 @@
 #include <TLatex.h>
 #include <TPaveText.h>
 #include <TTree.h>
+#include <TTreeFormula.h>
+#include <TStyle.h>
 
 #include "../../include/AliPWGFunc.h"
 #include "../../include/AliPWGFunc.cxx"
@@ -31,6 +34,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -106,7 +110,67 @@ std::map<std::string, SpectrumFunctionConfig> ParseSpectrumFitParameterConfigs(c
             }
             break;
         }
-        if (!cfg.initial.empty() || !cfg.limits.empty()) out[it.key()] = std::move(cfg);
+        const char *fixedKeys[] = {"fixed", "fix", "fix_parameters", "fixed_parameters"};
+        for (const char *key : fixedKeys) {
+            if (!v.contains(key) || !v[key].is_array()) continue;
+            for (const auto &entry : v[key]) {
+                if (entry.is_boolean()) {
+                    cfg.fixed.push_back(entry.get<bool>());
+                } else if (entry.is_number()) {
+                    cfg.fixed.push_back(entry.get<double>() != 0.0);
+                } else {
+                    cfg.fixed.push_back(false);
+                }
+            }
+            break;
+        }
+        if (!cfg.initial.empty() || !cfg.limits.empty() || !cfg.fixed.empty()) out[it.key()] = std::move(cfg);
+    }
+    return out;
+}
+
+std::map<std::string, std::map<std::string, SpectrumFunctionConfig>>
+ParseSpectrumFitParameterConfigsByCentrality(const GeneralHelper::Json &j) {
+    std::map<std::string, std::map<std::string, SpectrumFunctionConfig>> out;
+    if (!j.is_object()) return out;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        if (!it.value().is_object()) continue;
+        auto parsed = ParseSpectrumFitParameterConfigs(it.value());
+        if (!parsed.empty()) out[it.key()] = std::move(parsed);
+    }
+    return out;
+}
+
+std::map<std::string, bool> ParseCentralityBoolMap(const GeneralHelper::Json &j) {
+    std::map<std::string, bool> out;
+    if (!j.is_object()) return out;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        const auto &v = it.value();
+        if (v.is_boolean()) {
+            out[it.key()] = v.get<bool>();
+        } else if (v.is_number()) {
+            out[it.key()] = v.get<double>() != 0.0;
+        }
+    }
+    return out;
+}
+
+std::map<std::string, std::vector<std::string>> ParseCentralityStringVectorMap(const GeneralHelper::Json &j) {
+    std::map<std::string, std::vector<std::string>> out;
+    if (!j.is_object()) return out;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        if (!it.value().is_array()) continue;
+        out[it.key()] = it.value().get<std::vector<std::string>>();
+    }
+    return out;
+}
+
+std::map<std::string, std::string> ParseCentralityStringMap(const GeneralHelper::Json &j) {
+    std::map<std::string, std::string> out;
+    if (!j.is_object()) return out;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        if (!it.value().is_string()) continue;
+        out[it.key()] = it.value().get<std::string>();
     }
     return out;
 }
@@ -360,26 +424,36 @@ struct RunConfig {
     std::string sigFunc;
     std::string isMatter;
     std::string mcFileForAcceptance;
+    std::vector<std::string> mcFilesForAcceptance;
+    std::vector<double> mcFileWeights;
+    std::vector<std::vector<double>> mcFileWeightsByCentrality;
     std::string eventSignalLossFile;
     std::string eventSignalLossMethod{"multiplicity"};
     std::vector<double> cenBins;
     std::vector<double> relatedMultiplicityCenter;
+    std::vector<double> relatedMultiplicityUncertainty;
     std::vector<std::vector<double>> ptBinsByCentrality;
     std::vector<std::vector<std::string>> topologySelectionsByCentrality;
+    bool useSpectrumMcCentralityOverrides{false};
+    std::vector<BinningCorrectionConfig::SpectrumMcCentralityOverride> spectrumMcCentralityOverrides;
     std::vector<bool> addEventSignalLossCenPt;
     std::string mcFileForAbsorption;
     double originalCtaoAbsorption{7.6};
     std::string absorptionTree;
     std::string scoreEffDir;
     std::string basicSelectionDataForMcEff;
+    bool mcAcceptanceRequireTwoBody{true};
     std::string additionalDataSelectionGeneral;
     std::string additionalDataSelection;
     std::string centralitySelection;
     bool enableOneBinQa{false};
     bool onTheFlyChecksEnabled{false};
     bool saveChecksPdf{false};
+    bool saveOnTheFlyQaTree{false};
     bool saveResultsToPdf{false};
     double onTheFlyMassWindowNSigmas{0.0};
+    long long onTheFlyQaTreeMaxEntriesPerBin{-1};
+    std::vector<std::string> onTheFlyQaTreeSkipLabels;
     std::vector<std::string> oneBinQaColumns;
     std::vector<std::string> onTheFlyVariables;
     std::vector<Hist2DPair> oneBinQaPairs;
@@ -404,14 +478,19 @@ struct RunConfig {
     std::vector<std::string> systAbsorptionFiles;
     std::vector<std::string> systAbsorptionFileLabels;
     std::vector<std::string> integralFitFuncs;
+    std::map<std::string, std::vector<std::string>> integralFitFuncsByCentrality;
     std::map<std::string, SpectrumFunctionConfig> integralFitParameters;
+    std::map<std::string, std::map<std::string, SpectrumFunctionConfig>> integralFitParametersByCentrality;
+    std::map<std::string, bool> integralFitFixByCentrality;
     std::string integralFitFunc{"fBGBW"};
+    std::map<std::string, std::string> integralFitFuncByCentrality;
     bool rejectIntegralFitFuncByChi2{false};
     double integralFitFuncMaxChi2Ndf{5.0};
     double integralFitFuncFallbackFraction{0.20};
     double integralGaussFitMaxChi2Ndf{3.0};
     double perPtBinGaussFitMaxChi2Ndf{3.0};
     double integralExtrapToyMaxChi2Ndf{-1.0};
+    double integralStatFitCovMaxFraction{0.20};
     double integralFitRangeMin{0.0};
     double integralFitRangeMax{10.0};
     double integratedYieldRangeMin{0.0};
@@ -461,6 +540,7 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     const auto syst = analysis.value("systematics", GeneralHelper::Json::object());
     const auto modeProfiles = analysis.value("mode_profiles", GeneralHelper::Json::object());
     const auto profile = modeProfiles.value(mode, GeneralHelper::Json::object());
+    const auto corrections = analysis.value("corrections", GeneralHelper::Json::object());
     const auto commonBinning = common.value("binning", GeneralHelper::Json::object());
 
     out.dataTree = GetS(trees, "data", "O2hypcands");
@@ -472,13 +552,20 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     out.sigFunc = GetS(fit, "signal_fit_func", "dscb");
     out.isMatter = GetS(selection, "is_matter", "both");
     out.basicSelectionDataForMcEff = GetS(commonSel, "basic_selection_data", "");
+    out.mcAcceptanceRequireTwoBody = commonSel.value("mc_acceptance_require_two_body",
+                                                     commonSel.value("is_two_body_selected", true));
     out.additionalDataSelectionGeneral = GetS(selection, "additional_data_selection_general", "");
     out.additionalDataSelection = GetS(profile, "additional_data_selection", "");
     out.centralitySelection = GetS(profile, "centrality_selection", "");
     const bool checksEnabled = checks.value("enabled", false);
     out.onTheFlyChecksEnabled = checksEnabled && onFlyChecks.value("enable", false);
-    out.enableOneBinQa = out.onTheFlyChecksEnabled;
+    out.enableOneBinQa = false;
     out.saveChecksPdf = checks.value("save_pdf", false);
+    out.saveOnTheFlyQaTree = onFlyChecks.value("save_hypertriton_qa_tree", false);
+    out.onTheFlyQaTreeMaxEntriesPerBin = onFlyChecks.value("qa_tree_max_entries_per_bin", -1LL);
+    if (onFlyChecks.contains("qa_tree_skip_labels") && onFlyChecks["qa_tree_skip_labels"].is_array()) {
+        out.onTheFlyQaTreeSkipLabels = onFlyChecks["qa_tree_skip_labels"].get<std::vector<std::string>>();
+    }
     out.saveResultsToPdf = execution.value("save_results_to_pdf", false);
     out.onTheFlyMassWindowNSigmas = onFlyChecks.value("nsigmas_mass_window", 0.0);
     if (onFlyChecks.contains("variables") && onFlyChecks["variables"].is_array()) {
@@ -529,8 +616,70 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     if (commonBinning.contains("related_multiplicity_center") && commonBinning["related_multiplicity_center"].is_array()) {
         out.relatedMultiplicityCenter = commonBinning["related_multiplicity_center"].get<std::vector<double>>();
     }
+    if (commonBinning.contains("related_multiplicity_uncertainty") && commonBinning["related_multiplicity_uncertainty"].is_array()) {
+        out.relatedMultiplicityUncertainty = commonBinning["related_multiplicity_uncertainty"].get<std::vector<double>>();
+    }
     if (commonBinning.contains("pt_bins_by_centrality") && commonBinning["pt_bins_by_centrality"].is_array()) {
         out.ptBinsByCentrality = commonBinning["pt_bins_by_centrality"].get<std::vector<std::vector<double>>>();
+    }
+    const auto mcAccCentOverrides = corrections.value("mc_acceptance_centrality_overrides",
+                                                      GeneralHelper::Json::object());
+    out.useSpectrumMcCentralityOverrides = mcAccCentOverrides.value("enable", false);
+    if (out.useSpectrumMcCentralityOverrides &&
+        mcAccCentOverrides.contains("ranges") &&
+        mcAccCentOverrides["ranges"].is_array()) {
+        for (const auto &row : mcAccCentOverrides["ranges"]) {
+            if (!row.is_object()) continue;
+            if (!row.contains("target") || !row.contains("source")) continue;
+            if (!row["target"].is_array() || !row["source"].is_array()) continue;
+            if (row["target"].size() < 2 || row["source"].size() < 2) continue;
+            BinningCorrectionConfig::SpectrumMcCentralityOverride ov;
+            ov.targetMin = row["target"][0].get<double>();
+            ov.targetMax = row["target"][1].get<double>();
+            ov.sourceMin = row["source"][0].get<double>();
+            ov.sourceMax = row["source"][1].get<double>();
+            if (ov.targetMax > ov.targetMin && ov.sourceMax > ov.sourceMin) {
+                out.spectrumMcCentralityOverrides.push_back(ov);
+            }
+        }
+    }
+    if (out.spectrumMcCentralityOverrides.empty()) {
+        out.useSpectrumMcCentralityOverrides = false;
+    }
+    if (IsCombinePeriodEnabled(cfg)) {
+        const auto commonPeriods = common.value("periods", GeneralHelper::Json::array());
+        if (commonPeriods.is_array() && !commonPeriods.empty()) {
+            out.mcFilesForAcceptance.clear();
+            for (const auto &period : commonPeriods) {
+                if (!period.is_object()) continue;
+                const std::string mcPath = GetS(period, "mc_path", "");
+                if (!mcPath.empty()) out.mcFilesForAcceptance.push_back(mcPath);
+            }
+            if (!out.mcFilesForAcceptance.empty()) {
+                const double globalCmin = !out.cenBins.empty() ? out.cenBins.front() : 0.0;
+                const double globalCmax = !out.cenBins.empty() ? out.cenBins.back() : 100.0;
+                for (const auto &kv : GetPeriodEventWeights(cfg, globalCmin, globalCmax)) {
+                    out.mcFileWeights.push_back(kv.second);
+                }
+                if (out.mcFileWeights.size() != out.mcFilesForAcceptance.size()) {
+                    out.mcFileWeights.assign(out.mcFilesForAcceptance.size(),
+                                             1.0 / static_cast<double>(out.mcFilesForAcceptance.size()));
+                }
+                if (out.cenBins.size() >= 2) {
+                    for (size_t ic = 0; ic + 1 < out.cenBins.size(); ++ic) {
+                        std::vector<double> weights;
+                        for (const auto &kv : GetPeriodEventWeights(cfg, out.cenBins[ic], out.cenBins[ic + 1])) {
+                            weights.push_back(kv.second);
+                        }
+                        if (weights.size() != out.mcFilesForAcceptance.size()) {
+                            weights.assign(out.mcFilesForAcceptance.size(),
+                                           1.0 / static_cast<double>(out.mcFilesForAcceptance.size()));
+                        }
+                        out.mcFileWeightsByCentrality.push_back(std::move(weights));
+                    }
+                }
+            }
+        }
     }
     if (profile.contains("data_selection_topology") && profile["data_selection_topology"].is_array()) {
         out.topologySelectionsByCentrality.clear();
@@ -575,10 +724,14 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     }
     out.absorptionLength = GetD(syst, "absorption_length", out.absorptionLength);
     out.integralFitFunc = GetS(fit, "integral_fit_func", out.integralFitFunc);
+    out.integralFitFuncByCentrality =
+        ParseCentralityStringMap(fit.value("integral_fit_func_by_centrality", GeneralHelper::Json::object()));
     if (syst.contains("integral_fit_funcs") && syst["integral_fit_funcs"].is_array()) {
         out.integralFitFuncs = syst["integral_fit_funcs"].get<std::vector<std::string>>();
     }
     if (out.integralFitFuncs.empty()) out.integralFitFuncs.push_back(out.integralFitFunc);
+    out.integralFitFuncsByCentrality =
+        ParseCentralityStringVectorMap(syst.value("integral_fit_funcs_by_centrality", GeneralHelper::Json::object()));
     out.rejectIntegralFitFuncByChi2 = syst.value("reject_integral_fit_func_by_chi2", out.rejectIntegralFitFuncByChi2);
     out.integralFitFuncMaxChi2Ndf = GetD(syst, "integral_fit_func_max_chi2ndf", out.integralFitFuncMaxChi2Ndf);
     out.integralFitFuncFallbackFraction =
@@ -589,6 +742,8 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
         GetD(syst, "per_ptbin_gauss_fit_max_chi2ndf", out.perPtBinGaussFitMaxChi2Ndf);
     out.integralExtrapToyMaxChi2Ndf =
         GetD(syst, "integral_extrap_toy_max_chi2ndf", out.integralExtrapToyMaxChi2Ndf);
+    out.integralStatFitCovMaxFraction =
+        GetD(syst, "integral_stat_fitcov_max_fraction", out.integralStatFitCovMaxFraction);
     if (syst.contains("integral_fit_range") && syst["integral_fit_range"].is_array() &&
         syst["integral_fit_range"].size() >= 2) {
         out.integralFitRangeMin = syst["integral_fit_range"][0].get<double>();
@@ -609,6 +764,18 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     for (auto &kv : systIntegralFitParameters) {
         out.integralFitParameters[kv.first] = std::move(kv.second);
     }
+    out.integralFitParametersByCentrality =
+        ParseSpectrumFitParameterConfigsByCentrality(fit.value("integral_fit_parameters_by_centrality", GeneralHelper::Json::object()));
+    auto systIntegralFitParametersByCentrality =
+        ParseSpectrumFitParameterConfigsByCentrality(syst.value("integral_fit_parameters_by_centrality", GeneralHelper::Json::object()));
+    for (auto &centKv : systIntegralFitParametersByCentrality) {
+        auto &dst = out.integralFitParametersByCentrality[centKv.first];
+        for (auto &funcKv : centKv.second) dst[funcKv.first] = std::move(funcKv.second);
+    }
+    out.integralFitFixByCentrality =
+        ParseCentralityBoolMap(fit.value("integral_fit_fix_parameters_by_centrality",
+                                         params.value("integral_fit_fix_parameters_by_centrality",
+                                                      GeneralHelper::Json::object())));
     out.branchingRatio = GetD(params, "branching_ratio", out.branchingRatio);
     out.branchingRatioFractionalUncertainty =
         GetD(params, "branching_ratio_fractional_uncertainty",
@@ -1022,6 +1189,9 @@ BinningCorrectionConfig BuildCorrectionConfig(const RunConfig &runCfg) {
     cfg.mcTree = runCfg.mcTree;
     cfg.absorptionTree = runCfg.absorptionTree;
     cfg.mcFileForAcceptance = runCfg.mcFileForAcceptance;
+    cfg.mcFilesForAcceptance = runCfg.mcFilesForAcceptance;
+    cfg.mcFileWeights = runCfg.mcFileWeights;
+    cfg.mcFileWeightsByCentrality = runCfg.mcFileWeightsByCentrality;
     cfg.mcFileForAbsorption = runCfg.mcFileForAbsorption;
     if (!IsAbsorptionCorrectionEnabled(runCfg)) {
         cfg.mcFileForAbsorption.clear();
@@ -1029,10 +1199,13 @@ BinningCorrectionConfig BuildCorrectionConfig(const RunConfig &runCfg) {
     cfg.mcEfficiencySelection = JoinSelectionParts({runCfg.basicSelectionDataForMcEff,
                                                     runCfg.additionalDataSelectionGeneral,
                                                     runCfg.additionalDataSelection});
+    cfg.mcAcceptanceRequireTwoBody = runCfg.mcAcceptanceRequireTwoBody;
     cfg.originalCtaoAbsorption = runCfg.originalCtaoAbsorption;
     cfg.cenBins = runCfg.cenBins;
     cfg.ptBinsByCentrality = runCfg.ptBinsByCentrality;
     cfg.topologySelectionsByCentrality = runCfg.topologySelectionsByCentrality;
+    cfg.useSpectrumMcCentralityOverrides = runCfg.useSpectrumMcCentralityOverrides;
+    cfg.spectrumMcCentralityOverrides = runCfg.spectrumMcCentralityOverrides;
     cfg.ptBins = runCfg.ptBins;
     cfg.ctBinsByPt = runCfg.ctBinsByPt;
     return cfg;
@@ -1217,10 +1390,12 @@ void WriteGroupOutput(TFile &fout,
     if (hSysBranching) hSysBranching->Write("h_sys_branching_ratio", TObject::kOverwrite);
     if (hSysTotal) hSysTotal->Write("h_sys_total", TObject::kOverwrite);
 
-    auto cSys = MakeSystematicsDetailCanvas("c_sys_details", hSysSelection, hSysAbsorption, hSysBranching, hSysTotal);
-    if (cSys) {
-        cSys->SetTitle(hSysTotal ? hSysTotal->GetTitle() : dirName.c_str());
-        cSys->Write("c_sys_details", TObject::kOverwrite);
+    if (sysArtifacts) {
+        auto cSys = MakeSystematicsDetailCanvas("c_sys_details", hSysSelection, hSysAbsorption, hSysBranching, hSysTotal, hFinalStat);
+        if (cSys) {
+            cSys->SetTitle(hSysTotal ? hSysTotal->GetTitle() : dirName.c_str());
+            cSys->Write("c_sys_details", TObject::kOverwrite);
+        }
     }
     auto cFinal = MakeFinalSpectrumCanvas("c_final_spectrum",
                                           hFinalStat,
@@ -1438,6 +1613,287 @@ void WriteOnTheFlyChecksOutput(const std::string &rootFilePath,
     tree.Write("", TObject::kOverwrite);
 
     checksFile.Close();
+}
+
+struct OnTheFlyChecksAccumulator {
+    std::vector<std::string> columns;
+    std::vector<std::string> variables;
+    std::vector<Hist2DPair> pairs;
+    std::unordered_map<std::string, AxisSpec> axisPool;
+    std::unordered_map<std::string, std::unique_ptr<TH1D>> h1;
+    std::unordered_map<std::string, std::unique_ptr<TH2D>> h2;
+    bool saveTree{false};
+    long long maxTreeEntriesPerBin{-1};
+    std::vector<std::string> treeFiles;
+    size_t treeFileCounter{0};
+
+    void Init(const std::vector<std::string> &cols,
+              const std::vector<std::string> &vars,
+              const std::vector<Hist2DPair> &histPairs,
+              const std::unordered_map<std::string, AxisSpec> &axes,
+              bool saveQaTree,
+              long long qaTreeMaxEntriesPerBin) {
+        columns = cols;
+        variables = vars.empty() ? cols : vars;
+        pairs = histPairs;
+        axisPool = axes;
+        saveTree = saveQaTree;
+        maxTreeEntriesPerBin = qaTreeMaxEntriesPerBin;
+
+        for (const auto &var : variables) {
+            if (var.empty()) continue;
+            const auto ax = ResolveQaAxis(var, axisPool);
+            const std::string xTitle = ax.title.empty() ? var : ax.title;
+            const std::string hTitle = ";" + xTitle + ";Counts";
+            auto hist = std::make_unique<TH1D>(("h1_" + var).c_str(), hTitle.c_str(), ax.nBins, ax.min, ax.max);
+            hist->SetDirectory(nullptr);
+            hist->SetStats(true);
+            h1[var] = std::move(hist);
+        }
+
+        for (const auto &p : pairs) {
+            if (p.x.empty() || p.y.empty()) continue;
+            const auto ax = ResolveQaAxis(p.x, axisPool);
+            const auto ay = ResolveQaAxis(p.y, axisPool);
+            const std::string hname = "h2_" + p.x + "_vs_" + p.y;
+            const std::string xTitle = ax.title.empty() ? p.x : ax.title;
+            const std::string yTitle = ay.title.empty() ? p.y : ay.title;
+            const std::string hTitle = ";" + xTitle + ";" + yTitle + ";Counts";
+            auto hist = std::make_unique<TH2D>(hname.c_str(), hTitle.c_str(),
+                                               ax.nBins, ax.min, ax.max,
+                                               ay.nBins, ay.min, ay.max);
+            hist->SetDirectory(nullptr);
+            hist->SetStats(true);
+            h2[p.x + "\t" + p.y] = std::move(hist);
+        }
+
+    }
+
+    bool Ready() const {
+        return !h1.empty() || !h2.empty();
+    }
+
+};
+
+bool NodeHasColumn(ROOT::RDF::RNode &node, const std::string &col) {
+    if (col.empty()) return false;
+    try {
+        (void)node.GetColumnType(col);
+        return true;
+    } catch (const std::exception &) {
+        return false;
+    }
+}
+
+void AccumulateOnTheFlyChecks(ROOT::RDF::RNode node,
+                              OnTheFlyChecksAccumulator &acc) {
+    if (!acc.Ready()) return;
+
+    std::vector<std::pair<std::string, ROOT::RDF::RResultPtr<TH1D>>> h1Results;
+    h1Results.reserve(acc.h1.size());
+    for (const auto &var : acc.variables) {
+        auto itHist = acc.h1.find(var);
+        if (itHist == acc.h1.end()) continue;
+        if (!NodeHasColumn(node, var)) continue;
+        const auto ax = ResolveQaAxis(var, acc.axisPool);
+        const std::string xTitle = ax.title.empty() ? var : ax.title;
+        const std::string hTitle = ";" + xTitle + ";Counts";
+        h1Results.emplace_back(var, node.Histo1D({("tmp_h1_" + var).c_str(), hTitle.c_str(), ax.nBins, ax.min, ax.max}, var));
+    }
+
+    std::vector<std::pair<std::string, ROOT::RDF::RResultPtr<TH2D>>> h2Results;
+    h2Results.reserve(acc.h2.size());
+    for (const auto &p : acc.pairs) {
+        if (!NodeHasColumn(node, p.x) || !NodeHasColumn(node, p.y)) continue;
+        const std::string key = p.x + "\t" + p.y;
+        if (acc.h2.find(key) == acc.h2.end()) continue;
+        const auto ax = ResolveQaAxis(p.x, acc.axisPool);
+        const auto ay = ResolveQaAxis(p.y, acc.axisPool);
+        const std::string hname = "tmp_h2_" + p.x + "_vs_" + p.y;
+        const std::string xTitle = ax.title.empty() ? p.x : ax.title;
+        const std::string yTitle = ay.title.empty() ? p.y : ay.title;
+        const std::string hTitle = ";" + xTitle + ";" + yTitle + ";Counts";
+        h2Results.emplace_back(key, node.Histo2D({hname.c_str(), hTitle.c_str(),
+                                                  ax.nBins, ax.min, ax.max,
+                                                  ay.nBins, ay.min, ay.max},
+                                                 p.x, p.y));
+    }
+
+    for (auto &res : h1Results) {
+        auto itHist = acc.h1.find(res.first);
+        if (itHist != acc.h1.end() && itHist->second) {
+            itHist->second->Add(res.second.GetPtr());
+        }
+    }
+    for (auto &res : h2Results) {
+        auto itHist = acc.h2.find(res.first);
+        if (itHist != acc.h2.end() && itHist->second) {
+            itHist->second->Add(res.second.GetPtr());
+        }
+    }
+
+}
+
+void SnapshotOnTheFlyQaTreeFromFile(const std::string &filePath,
+                                    const std::string &treeName,
+                                    const std::string &selection,
+                                    OnTheFlyChecksAccumulator &acc) {
+    if (!acc.saveTree || acc.columns.empty()) return;
+
+    TFile inputFile(filePath.c_str(), "READ");
+    if (inputFile.IsZombie()) {
+        std::cerr << "[on_the_fly_checks] cannot open QA input file: " << filePath << "\n";
+        return;
+    }
+    auto *inputTree = dynamic_cast<TTree *>(inputFile.Get(treeName.c_str()));
+    if (!inputTree) {
+        std::cerr << "[on_the_fly_checks] cannot find QA input tree: " << treeName << " in " << filePath << "\n";
+        return;
+    }
+
+    std::vector<std::string> validColumns;
+    validColumns.reserve(acc.columns.size());
+    for (const auto &col : acc.columns) {
+        if (inputTree->GetBranch(col.c_str()) || inputTree->GetLeaf(col.c_str())) validColumns.push_back(col);
+    }
+    if (validColumns.empty()) return;
+
+    const std::filesystem::path tmpDir = std::filesystem::temp_directory_path() /
+                                         ("h3l_onfly_qa_" + std::to_string(reinterpret_cast<std::uintptr_t>(&acc)));
+    std::filesystem::create_directories(tmpDir);
+    const std::filesystem::path tmpFile = tmpDir / ("hypertriton_qa_" + std::to_string(acc.treeFileCounter++) + ".root");
+
+    TFile outFile(tmpFile.string().c_str(), "RECREATE");
+    if (outFile.IsZombie()) {
+        std::cerr << "[on_the_fly_checks] cannot create QA tree fragment: " << tmpFile << "\n";
+        return;
+    }
+    TTree outTree("hypertriton_qa_all", "hypertriton_qa_all");
+    std::vector<double> values(validColumns.size(), 0.0);
+    for (size_t ic = 0; ic < validColumns.size(); ++ic) {
+        outTree.Branch(validColumns[ic].c_str(), &values[ic]);
+    }
+
+    std::vector<std::unique_ptr<TTreeFormula>> valueForms;
+    valueForms.reserve(validColumns.size());
+    for (const auto &col : validColumns) {
+        valueForms.emplace_back(std::make_unique<TTreeFormula>(("form_" + col).c_str(), col.c_str(), inputTree));
+    }
+    std::unique_ptr<TTreeFormula> selectionForm;
+    if (!selection.empty()) {
+        selectionForm = std::make_unique<TTreeFormula>("onfly_qa_selection", selection.c_str(), inputTree);
+    }
+
+    const Long64_t nEntries = inputTree->GetEntries();
+    const Long64_t nLoop = (acc.maxTreeEntriesPerBin > 0)
+                               ? std::min<Long64_t>(nEntries, static_cast<Long64_t>(acc.maxTreeEntriesPerBin))
+                               : nEntries;
+    for (Long64_t i = 0; i < nLoop; ++i) {
+        inputTree->LoadTree(i);
+        if (selectionForm) {
+            selectionForm->UpdateFormulaLeaves();
+            if (selectionForm->EvalInstance() == 0.0) continue;
+        }
+        for (size_t ic = 0; ic < valueForms.size(); ++ic) {
+            valueForms[ic]->UpdateFormulaLeaves();
+            values[ic] = valueForms[ic]->EvalInstance();
+        }
+        outTree.Fill();
+    }
+    outTree.Write("", TObject::kOverwrite);
+    outFile.Close();
+
+    acc.treeFiles.push_back(tmpFile.string());
+}
+
+void WriteOnTheFlyChecksOutput(const std::string &rootFilePath,
+                               const OnTheFlyChecksAccumulator &acc,
+                               bool savePdf,
+                               const std::string &pdfBaseDir,
+                               bool saveQaTree) {
+    if (!acc.Ready()) return;
+
+    const std::filesystem::path baseDir = std::filesystem::path(rootFilePath).parent_path();
+    std::filesystem::path pdfDir;
+    if (savePdf) {
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path(pdfBaseDir), ec);
+        pdfDir = std::filesystem::path(pdfBaseDir);
+    }
+
+    std::filesystem::create_directories(baseDir);
+    if (savePdf) std::filesystem::create_directories(pdfDir);
+
+    TFile checksFile(rootFilePath.c_str(), "RECREATE");
+    if (checksFile.IsZombie()) {
+        std::cerr << "[on_the_fly_checks] cannot open output ROOT: " << rootFilePath << std::endl;
+        return;
+    }
+
+    const std::string dirName = "all_candidates";
+    TDirectory *groupDir = checksFile.mkdir(dirName.c_str());
+    if (!groupDir) {
+        checksFile.Close();
+        return;
+    }
+    groupDir->cd();
+    const int oldOptStat = gStyle ? gStyle->GetOptStat() : 0;
+    if (gStyle) gStyle->SetOptStat(1110);
+
+    for (const auto &var : acc.variables) {
+        auto it = acc.h1.find(var);
+        if (it == acc.h1.end() || !it->second) continue;
+        it->second->SetStats(true);
+        it->second->Write("", TObject::kOverwrite);
+        if (savePdf) {
+            TCanvas c(("c_" + std::string(it->second->GetName())).c_str(), it->second->GetTitle(), 900, 700);
+            it->second->Draw("HIST");
+            c.SaveAs((pdfDir / (std::string(it->second->GetName()) + ".pdf")).string().c_str());
+        }
+    }
+
+    for (const auto &p : acc.pairs) {
+        const std::string key = p.x + "\t" + p.y;
+        auto it = acc.h2.find(key);
+        if (it == acc.h2.end() || !it->second) continue;
+        it->second->SetStats(true);
+        it->second->Write("", TObject::kOverwrite);
+        if (savePdf) {
+            TCanvas c(("c_" + std::string(it->second->GetName())).c_str(), it->second->GetTitle(), 900, 700);
+            it->second->Draw("COLZ");
+            c.SaveAs((pdfDir / (std::string(it->second->GetName()) + ".pdf")).string().c_str());
+        }
+    }
+
+    if (saveQaTree) {
+        if (acc.treeFiles.empty()) {
+            std::cout << "[on_the_fly_checks] save_hypertriton_qa_tree=true, but no QA tree fragments were produced.\n";
+        } else {
+            groupDir->cd();
+            TChain chain("hypertriton_qa_all");
+            for (const auto &file : acc.treeFiles) chain.Add(file.c_str());
+            if (chain.GetEntries() > 0) {
+                std::unique_ptr<TTree> mergedTree(chain.CloneTree(-1, "fast"));
+                if (mergedTree) {
+                    mergedTree->SetName("hypertriton_qa_all");
+                    mergedTree->SetTitle("hypertriton_qa_all");
+                    mergedTree->Write("", TObject::kOverwrite);
+                }
+            }
+        }
+    }
+
+    checksFile.Close();
+    if (gStyle) gStyle->SetOptStat(oldOptStat);
+
+    for (const auto &file : acc.treeFiles) {
+        std::error_code ec;
+        std::filesystem::remove(file, ec);
+    }
+    if (!acc.treeFiles.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::path(acc.treeFiles.front()).parent_path(), ec);
+    }
 }
 
 SysBinArtifacts RunSystematicsForBin(const RunConfig &runCfg,
@@ -1735,7 +2191,7 @@ struct BlastWavePostFit {
 
 BlastWavePostFit BuildBlastWavePostFit(const GroupContext &group,
                                        TH1D *hCorr,
-                                       const std::map<std::string, SpectrumFunctionConfig> &fitParameters) {
+                                       const IntegralYieldConfig &fitConfig) {
     BlastWavePostFit out;
     if (!hCorr || group.items.empty()) return out;
 
@@ -1744,18 +2200,32 @@ BlastWavePostFit BuildBlastWavePostFit(const GroupContext &group,
     if (!(fitMax > fitMin)) return out;
 
     const std::string cleanName = SanitizeName(group.dirName);
-    auto raw = BuildSpectrumFunction("fBGBW", cleanName + "_std_bgbw", fitParameters);
+    const double cenMin = group.items.front().cenMin;
+    const double cenMax = group.items.front().cenMax;
+    const auto activeFitParameters = ResolveCentralityFitFunctionParameters(fitConfig, cenMin, cenMax);
+    auto raw = FitSpectrumFunctionBestSeed(hCorr,
+                                           "fBGBW",
+                                           cleanName + "_std_bgbw",
+                                           activeFitParameters,
+                                           fitMin,
+                                           fitMax,
+                                           nullptr,
+                                           fitConfig.useMinosErrors,
+                                           &fitConfig);
     if (!raw) return out;
-    FitHistogramWithFunction(hCorr, raw.get(), fitMin, fitMax);
     raw->SetName(("f_bgbw_" + cleanName).c_str());
     out.fit = std::move(raw);
 
     out.fit->SetRange(0.0, 10.0);
+    std::vector<std::string> parameterLines =
+        BuildSpectrumParameterTextLines("fBGBW", out.fit.get(), activeFitParameters);
+    if (!parameterLines.empty()) parameterLines.erase(parameterLines.begin());
     out.canvas = MakeBlastWaveFitCanvas("c_bgbw_fit_" + cleanName,
                                         hCorr,
                                         out.fit.get(),
-                                        group.items.front().cenMin,
-                                        group.items.front().cenMax);
+                                        cenMin,
+                                        cenMax,
+                                        parameterLines);
     return out;
 }
 
@@ -1777,8 +2247,8 @@ ExpoPostFit BuildExponentialPostFit(const std::string &tag,
 
     const std::string cleanName = SanitizeName(tag);
     out.fit = std::make_unique<TF1>(("f_exp_" + cleanName).c_str(), "[0]*exp(-x/[1])", fitMin, fitMax);
-    out.fit->SetParName(0, "N_{0}");
-    out.fit->SetParName(1, "ct");
+    out.fit->SetParName(0, "N0");
+    out.fit->SetParName(1, "tau");
     out.fit->SetParameter(0, std::max(1.0, hCorr->GetMaximum()));
     out.fit->SetParameter(1, 8.0);
     out.fit->SetParLimits(0, 0.0, std::max(1e9, hCorr->GetMaximum() * 1e4));
@@ -1844,13 +2314,21 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
     SpectrumAcceptanceCache spectrumAccCache;
     SpectrumEventSignalLossCache spectrumEvtSigLossCache;
     if (modeName == "pt_ct") {
-        ptCtAccCache = BuildPtCtAcceptanceCache(corrCfg, runCfg.mcFileForAcceptance);
+        if (corrCfg.mcFilesForAcceptance.size() > 1) {
+            ptCtAccCache = BuildWeightedPtCtAcceptanceCache(corrCfg);
+        } else {
+            ptCtAccCache = BuildPtCtAcceptanceCache(corrCfg, runCfg.mcFileForAcceptance);
+        }
         if (runCfg.addAbsorptionCorrectionPtCt) {
             ptCtAbsoCache = BuildPtCtAbsorptionCache(corrCfg, runCfg.mcFileForAbsorption);
         }
     } else if (isSpectrumMode) {
         const std::string mcFileForAccSpectrum = ResolveAcceptanceMcFileForGroup(runCfg, GroupContext{});
-        spectrumAccCache = BuildSpectrumAcceptanceCache(corrCfg, mcFileForAccSpectrum);
+        if (corrCfg.mcFilesForAcceptance.size() > 1) {
+            spectrumAccCache = BuildWeightedSpectrumAcceptanceCache(corrCfg);
+        } else {
+            spectrumAccCache = BuildSpectrumAcceptanceCache(corrCfg, mcFileForAccSpectrum);
+        }
         spectrumEvtSigLossCache = BuildSpectrumEventSignalLossCache(corrCfg,
                                                                     runCfg.eventSignalLossFile,
                                                                     runCfg.mcFileForAcceptance,
@@ -1859,7 +2337,15 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
 
     std::unordered_map<std::string, std::shared_ptr<ROOT::RDataFrame>> rdfCache;
     std::vector<std::string> onTheFlyQaColumns = runCfg.oneBinQaColumns;
-    std::vector<ProcessOneBinResult::H3lQAVars> onTheFlyQaCandidates;
+    OnTheFlyChecksAccumulator onTheFlyAccumulator;
+    if (runCfg.onTheFlyChecksEnabled) {
+        onTheFlyAccumulator.Init(onTheFlyQaColumns,
+                                 runCfg.onTheFlyVariables,
+                                 runCfg.oneBinQaPairs,
+                                 runCfg.oneBinQaAxisPool,
+                                 runCfg.saveOnTheFlyQaTree,
+                                 runCfg.onTheFlyQaTreeMaxEntriesPerBin);
+    }
 
     std::ofstream trailLog;
     if (runCfg.doSystematics) {
@@ -1988,6 +2474,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         hFitChi2->SetDirectory(nullptr);
         hSysSelection->SetDirectory(nullptr);
         hSysAbsorption->SetDirectory(nullptr);
+        hSysBranching->SetDirectory(nullptr);
         hSysTotal->SetDirectory(nullptr);
         hRaw->SetStats(false);
         hCorr->SetStats(false);
@@ -2076,7 +2563,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             oneBinOpt.useBdtCut = true;
             oneBinOpt.bdtCut = bdtScore;
             oneBinOpt.isMatter = runCfg.isMatter;
-            oneBinOpt.enableQACapture = runCfg.enableOneBinQa;
+            oneBinOpt.enableQACapture = false;
             if (!runCfg.oneBinQaColumns.empty()) {
                 oneBinOpt.qaColumns = runCfg.oneBinQaColumns;
             }
@@ -2127,51 +2614,42 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                 if (clonedMc) fitFrames.emplace_back(clonedMc);
             }
 
-            if (runCfg.enableOneBinQa && !oneBinRes.qaCandidates.empty()) {
-                if (runCfg.onTheFlyChecksEnabled) {
-                    if (onTheFlyQaColumns.empty()) {
-                        onTheFlyQaColumns = oneBinRes.qaColumns;
-                    }
-                    std::unordered_map<std::string, size_t> srcIndex;
-                    for (size_t i = 0; i < oneBinRes.qaColumns.size(); ++i) {
-                        srcIndex[oneBinRes.qaColumns[i]] = i;
-                    }
-
-                    auto appendRow = [&](const ProcessOneBinResult::H3lQAVars &srcRow) {
-                        ProcessOneBinResult::H3lQAVars dstRow;
-                        dstRow.values.assign(onTheFlyQaColumns.size(), 0.0);
-                        for (size_t ic = 0; ic < onTheFlyQaColumns.size(); ++ic) {
-                            auto it = srcIndex.find(onTheFlyQaColumns[ic]);
-                            if (it != srcIndex.end() && it->second < srcRow.values.size()) {
-                                dstRow.values[ic] = srcRow.values[it->second];
-                            }
-                        }
-                        onTheFlyQaCandidates.push_back(std::move(dstRow));
-                    };
-
-                    const bool applyMassWindow = runCfg.onTheFlyMassWindowNSigmas > 0.0 &&
-                                                 oneBinRes.massFit.sigmaData > 0.0;
-                    if (!applyMassWindow) {
-                        for (const auto &srcRow : oneBinRes.qaCandidates) {
-                            appendRow(srcRow);
-                        }
-                    } else {
-                        const auto itMass = srcIndex.find("fMassH3L");
-                        if (itMass == srcIndex.end()) {
-                            for (const auto &srcRow : oneBinRes.qaCandidates) {
-                                appendRow(srcRow);
-                            }
-                        } else {
-                            const double massMin = oneBinRes.massFit.meanData - runCfg.onTheFlyMassWindowNSigmas * oneBinRes.massFit.sigmaData;
-                            const double massMax = oneBinRes.massFit.meanData + runCfg.onTheFlyMassWindowNSigmas * oneBinRes.massFit.sigmaData;
-                            for (const auto &srcRow : oneBinRes.qaCandidates) {
-                                if (itMass->second >= srcRow.values.size()) continue;
-                                const double m = srcRow.values[itMass->second];
-                                if (m < massMin || m > massMax) continue;
-                                appendRow(srcRow);
-                            }
-                        }
-                    }
+            if (runCfg.onTheFlyChecksEnabled && onTheFlyAccumulator.Ready()) {
+                auto dfDataForQa = detail::GetOrLoadSnapshotRdf(item.snapshotDataPath, runCfg.dataTree, &rdfCache);
+                ROOT::RDF::RNode qaNode(*dfDataForQa);
+                std::vector<std::string> qaTreeSelectionParts;
+                if (!oneBinOpt.dataSelection.empty()) {
+                    qaNode = qaNode.Filter(oneBinOpt.dataSelection);
+                    qaTreeSelectionParts.push_back(oneBinOpt.dataSelection);
+                }
+                if (runCfg.isMatter == "matter") {
+                    qaNode = qaNode.Filter("fIsMatter > 0");
+                    qaTreeSelectionParts.push_back("fIsMatter > 0");
+                } else if (runCfg.isMatter == "antimatter") {
+                    qaNode = qaNode.Filter("fIsMatter <= 0");
+                    qaTreeSelectionParts.push_back("fIsMatter <= 0");
+                }
+                const std::string bdtCutExpr = oneBinOpt.bdtScoreColumn + " > " + detail::FormatDoubleLiteral(bdtScore);
+                qaNode = qaNode.Filter(bdtCutExpr);
+                qaTreeSelectionParts.push_back(bdtCutExpr);
+                if (runCfg.onTheFlyMassWindowNSigmas > 0.0 && oneBinRes.massFit.sigmaData > 0.0) {
+                    const double massMin = oneBinRes.massFit.meanData - runCfg.onTheFlyMassWindowNSigmas * oneBinRes.massFit.sigmaData;
+                    const double massMax = oneBinRes.massFit.meanData + runCfg.onTheFlyMassWindowNSigmas * oneBinRes.massFit.sigmaData;
+                    const std::string massCut = "fMassH3L >= " + detail::FormatDoubleLiteral(massMin) +
+                                                " && fMassH3L <= " + detail::FormatDoubleLiteral(massMax);
+                    qaNode = qaNode.Filter(massCut);
+                    qaTreeSelectionParts.push_back(massCut);
+                }
+                AccumulateOnTheFlyChecks(qaNode, onTheFlyAccumulator);
+                const bool skipQaTreeForBin =
+                    std::find(runCfg.onTheFlyQaTreeSkipLabels.begin(),
+                              runCfg.onTheFlyQaTreeSkipLabels.end(),
+                              item.label) != runCfg.onTheFlyQaTreeSkipLabels.end();
+                if (!skipQaTreeForBin) {
+                    SnapshotOnTheFlyQaTreeFromFile(item.snapshotDataPath,
+                                                   runCfg.dataTree,
+                                                   JoinSelectionParts(qaTreeSelectionParts),
+                                                   onTheFlyAccumulator);
                 }
             }
 
@@ -2284,7 +2762,17 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         }
 
         if (modeName == "bdt_spectrum" || modeName == "topology_spectrum") {
-            auto bwOut = BuildBlastWavePostFit(group, hCorr.get(), runCfg.integralFitParameters);
+            IntegralYieldConfig postFitCfg;
+            postFitCfg.nominalFitFunc = runCfg.integralFitFunc;
+            postFitCfg.nominalFitFuncByCentrality = runCfg.integralFitFuncByCentrality;
+            postFitCfg.fitFuncCandidates = runCfg.integralFitFuncs;
+            postFitCfg.fitFuncCandidatesByCentrality = runCfg.integralFitFuncsByCentrality;
+            postFitCfg.fitFuncParameters = runCfg.integralFitParameters;
+            postFitCfg.fitFuncParametersByCentrality = runCfg.integralFitParametersByCentrality;
+            postFitCfg.fitFixByCentrality = runCfg.integralFitFixByCentrality;
+            postFitCfg.lowPtMaxFactor = runCfg.integralLowPtMaxFactor;
+            postFitCfg.useMinosErrors = runCfg.integralFitUseMinosErrors;
+            auto bwOut = BuildBlastWavePostFit(group, hCorr.get(), postFitCfg);
             if (bwOut.fit) shapeFits.push_back(std::move(bwOut.fit));
             if (bwOut.canvas) shapeFitCanvases.push_back(std::move(bwOut.canvas));
         }
@@ -2401,8 +2889,12 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
 
             IntegralYieldConfig iCfg;
             iCfg.nominalFitFunc = runCfg.integralFitFunc;
+            iCfg.nominalFitFuncByCentrality = runCfg.integralFitFuncByCentrality;
             iCfg.fitFuncCandidates = runCfg.integralFitFuncs;
+            iCfg.fitFuncCandidatesByCentrality = runCfg.integralFitFuncsByCentrality;
             iCfg.fitFuncParameters = runCfg.integralFitParameters;
+            iCfg.fitFuncParametersByCentrality = runCfg.integralFitParametersByCentrality;
+            iCfg.fitFixByCentrality = runCfg.integralFitFixByCentrality;
             iCfg.doSystematics = runCfg.doSystematics;
             iCfg.nTrailsForIntegralSyst = runCfg.nTrailsForIntegralSyst;
             iCfg.nCombinationsForExtrapolation = runCfg.nCombinationsForIntegralSystExtrapolation;
@@ -2411,6 +2903,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             iCfg.fitFuncFallbackFraction = runCfg.integralFitFuncFallbackFraction;
             iCfg.gaussFitMaxChi2Ndf = runCfg.integralGaussFitMaxChi2Ndf;
             iCfg.extrapToyMaxChi2Ndf = runCfg.integralExtrapToyMaxChi2Ndf;
+            iCfg.statFitCovMaxFraction = runCfg.integralStatFitCovMaxFraction;
             iCfg.fitRangeMin = runCfg.integralFitRangeMin;
             iCfg.fitRangeMax = runCfg.integralFitRangeMax;
             iCfg.integrateMin = runCfg.integratedYieldRangeMin;
@@ -2427,9 +2920,19 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             iCfg.periodMark = runCfg.plotLabels.periodMark;
             iCfg.isMatter = runCfg.isMatter;
 
+            const auto activeIntegralFitCandidates =
+                ResolveCentralityFitFunctionCandidates(iCfg, group.items.front().cenMin, group.items.front().cenMax);
+            const std::string activeIntegralNominal =
+                ResolveCentralityNominalFitFunction(iCfg, group.items.front().cenMin, group.items.front().cenMax);
             std::cout << "[Info] Run integrated-yield for " << group.dirName
-                      << " with nominal=" << iCfg.nominalFitFunc
-                      << ", candidates=" << iCfg.fitFuncCandidates.size()
+                      << " with nominal=" << activeIntegralNominal
+                      << ", candidates=" << activeIntegralFitCandidates.size()
+                      << " [";
+            for (std::size_t iCand = 0; iCand < activeIntegralFitCandidates.size(); ++iCand) {
+                if (iCand) std::cout << ",";
+                std::cout << activeIntegralFitCandidates[iCand];
+            }
+            std::cout << "]"
                       << ", nTrails=" << iCfg.nTrailsForIntegralSyst
                       << std::endl;
             integralResult = ComputeIntegralYield(iInput, iCfg, runCfg.randomSeed + static_cast<int>(group.items.front().cenMin * 10.0));
@@ -2529,7 +3032,6 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                     if (integralResult.cNominalAndFunctions) integralResult.cNominalAndFunctions->Write("c_integral_fit_functions", TObject::kOverwrite);
                     if (integralResult.cFitFunctionParameters) integralResult.cFitFunctionParameters->Write("c_integral_fit_function_parameters", TObject::kOverwrite);
                     if (integralResult.cExtrapolation) integralResult.cExtrapolation->Write("c_integral_extrapolation", TObject::kOverwrite);
-                    if (integralResult.cAbsorption) integralResult.cAbsorption->Write("c_integral_absorption", TObject::kOverwrite);
                     if (integralResult.cAbsorptionYieldScan) integralResult.cAbsorptionYieldScan->Write("c_integral_absorption_scan", TObject::kOverwrite);
                     if (integralResult.cTrails) integralResult.cTrails->Write("c_integral_trails", TObject::kOverwrite);
                     if (integralResult.cSources) integralResult.cSources->Write("c_integral_syst_sources", TObject::kOverwrite);
@@ -2728,6 +3230,10 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             return formatParameterValue(chi2) + " (" + std::to_string(ndf) + ")";
         };
         const auto formatFitStatus = [](const IntegralFitParameterRow &row) {
+            if (row.isFixed) {
+                if (row.isNominal) return std::string("nominal fixed");
+                return std::string("fixed");
+            }
             if (row.isNominal) return std::string("nominal");
             if (row.rejectedByChi2 && row.rejectedByLowPt) return std::string("rejected chi2 low-pT");
             if (row.rejectedByChi2) return std::string("rejected chi2");
@@ -2806,7 +3312,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                 std::ofstream fitCsv(fitParameterCsvPath);
                 if (fitCsv.is_open()) {
                     fitCsv << std::setprecision(12);
-                    fitCsv << "centrality_min,centrality_max,function,parameter,parameter_index,value,error,limit_min,limit_max,has_limits,chi2,ndf,chi2_ndf,is_nominal,rejected_by_chi2,rejected_by_lowpt,status\n";
+                    fitCsv << "centrality_min,centrality_max,function,parameter,parameter_index,value,error,limit_min,limit_max,has_limits,is_fixed,chi2,ndf,chi2_ndf,is_nominal,rejected_by_chi2,rejected_by_lowpt,status\n";
                     for (const auto &row : sortedFitParameterRows) {
                         const auto &fitRow = row.fitRow;
                         fitCsv << row.cenMin << ',' << row.cenMax << ','
@@ -2818,6 +3324,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                                << fitRow.limitMin << ','
                                << fitRow.limitMax << ','
                                << (fitRow.hasLimits ? 1 : 0) << ','
+                               << (fitRow.isFixed ? 1 : 0) << ','
                                << fitRow.chi2 << ','
                                << fitRow.ndf << ','
                                << fitRow.chi2Ndf << ','
@@ -2914,6 +3421,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
 
         struct IntegralMultiplicityPoint {
             double mult{0.0};
+            double multErr{0.0};
             double yield{0.0};
             double stat{0.0};
             double syst{0.0};
@@ -2921,6 +3429,14 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             double cenMax{0.0};
         };
         std::vector<IntegralMultiplicityPoint> integralMultiplicityPoints;
+        const bool haveMultiplicityUncertainty =
+            runCfg.relatedMultiplicityUncertainty.size() + 1 == runCfg.cenBins.size();
+        if (!runCfg.relatedMultiplicityUncertainty.empty() && !haveMultiplicityUncertainty) {
+            Warning("UnifiedTaskRunner",
+                    "related_multiplicity_uncertainty size (%zu) does not match centrality bin count (%zu); use zero multiplicity x-errors",
+                    runCfg.relatedMultiplicityUncertainty.size(),
+                    runCfg.cenBins.size() > 0 ? runCfg.cenBins.size() - 1 : 0);
+        }
         if (runCfg.relatedMultiplicityCenter.size() + 1 == runCfg.cenBins.size()) {
             for (const auto &row : integralSummaryRows) {
                 int cenIdx = -1;
@@ -2932,7 +3448,12 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                     }
                 }
                 if (cenIdx < 0 || static_cast<size_t>(cenIdx) >= runCfg.relatedMultiplicityCenter.size()) continue;
+                const double multErr = (haveMultiplicityUncertainty &&
+                                        static_cast<size_t>(cenIdx) < runCfg.relatedMultiplicityUncertainty.size())
+                                           ? std::max(0.0, runCfg.relatedMultiplicityUncertainty[static_cast<size_t>(cenIdx)])
+                                           : 0.0;
                 integralMultiplicityPoints.push_back({runCfg.relatedMultiplicityCenter[static_cast<size_t>(cenIdx)],
+                                                       multErr,
                                                        row.value,
                                                        row.statErr,
                                                        row.systTotal,
@@ -3043,23 +3564,25 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             for (int ip = 0; ip < nMult; ++ip) {
                 const auto &p = integralMultiplicityPoints[static_cast<size_t>(ip)];
                 gIntegralMultiplicityStat->SetPoint(ip, p.mult, p.yield);
-                gIntegralMultiplicityStat->SetPointError(ip, 0.0, 0.0, p.stat, p.stat);
+                gIntegralMultiplicityStat->SetPointError(ip, p.multErr, p.multErr, p.stat, p.stat);
                 gIntegralMultiplicitySys->SetPoint(ip, p.mult, p.yield);
-                gIntegralMultiplicitySys->SetPointError(ip, 0.0, 0.0, p.syst, p.syst);
-                multMin = std::min(multMin, p.mult);
-                multMax = std::max(multMax, p.mult);
+                gIntegralMultiplicitySys->SetPointError(ip, p.multErr, p.multErr, p.syst, p.syst);
+                multMin = std::min(multMin, std::max(1e-12, p.mult - p.multErr));
+                multMax = std::max(multMax, p.mult + p.multErr);
                 const double e = std::hypot(p.stat, p.syst);
                 if (p.yield > 0.0) yMultMin = std::min(yMultMin, std::max(1e-20, p.yield - e));
                 yMultMax = std::max(yMultMax, p.yield + e);
             }
             if (!std::isfinite(multMin) || !(multMax > multMin)) {
-                multMin = 0.0;
+                multMin = 1e-3;
                 multMax = std::max(1.0, multMax);
             }
-            if (!std::isfinite(yMultMin)) yMultMin = 0.0;
+            if (!std::isfinite(yMultMin)) yMultMin = 1e-20;
             if (!(yMultMax > yMultMin)) yMultMax = yMultMin + 1e-12;
-            const double xPad = 0.08 * (multMax - multMin);
-            const double boxHalfWidth = 0.018 * (multMax - multMin);
+            const double xMinFrame = std::max(1e-12, multMin / 1.25);
+            const double xMaxFrame = multMax * 1.25;
+            const double yMinFrame = std::max(1e-20, yMultMin / 1.6);
+            const double yMaxFrame = yMultMax * 1.8;
 
             cIntegralMultiplicity = std::make_unique<TCanvas>("c_integral_yield_vs_multiplicity", "", 900, 700);
             cIntegralMultiplicity->SetLeftMargin(0.14);
@@ -3067,20 +3590,23 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
             cIntegralMultiplicity->SetRightMargin(0.05);
             cIntegralMultiplicity->SetTopMargin(0.06);
             cIntegralMultiplicity->SetTicks(1, 1);
+            cIntegralMultiplicity->SetLogx();
+            cIntegralMultiplicity->SetLogy();
             hFrameMult = std::make_unique<TH1D>("h_frame_integral_yield_vs_multiplicity",
                                                 ";#LTd#it{N}_{ch}/d#eta#GT;Integrated yield",
                                                 100,
-                                                std::max(0.0, multMin - xPad),
-                                                multMax + xPad);
+                                                xMinFrame,
+                                                xMaxFrame);
             hFrameMult->SetDirectory(nullptr);
             hFrameMult->SetStats(false);
-            hFrameMult->GetYaxis()->SetRangeUser(std::max(0.0, yMultMin * 0.75), yMultMax * 1.35);
+            hFrameMult->GetYaxis()->SetRangeUser(yMinFrame, yMaxFrame);
             hFrameMult->Draw("AXIS");
             for (const auto &p : integralMultiplicityPoints) {
                 if (!std::isfinite(p.yield) || !std::isfinite(p.syst) || p.syst <= 0.0) continue;
-                TBox box(std::max(0.0, p.mult - boxHalfWidth),
-                         std::max(0.0, p.yield - p.syst),
-                         p.mult + boxHalfWidth,
+                const double halfWidth = std::max(0.0, p.multErr);
+                TBox box(std::max(1e-12, p.mult - halfWidth),
+                         std::max(1e-20, p.yield - p.syst),
+                         p.mult + halfWidth,
                          p.yield + p.syst);
                 box.SetFillStyle(0);
                 box.SetLineColor(kAzure + 2);
@@ -3088,6 +3614,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                 box.SetLineWidth(2);
                 box.DrawClone("l");
             }
+            gIntegralMultiplicitySys->Draw("[] SAME");
             gIntegralMultiplicityStat->Draw("P SAME");
             {
                 TLegend leg(0.56, 0.74, 0.90, 0.90);
@@ -3206,13 +3733,10 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
 
     if (runCfg.onTheFlyChecksEnabled) {
         WriteOnTheFlyChecksOutput(runCfg.onTheFlyChecksRoot,
-                                  onTheFlyQaColumns,
-                                  onTheFlyQaCandidates,
-                                  runCfg.onTheFlyVariables,
-                                  runCfg.oneBinQaPairs,
-                                  runCfg.oneBinQaAxisPool,
+                                  onTheFlyAccumulator,
                                   runCfg.saveChecksPdf,
-                                  runCfg.onTheFlyChecksPdfDir);
+                                  runCfg.onTheFlyChecksPdfDir,
+                                  runCfg.saveOnTheFlyQaTree);
     }
 
     fout.Close();

@@ -79,20 +79,25 @@ private:
         return "(" + base + ") && (" + extra + ")";
     }
 
-    static std::unique_ptr<TChain> MakeChainForChecks(const std::string &file, const std::string &tree) {
+    static std::unique_ptr<TChain> MakeChainForChecks(const std::vector<std::string> &files, const std::string &tree) {
         auto chain = std::make_unique<TChain>(tree.c_str());
-        TFile f(file.c_str(), "READ");
-        if (f.IsZombie()) {
-            throw std::runtime_error("Failed to open " + file);
+        if (files.empty()) {
+            throw std::runtime_error("No input files configured for tree " + tree);
         }
-        TTree *t = dynamic_cast<TTree *>(f.Get(tree.c_str()));
-        if (t) {
-            chain->Add(file.c_str());
-        } else {
-            GeneralHelper::fillChainFromAO2D(*chain, &f);
+        for (const auto &file : files) {
+            TFile f(file.c_str(), "READ");
+            if (f.IsZombie()) {
+                throw std::runtime_error("Failed to open " + file);
+            }
+            TTree *t = dynamic_cast<TTree *>(f.Get(tree.c_str()));
+            if (t) {
+                chain->Add(file.c_str());
+            } else {
+                GeneralHelper::fillChainFromAO2D(*chain, &f);
+            }
         }
         if (chain->GetEntries() == 0) {
-            throw std::runtime_error("No entries found for tree " + tree + " in " + file);
+            throw std::runtime_error("No entries found for tree " + tree);
         }
         return chain;
     }
@@ -122,13 +127,18 @@ private:
                              bool isMC,
                              const std::string &nameSuffix,
                              bool resetDir) {
-        if (!block.enable || block.file.empty() || block.tree.empty()) return;
-        if (!std::filesystem::exists(block.file)) {
-            std::cerr << "[ChecksEngine] skip " << dirName << ": file not found " << block.file << std::endl;
-            return;
+        if (!block.enable || block.tree.empty()) return;
+        std::vector<std::string> files = block.files;
+        if (files.empty() && !block.file.empty()) files.push_back(block.file);
+        if (files.empty()) return;
+        for (const auto &file : files) {
+            if (!std::filesystem::exists(file)) {
+                std::cerr << "[ChecksEngine] skip " << dirName << ": file not found " << file << std::endl;
+                return;
+            }
         }
 
-        auto chain = MakeChainForChecks(block.file, block.tree);
+        auto chain = MakeChainForChecks(files, block.tree);
         ROOT::RDataFrame rdf(*chain);
         auto converted = GeneralHelper::CorrectAndConvertRDF(rdf, false, isMC, false);
         ROOT::RDF::RNode node(converted);

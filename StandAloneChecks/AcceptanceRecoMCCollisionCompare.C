@@ -39,6 +39,22 @@ double Ratio(double numerator, double denominator)
     return denominator > 0.0 ? numerator / denominator : 0.0;
 }
 
+bool ReadAcceptanceTwoBodySwitch(const std::string &configPath, bool fallback = true)
+{
+    if (configPath.empty()) return fallback;
+    try {
+        const auto cfg = GeneralHelper::LoadJsonFile(configPath);
+        const auto common = cfg.value("common", GeneralHelper::Json::object());
+        const auto selection = common.value("selection", GeneralHelper::Json::object());
+        return selection.value("mc_acceptance_require_two_body",
+                               selection.value("is_two_body_selected", fallback));
+    } catch (const std::exception &e) {
+        std::cerr << "[AcceptanceRecoMCCollisionCompare] Failed to read two-body switch from config: "
+                  << e.what() << ". Use fallback=" << fallback << std::endl;
+        return fallback;
+    }
+}
+
 } // namespace
 
 void AcceptanceRecoMCCollisionCompare(
@@ -56,7 +72,8 @@ void AcceptanceRecoMCCollisionCompare(
         {2, 2.5, 3, 3.5, 4, 6},
         {2, 2.5, 3.5, 6}},
     const std::string &basicSelection = "fDecRad > 0.8",
-    const std::string &matterOpt = "both")
+    const std::string &matterOpt = "both",
+    const std::string &configPath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/configs/general_config.json")
 {
     if (!ROOT::IsImplicitMTEnabled()) {
         ROOT::EnableImplicitMT(std::clamp(std::thread::hardware_concurrency(), 2u, 12u));
@@ -76,6 +93,7 @@ void AcceptanceRecoMCCollisionCompare(
         .Define("__acc_reco", "(fIsReco) ? 1 : 0")
         .Define("__acc_reco_mc_collision", "(fIsRecoMCCollision) ? 1 : 0")
         .Define("__acc_two_body", "(fIsTwoBodyDecay > 0) ? 1 : 0");
+    const bool requireTwoBody = ReadAcceptanceTwoBodySwitch(configPath, true);
 
     const int nCent = static_cast<int>(centBins.size()) - 1;
     std::vector<std::vector<Counts>> totals(nCent);
@@ -111,7 +129,7 @@ void AcceptanceRecoMCCollisionCompare(
             const int ptIdx = FindBin(ptBinsByCent[centIdx], genPt);
             if (ptIdx < 0) return;
 
-            const bool passFundamental = twoBodyFlag != 0;
+            const bool passFundamental = (!requireTwoBody) || (twoBodyFlag != 0);
             const bool passOldDen = passFundamental && (evselFlag != 0);
             const bool passNewDen = passOldDen && (recoMCCollisionFlag != 0);
             const bool passReco = passFundamental && (basicFlag != 0) && (recoFlag != 0);
@@ -141,7 +159,8 @@ void AcceptanceRecoMCCollisionCompare(
     csv << std::setprecision(10);
 
     std::cout << "\nAcceptance denominator comparison: old=fIsSurvEvSel, new=fIsSurvEvSel && fIsRecoMCCollision\n";
-    std::cout << "matterOpt=" << matterOpt << "\n";
+    std::cout << "matterOpt=" << matterOpt
+              << ", mc_acceptance_require_two_body=" << requireTwoBody << "\n";
     std::cout << std::setw(12) << "centrality"
               << std::setw(14) << "pt"
               << std::setw(14) << "old_acc"

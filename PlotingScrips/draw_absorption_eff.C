@@ -144,8 +144,7 @@ void DrawAbsorptionEff() {
         latex.SetTextAlign(22);
         latex.SetTextSize(0.032);
         latex.DrawLatex(0.55, 0.86, "ALICE Run 3 absorption study");
-        latex.DrawLatex(0.55, 0.81, "Matter + antimatter, 10--20% centrality p_{T} binning");
-        latex.DrawLatex(0.55, 0.76, "1--5 #times ^{3}He cross section scan");
+        latex.DrawLatex(0.55, 0.81, "1--5 #times ^{3}He cross section scan");
     };
 
     TCanvas* c1 = new TCanvas("c_absorption_eff_ptbins", "c_absorption_eff_ptbins", 950, 700);

@@ -1,25 +1,32 @@
-// crosssection_extraction.C
-// Usage: root -l -b -q crosssection_extraction.C
+// ProcessCrossSection.C
+// Usage: root -l -b -q 'ProcessCrossSection.C("../../configs/crosssection_config.json")'
 #include <RooFit.h>
 #include <RooRealVar.h>
 #include <RooExponential.h>
 #include <RooSimultaneous.h>
 #include <RooCategory.h>
 #include <RooDataSet.h>
+#include <RooDataHist.h>
+#include <RooBinning.h>
+#include <RooArgList.h>
 #include <RooArgSet.h>
 #include <RooAbsPdf.h>
 #include <RooPlot.h>
 #include <RooFormulaVar.h>
 #include <RooExtendPdf.h>
-#include <RooChi2Var.h>
+#include <RooAbsReal.h>
 #include <RooMinimizer.h>
+#include <RooFitResult.h>
 #include <regex>
 #include <cmath>
+#include <map>
+#include <memory>
 #include <TMath.h>
 
 #include <TFile.h>
 #include <TH1.h>
 #include <TCanvas.h>
+#include <TSystem.h>
 
 #include <filesystem>
 #include <fstream>
@@ -29,10 +36,10 @@
 
 // helper for reading config json
 #include <nlohmann/json.hpp>
-#include "../include/include.h"
-#include "../include/GlobalChi2Roo.h"
-#include "../Tools/GeneralHelper.hpp"
-#include "../Tools/AbsorptionHelper.h"
+#include "../../include/include.h"
+#include "../../include/GlobalChi2Roo.h"
+#include "../../Tools/GeneralHelper.hpp"
+#include "../../Tools/AbsorptionHelper.h"
 
 using namespace RooFit;
 using std::string;
@@ -41,6 +48,32 @@ using json = nlohmann::json;
 using namespace Physics;
 using namespace Absorption;
 using namespace GeneralHelper;
+
+inline std::string ResolvePathFromMacroDir(const std::string& path) {
+    if (path.empty() || gSystem->IsAbsoluteFileName(path.c_str()) || !gSystem->AccessPathName(path.c_str())) {
+        return path;
+    }
+    std::string macroPath = __FILE__;
+    std::string macroDir = ".";
+    size_t pos = macroPath.find_last_of("/\\");
+    if (pos != std::string::npos) {
+        macroDir = macroPath.substr(0, pos);
+    }
+    std::string candidate = macroDir + "/" + path;
+    return gSystem->AccessPathName(candidate.c_str()) ? path : candidate;
+}
+
+inline std::string ResolvePathFromFileDir(const std::string& baseFile, const std::string& path) {
+    if (path.empty() || gSystem->IsAbsoluteFileName(path.c_str()) || !gSystem->AccessPathName(path.c_str())) {
+        return path;
+    }
+    std::string baseDir = ".";
+    size_t pos = baseFile.find_last_of("/\\");
+    if (pos != std::string::npos) {
+        baseDir = baseFile.substr(0, pos);
+    }
+    return baseDir + "/" + path;
+}
 
 struct FitResult {
     double tau;
@@ -54,9 +87,37 @@ struct FitResult {
     std::vector<double> fitprobilitys;
 };
 
+inline bool UseBinIntegralFitMode(const std::string& fitBinMode) {
+    return fitBinMode == "bin_integral_counts" || fitBinMode == "integral" || fitBinMode == "counts";
+}
+
+inline std::string FormatNumberForFilename(double value) {
+    std::string text = Form("%g", value);
+    for (char& c : text) {
+        if (c == '.') c = 'p';
+        if (c == '-') c = 'm';
+    }
+    return text;
+}
+
+inline std::unique_ptr<TH1> MakeDensityClone(const TH1* hist, const std::string& name) {
+    if (!hist) return nullptr;
+    auto* clone = dynamic_cast<TH1*>(hist->Clone(name.c_str()));
+    if (!clone) return nullptr;
+    clone->SetDirectory(nullptr);
+    for (int b = 1; b <= clone->GetNbinsX(); ++b) {
+        const double width = clone->GetXaxis()->GetBinWidth(b);
+        if (width <= 0.0) continue;
+        clone->SetBinContent(b, clone->GetBinContent(b) / width);
+        clone->SetBinError(b, clone->GetBinError(b) / width);
+    }
+    return std::unique_ptr<TH1>(clone);
+}
+
 inline FitResult ProcessSimultaneousExpoFitHists(const vector<TH1*>& hists,
                                                 bool useFixedTau = false,
-                                                double fixedTauPs = 253.0) {
+                                                double fixedTauPs = 253.0,
+                                                const std::string& fitBinMode = "bin_center_value") {
     FitResult result;
     result.tau = 0.0;
     result.tauErr = 0.0;
@@ -79,7 +140,8 @@ inline FitResult ProcessSimultaneousExpoFitHists(const vector<TH1*>& hists,
 
     int npar = 1 + nHists; // tau + amplitudes
 
-    RooRealVar tau("tau", "decay constant", 7.6, 6, 10);
+    const bool useBinIntegral = UseBinIntegralFitMode(fitBinMode);
+    RooRealVar tau("tau", "decay constant", 7.6, 1.0, 30.0);
     if (useFixedTau) {
         double fixedTauCt = fixedTauPs * c_cm_per_ps;
         tau.setVal(fixedTauCt);
@@ -90,19 +152,22 @@ inline FitResult ProcessSimultaneousExpoFitHists(const vector<TH1*>& hists,
     }
     vector<RooRealVar*> A;
     for (int i = 0; i < nHists; ++i) {
-        double integral = hists[i]->Integral();
-        double Ainit = integral / std::max(1.0, tau.getVal());
-        double max = hists[i]->GetMaximum();
-        double min = hists[i]->GetMinimum();
-        double minreal = (max + min) / 2.0;
-        double maxreal = max * 1.5;
+        const double xmin = hists[i]->GetXaxis()->GetXmin();
+        const double xmax = hists[i]->GetXaxis()->GetXmax();
+        double Ainit = std::max(1.0, hists[i]->GetMaximum());
+        if (useBinIntegral) {
+            const double normIntegral = tau.getVal() * (std::exp(-xmin / tau.getVal()) - std::exp(-xmax / tau.getVal()));
+            const double integral = hists[i]->Integral();
+            Ainit = (normIntegral > 0.0) ? integral / normIntegral : Ainit;
+        }
+        if (!std::isfinite(Ainit) || Ainit <= 0.0) Ainit = std::max(1.0, hists[i]->GetMaximum());
 
         A.push_back(new RooRealVar(Form("A%d", i+1), Form("A%d", i+1),
-                                   max, minreal, maxreal));
+                                   Ainit, 0.0, std::max(10.0 * Ainit, 10.0)));
     }
 
     // Construct χ² object
-    GlobalChi2Roo chi2("chi2", hists, tau, A);
+    GlobalChi2Roo chi2("chi2", hists, tau, A, useBinIntegral);
     if (useFixedTau) {
         chi2.SetTauValue(tau.getVal());
         chi2.SetTauConstant(true);
@@ -110,10 +175,10 @@ inline FitResult ProcessSimultaneousExpoFitHists(const vector<TH1*>& hists,
 
     // RooMinimizer
     RooMinimizer minim(chi2);
-    minim.setPrintLevel(1);
+    minim.setPrintLevel(0);
     minim.optimizeConst(false);
     minim.setStrategy(2); // more robust (but slower) minimization
-    minim.setPrintLevel(1);
+    minim.setPrintLevel(0);
     // Increase budget for Minuit2: allow more function calls and iterations
     minim.setMaxFunctionCalls(1000000);
     minim.setMaxIterations(1000000);
@@ -121,20 +186,19 @@ inline FitResult ProcessSimultaneousExpoFitHists(const vector<TH1*>& hists,
     // int statusMigrad = minim.migrad(500000, 1e-6);
     int statusMigrad = minim.minimize("Minuit2", "Migrad");
     int statusHesse = minim.hesse();
-    int statusMinos = minim.minos();
+    int statusMinos = 0;
     cout << "Minimization status: Migrad=" << statusMigrad
-         << ", Hesse=" << statusHesse
-         << ", Minos=" << statusMinos << std::endl;
+         << ", Hesse=" << statusHesse << std::endl;
     // collect fit results
     double tauVal = tau.getVal();
     double tauErr = useFixedTau ? 0.0 : tau.getError();
     double realTauVal = tauVal / c_cm_per_ps;
     double realTauErr = tauErr / c_cm_per_ps;
 
-    // compute per-histogram chi2 and ndf by comparing histogram bin contents
-    // to the fitted exponential model:
-    //   model(x) = A_i * exp(-x / tau)
-    // predicted content for bin [x_lo, x_hi] = A_i * tau * (exp(-x_lo/tau) - exp(-x_hi/tau))
+    // compute per-histogram chi2 and ndf using the same bin interpretation
+    // as the minimizer. h_corrected_counts stores corrected bin values, so the
+    // default mode compares content at the bin center; an integral-counts mode
+    // is kept for closure tests with raw count histograms.
     std::vector<double> chi2PerChannel(nHists, 0.0);
     std::vector<int> ndfPerChannel(nHists, 0);
     std::vector<TF1*> funcs;
@@ -166,14 +230,19 @@ inline FitResult ProcessSimultaneousExpoFitHists(const vector<TH1*>& hists,
 
             // double delta = obs - expected;
             // chi2_i += (delta * delta) / (err * err * binwidth); //Poisson errors
-            double x_center = h->GetXaxis()->GetBinCenter(b);
             double obs = h->GetBinContent(b);
             double err = h->GetBinError(b);
             if (err <= 0.0) continue; // skip bins without a valid uncertainty
-            double expected = f->Eval(x_center);
+            double expected = 0.0;
+            if (useBinIntegral) {
+                const double xlo = h->GetXaxis()->GetBinLowEdge(b);
+                const double xhi = h->GetXaxis()->GetBinUpEdge(b);
+                expected = Ai * tauValSafe * (std::exp(-xlo / tauValSafe) - std::exp(-xhi / tauValSafe));
+            } else {
+                expected = Ai * std::exp(-h->GetXaxis()->GetBinCenter(b) / tauValSafe);
+            }
             double delta = obs - expected;
             chi2_i += (delta * delta) / (err * err);
-            cout << "obs=" << obs << ", expect=" << expected << ", err=" << err << ", delta=" << delta << ", partial chi2=" << chi2_i << "\n";
             ++validBins;
         }
 
@@ -221,6 +290,247 @@ inline FitResult ProcessSimultaneousExpoFitHists(const vector<TH1*>& hists,
     return result;
 }
 
+inline void FillFitDiagnostics(const vector<TH1*>& hists,
+                               const std::vector<double>& amplitudes,
+                               double tauCt,
+                               bool useFixedTau,
+                               FitResult& result,
+                               const std::string& fitBinMode = "bin_center_value") {
+    const int nHists = static_cast<int>(hists.size());
+    std::vector<double> chi2PerChannel(nHists, 0.0);
+    std::vector<int> ndfPerChannel(nHists, 0);
+    std::vector<TF1*> funcs;
+
+    const double tauValSafe = (tauCt == 0.0) ? 1e-12 : tauCt;
+    const bool useBinIntegral = UseBinIntegralFitMode(fitBinMode);
+    int totalValidBins = 0;
+    double totalChi2 = 0.0;
+    for (int i = 0; i < nHists; ++i) {
+        TH1* h = hists[i];
+        if (!h) continue;
+
+        const double amp = (i < static_cast<int>(amplitudes.size())) ? amplitudes[i] : h->GetMaximum();
+        TF1* f = new TF1(Form("fitfunc_%d", i), "[0]*exp(-x/[1])", h->GetXaxis()->GetXmin(), h->GetXaxis()->GetXmax());
+        f->SetParameters(amp, tauValSafe);
+        funcs.push_back(f);
+
+        int validBins = 0;
+        double chi2_i = 0.0;
+        for (int b = 1; b <= h->GetNbinsX(); ++b) {
+            double obs = h->GetBinContent(b);
+            double err = h->GetBinError(b);
+            if (err <= 0.0) continue;
+            double expected = 0.0;
+            if (useBinIntegral) {
+                const double xlo = h->GetXaxis()->GetBinLowEdge(b);
+                const double xhi = h->GetXaxis()->GetBinUpEdge(b);
+                expected = amp * tauValSafe * (std::exp(-xlo / tauValSafe) - std::exp(-xhi / tauValSafe));
+            } else {
+                expected = amp * std::exp(-h->GetXaxis()->GetBinCenter(b) / tauValSafe);
+            }
+            double delta = obs - expected;
+            chi2_i += (delta * delta) / (err * err);
+            ++validBins;
+        }
+
+        chi2PerChannel[i] = chi2_i;
+        ndfPerChannel[i] = std::max(0, validBins - 1);
+        totalValidBins += validBins;
+        totalChi2 += chi2_i;
+    }
+
+    int totalPars = (useFixedTau ? 0 : 1) + nHists;
+    int totalNdf = std::max(0, totalValidBins - totalPars);
+    std::vector<double> fitProbs(nHists, 0.0);
+    for (int i = 0; i < nHists; ++i) {
+        if (ndfPerChannel[i] > 0) {
+            fitProbs[i] = TMath::Prob(chi2PerChannel[i], ndfPerChannel[i]);
+        }
+    }
+
+    result.chi2 = totalChi2;
+    result.ndf = totalNdf;
+    result.globalfitprobility = (totalNdf > 0) ? TMath::Prob(totalChi2, totalNdf) : 0.0;
+    result.chi2PerChannel = std::move(chi2PerChannel);
+    result.ndfPerChannel = std::move(ndfPerChannel);
+    result.fitfuncs = std::move(funcs);
+    result.fitprobilitys = std::move(fitProbs);
+}
+
+inline FitResult ProcessRooFitSimultaneousExpoFitHists(const vector<TH1*>& hists,
+                                                       bool useFixedTau = false,
+                                                       double fixedTauPs = 253.0,
+                                                       const std::string& fitBinMode = "bin_center_value") {
+    FitResult result;
+    result.tau = 0.0;
+    result.tauErr = 0.0;
+    result.chi2 = 0.0;
+    result.ndf = 0;
+    result.globalfitprobility = 0.0;
+
+    if (hists.empty()) {
+        std::cerr << "[Error] No histograms provided for RooFit fitting.\n";
+        return result;
+    }
+
+    std::cout << "Fitting " << hists.size()
+              << " histograms with RooSimultaneous binned chi2 and a shared tau.\n";
+    const bool useBinIntegral = UseBinIntegralFitMode(fitBinMode);
+    if (!useBinIntegral) {
+        std::cout << "RooFit bin-center mode: converting N_corr values to width-weighted pseudo-counts.\n";
+    }
+
+    double xmin = hists.front()->GetXaxis()->GetXmin();
+    double xmax = hists.front()->GetXaxis()->GetXmax();
+    for (TH1* h : hists) {
+        if (!h) continue;
+        xmin = std::min(xmin, h->GetXaxis()->GetXmin());
+        xmax = std::max(xmax, h->GetXaxis()->GetXmax());
+    }
+
+    std::vector<double> mergedEdges;
+    for (TH1* h : hists) {
+        if (!h) continue;
+        for (int b = 1; b <= h->GetNbinsX(); ++b) {
+            mergedEdges.push_back(h->GetXaxis()->GetBinLowEdge(b));
+        }
+        mergedEdges.push_back(h->GetXaxis()->GetBinUpEdge(h->GetNbinsX()));
+    }
+    std::sort(mergedEdges.begin(), mergedEdges.end());
+    mergedEdges.erase(std::unique(mergedEdges.begin(), mergedEdges.end(), [](double a, double b) {
+        return std::fabs(a - b) < 1e-9;
+    }), mergedEdges.end());
+    if (mergedEdges.size() < 2) {
+        mergedEdges = {xmin, xmax};
+    }
+
+    RooRealVar ct("ct", "c#tau", xmin, xmax, "cm");
+    RooBinning ctBinning(static_cast<int>(mergedEdges.size() - 1), mergedEdges.data(), "ctBinning");
+    ct.setBinning(ctBinning);
+    RooCategory sample("sample", "sample");
+
+    RooRealVar tau("tau", "lifetime", 7.6, 1.0, 30.0);
+    if (useFixedTau) {
+        const double fixedTauCt = fixedTauPs * c_cm_per_ps;
+        tau.setVal(fixedTauCt);
+        tau.setRange(fixedTauCt, fixedTauCt);
+        tau.setConstant(true);
+        std::cout << "Tau fixed to " << fixedTauPs << " ps (" << fixedTauCt
+                  << " cm) for RooFit chi2 minimization.\n";
+    }
+    RooFormulaVar slope("slope", "-1.0/@0", RooArgList(tau));
+
+    RooSimultaneous simPdf("simPdf", "simultaneous exponential PDF", sample);
+    std::vector<std::unique_ptr<RooExponential>> pdfs;
+    std::vector<std::unique_ptr<RooRealVar>> yields;
+    std::vector<std::unique_ptr<RooExtendPdf>> extendedPdfs;
+
+    for (size_t i = 0; i < hists.size(); ++i) {
+        TH1* h = hists[i];
+        if (!h) continue;
+        const std::string label = Form("ptbin_%zu", i);
+        sample.defineType(label.c_str());
+
+        pdfs.emplace_back(std::make_unique<RooExponential>(Form("expo_%zu", i), Form("expo_%zu", i), ct, slope));
+        double integral = 0.0;
+        for (int b = 1; b <= h->GetNbinsX(); ++b) {
+            const double width = h->GetXaxis()->GetBinWidth(b);
+            integral += h->GetBinContent(b) * (useBinIntegral ? 1.0 : width);
+        }
+        integral = std::max(1.0, integral);
+        yields.emplace_back(std::make_unique<RooRealVar>(Form("yield_%zu", i), Form("yield_%zu", i), integral, 0.0, 10.0 * integral));
+        extendedPdfs.emplace_back(std::make_unique<RooExtendPdf>(Form("ext_expo_%zu", i), Form("ext_expo_%zu", i),
+                                                                 *pdfs.back(), *yields.back()));
+        simPdf.addPdf(*extendedPdfs.back(), label.c_str());
+    }
+
+    RooDataHist data("data", "combined binned data", RooArgSet(ct, sample));
+    for (size_t i = 0; i < hists.size(); ++i) {
+        TH1* h = hists[i];
+        if (!h) continue;
+        const std::string label = Form("ptbin_%zu", i);
+        sample.setLabel(label.c_str());
+        for (int b = 1; b <= h->GetNbinsX(); ++b) {
+            const double width = h->GetXaxis()->GetBinWidth(b);
+            const double scale = useBinIntegral ? 1.0 : width;
+            const double content = h->GetBinContent(b) * scale;
+            if (content <= 0.0) continue;
+            ct.setVal(h->GetXaxis()->GetBinCenter(b));
+            data.add(RooArgSet(ct, sample), content, h->GetBinError(b) * scale);
+        }
+    }
+    std::unique_ptr<RooAbsReal> chi2(simPdf.createChi2(data, Extended(true), DataError(RooAbsData::SumW2)));
+    RooMinimizer minim(*chi2);
+    minim.setPrintLevel(0);
+    minim.optimizeConst(false);
+    minim.setStrategy(2);
+    minim.setMaxFunctionCalls(1000000);
+    minim.setMaxIterations(1000000);
+    int statusMigrad = minim.minimize("Minuit2", "Migrad");
+    int statusHesse = minim.hesse();
+    std::cout << "RooFit minimization status: Migrad=" << statusMigrad
+              << ", Hesse=" << statusHesse << std::endl;
+
+    const double tauVal = tau.getVal();
+    const double tauErr = useFixedTau ? 0.0 : tau.getError();
+    result.tau = tauVal / c_cm_per_ps;
+    result.tauErr = tauErr / c_cm_per_ps;
+
+    std::vector<double> amplitudes;
+    amplitudes.reserve(hists.size());
+    for (size_t i = 0; i < hists.size(); ++i) {
+        TH1* h = hists[i];
+        const double normIntegral = tauVal * (std::exp(-h->GetXaxis()->GetXmin() / tauVal)
+                                  - std::exp(-h->GetXaxis()->GetXmax() / tauVal));
+        const double amp = (normIntegral > 0.0 && i < yields.size()) ? yields[i]->getVal() / normIntegral
+                                                                     : h->GetMaximum();
+        amplitudes.push_back(amp);
+    }
+    FillFitDiagnostics(hists, amplitudes, tauVal, useFixedTau, result, fitBinMode);
+    return result;
+}
+
+inline FitResult ProcessExpoFitHists(const vector<TH1*>& hists,
+                                     const std::string& fitBackend,
+                                     bool useFixedTau = false,
+                                     double fixedTauPs = 253.0,
+                                     const std::string& fitBinMode = "bin_center_value") {
+    if (fitBackend == "roofit" || fitBackend == "RooFit") {
+        return ProcessRooFitSimultaneousExpoFitHists(hists, useFixedTau, fixedTauPs, fitBinMode);
+    }
+    return ProcessSimultaneousExpoFitHists(hists, useFixedTau, fixedTauPs, fitBinMode);
+}
+
+inline TH1* FindPtCtHistogram(TFile* inputFile,
+                              const std::string& ptDirName,
+                              const std::string& histName,
+                              double ptmin,
+                              double ptmax) {
+    if (!inputFile) return nullptr;
+
+    const std::string oldHistName = Form("%s_pt_%g_%g", histName.c_str(), ptmin, ptmax);
+    const std::vector<std::string> candidates = {
+        ptDirName + "/std/" + histName,
+        ptDirName + "/" + histName,
+        "std/" + ptDirName + "/" + oldHistName,
+        "std/" + ptDirName + "/" + histName,
+        ptDirName + "/std/" + oldHistName,
+        ptDirName + "/" + oldHistName
+    };
+
+    for (const auto& path : candidates) {
+        if (auto* h = dynamic_cast<TH1*>(inputFile->Get(path.c_str()))) {
+            std::cout << "Loaded input histogram: " << path << "\n";
+            return h;
+        }
+    }
+    std::cerr << "Histogram not found for " << ptDirName << ". Tried:\n";
+    for (const auto& path : candidates) {
+        std::cerr << "  " << path << "\n";
+    }
+    return nullptr;
+}
+
 inline int CheckBinsHist(std::vector<double> ptbins, std::vector<std::vector<double>> ctbins, TFile* inputFile, std::vector<TH1*> & outHists, std::string histName)
 {
     if (!((ptbins.size() - 1) == ctbins.size())) 
@@ -254,12 +564,6 @@ inline int CheckBinsHist(std::vector<double> ptbins, std::vector<std::vector<dou
         return 0;
     }
 
-    TDirectory *stddir = inputFile->GetDirectory("std");
-    if (!stddir) {
-        std::cerr << "Directory 'std/' not found in input file\n";
-        return 0;
-    }
-
     if (ptbins.size() < 2) {
         std::cerr << "ptbins must contain bin edges (at least two values)\n";
         return 0;
@@ -282,23 +586,8 @@ inline int CheckBinsHist(std::vector<double> ptbins, std::vector<std::vector<dou
         snprintf(bufDir, sizeof(bufDir), "pt_%g_%g", ptmin, ptmax);
         std::string dirName(bufDir);
 
-        TDirectory *sub = stddir->GetDirectory(dirName.c_str());
-        if (!sub) {
-            std::cerr << "Missing pt sub-directory: std/" << dirName << "\n";
-            return 0;
-        }
-
-        snprintf(bufHist, sizeof(bufHist), "%s_pt_%g_%g", histName.c_str(), ptmin, ptmax);
-        std::string histNameUsed(bufHist);
-
-        TH1 *h = dynamic_cast<TH1*>(sub->Get(histNameUsed.c_str()));
+        TH1 *h = FindPtCtHistogram(inputFile, dirName, histName, ptmin, ptmax);
         if (!h) {
-            // fallback: try full path from file
-            std::string fullpath = std::string("std/") + dirName + "/" + histNameUsed;
-            h = dynamic_cast<TH1*>(inputFile->Get(fullpath.c_str()));
-        }
-        if (!h) {
-            std::cerr << "Histogram not found: std/" << dirName << "/" << histNameUsed << "\n";
             return 0;
         }
         outHists.push_back(h);
@@ -313,7 +602,7 @@ inline int CheckBinsHist(std::vector<double> ptbins, std::vector<std::vector<dou
         int nbins = h->GetNbinsX();
         size_t expectBins = ctedges.size() - 1;
         if (nbins != static_cast<int>(expectBins)) {
-            std::cerr << "Binning mismatch for " << histNameUsed << ": histogram bins = " << nbins
+            std::cerr << "Binning mismatch for " << h->GetName() << ": histogram bins = " << nbins
                       << " expected = " << expectBins << "\n";
             return 0;
         }
@@ -331,7 +620,7 @@ inline int CheckBinsHist(std::vector<double> ptbins, std::vector<std::vector<dou
             }
             double expected = static_cast<double>(ctedges[b]);
             if (std::fabs(hEdge - expected) > eps) {
-                std::cerr << "Edge mismatch for " << histNameUsed << " at edge index " << b
+                std::cerr << "Edge mismatch for " << h->GetName() << " at edge index " << b
                           << ": hist = " << hEdge << " expected = " << expected << "\n";
                 return 0;
             }
@@ -387,9 +676,9 @@ inline double ExtractMultiplierFromTFile(TFile* f) {
     return ExtractMultiplierFromFilename(name ? std::string(name) : std::string());
 }
 
-void crosssection_extraction(const char* config_path = "../configs/config_crosssection_extraction.json") {
+void ProcessCrossSection(const char* config_path = "../../configs/crosssection_config.json") {
     // read config.json (path passed as config_path)
-    std::string cfgpath = config_path ? std::string(config_path) : std::string("../configs/config_crosssection_extraction.json");
+    std::string cfgpath = ResolvePathFromMacroDir(config_path ? std::string(config_path) : std::string("../../configs/crosssection_config.json"));
     std::ifstream ifs(cfgpath);
     if (!ifs.is_open()) {
         std::cerr << "Cannot open config file: " << cfgpath << "\n";
@@ -398,8 +687,11 @@ void crosssection_extraction(const char* config_path = "../configs/config_crosss
     json cfg;
     ifs >> cfg;
     std::vector<std::string> AbsorptionFilePath = cfg["absorptionpath"].get<std::vector<std::string>>();
-    std::string inputFilePath = cfg["input"].get<std::string>();
-    std::string outputPath = cfg["outputpath"].get<std::string>();
+    for (auto& path : AbsorptionFilePath) {
+        path = ResolvePathFromFileDir(cfgpath, path);
+    }
+    std::string inputFilePath = ResolvePathFromFileDir(cfgpath, cfg["input"].get<std::string>());
+    std::string outputPath = ResolvePathFromFileDir(cfgpath, cfg["outputpath"].get<std::string>());
     std::vector<double> ptBins = cfg["ptbins"].get<std::vector<double>>();
     std::vector<std::vector<double>> ctBins = cfg["ctbins"].get<std::vector<std::vector<double>>>();
     std::string isMatter = cfg["ismatter"].get<std::string>();
@@ -408,6 +700,12 @@ void crosssection_extraction(const char* config_path = "../configs/config_crosss
     bool useFixedTau = cfg.value("use_fixed_tau", false);
     double fixedTauPs = cfg.value("fixed_tau_ps", 253.0);
     double fixedTauCt = fixedTauPs * c_cm_per_ps;
+    std::string fitBackend = cfg.value("fit_backend", std::string("custom_chi2"));
+    std::string fitBinMode = cfg.value("fit_bin_mode", std::string("bin_center_value"));
+    if (cfg.value("use_roofit", false)) {
+        fitBackend = "roofit";
+    }
+    const bool useBinIntegralFit = UseBinIntegralFitMode(fitBinMode);
     // load all the file needed
     std::vector<TFile*> AbsorptionFiles;
     for (const auto& path : AbsorptionFilePath) {
@@ -489,7 +787,7 @@ void crosssection_extraction(const char* config_path = "../configs/config_crosss
                 copyedHistos[j]->Write();
                 std::cout << "Done. Canvas contains fits and chi2 per pt-bin.\n";
         }
-        FitResult fitRes = ProcessSimultaneousExpoFitHists(copyedHistos, useFixedTau, fixedTauPs);
+        FitResult fitRes = ProcessExpoFitHists(copyedHistos, fitBackend, useFixedTau, fixedTauPs, fitBinMode);
         chi2s.push_back(fitRes.chi2);
         ndfs.push_back(fitRes.ndf);
         taus.push_back(fitRes.tau);
@@ -507,31 +805,34 @@ void crosssection_extraction(const char* config_path = "../configs/config_crosss
             TCanvas* cFit = new TCanvas(Form("cFit_ptbin_%zu_multi_%g", k, multiplier), Form("Fit for pt-bin %zu (multi %g)", k, multiplier), 800, 600);
             TH1* h = copyedHistos[k];
             if (!h) continue;
+            auto hDensity = useBinIntegralFit ? MakeDensityClone(h, Form("%s_density_draw", h->GetName())) : nullptr;
+            TH1* hDraw = hDensity ? hDensity.get() : h;
             // Beautify plot, draw fit and annotate full fit information
             gStyle->SetOptStat(0);
-            h->SetStats(0);
-            h->SetLineWidth(2);
-            h->SetMarkerStyle(20);
-            h->SetMarkerSize(1.0);
-            h->GetXaxis()->SetTitle("ct (cm)");
-            h->GetYaxis()->SetTitle("Counts");
-            h->GetXaxis()->SetTitleSize(0.05);
-            h->GetYaxis()->SetTitleSize(0.05);
-            h->GetXaxis()->SetLabelSize(0.04);
-            h->GetYaxis()->SetLabelSize(0.04);
-            h->GetXaxis()->SetTitleFont(42);
-            h->GetYaxis()->SetTitleFont(42);
-            h->GetXaxis()->SetLabelFont(42);
-            h->GetYaxis()->SetLabelFont(42);
+            hDraw->SetStats(0);
+            hDraw->SetLineWidth(2);
+            hDraw->SetMarkerStyle(20);
+            hDraw->SetMarkerSize(1.0);
+            hDraw->GetXaxis()->SetTitle("ct (cm)");
+            hDraw->GetYaxis()->SetTitle(useBinIntegralFit ? "Corrected counts / cm" : "N_{corr}");
+            hDraw->GetXaxis()->SetTitleSize(0.05);
+            hDraw->GetYaxis()->SetTitleSize(0.05);
+            hDraw->GetXaxis()->SetLabelSize(0.04);
+            hDraw->GetYaxis()->SetLabelSize(0.04);
+            hDraw->GetXaxis()->SetTitleFont(42);
+            hDraw->GetYaxis()->SetTitleFont(42);
+            hDraw->GetXaxis()->SetLabelFont(42);
+            hDraw->GetYaxis()->SetLabelFont(42);
 
             // recover pt-bin edges for title (safe check)
             double fptmin = 0.0, fptmax = 0.0;
             if (k < (int)ptBins.size() - 1) { fptmin = ptBins[k]; fptmax = ptBins[k + 1]; }
 
-            h->SetTitle(Form("Corrected spectrum pt [%.3g, %.3g] (mult %.3g)", fptmin, fptmax, multiplier));
-            h->Draw("E");
+            hDraw->SetTitle(Form("Corrected spectrum pt [%.3g, %.3g] (mult %.3g)", fptmin, fptmax, multiplier));
+            hDraw->Draw("E");
 
-            // draw fit function nicely
+            // In bin-center mode the function is drawn against N_corr at each bin center.
+            // In integral-counts mode the canvas shows density for variable-width bins.
             TF1* f = fitRes.fitfuncs[k];
             if (f) {
                 f->SetLineWidth(2);
@@ -546,7 +847,7 @@ void crosssection_extraction(const char* config_path = "../configs/config_crosss
             leg->SetFillStyle(0);
             leg->SetTextFont(42);
             leg->SetTextSize(0.035);
-            leg->AddEntry(h, "Data", "lep");
+            leg->AddEntry(hDraw, "Data", "lep");
             if (f) leg->AddEntry(f, "Exponential fit", "l");
             leg->Draw();
 
@@ -559,6 +860,7 @@ void crosssection_extraction(const char* config_path = "../configs/config_crosss
             info->SetTextFont(42);
             info->SetTextSize(0.033);
             info->AddText(Form("Fit model: A #times exp(-x/c#tau) %g x He3(#sigma_{abso}) (%s)", multiplier, isMatter.c_str()));
+            info->AddText(Form("Bin mode: %s", fitBinMode.c_str()));
 
             // global tau (already converted to real units) and error
             info->AddText(Form("#tau = %.4g #pm %.4g ps", fitRes.tau, fitRes.tauErr));
@@ -604,7 +906,10 @@ void crosssection_extraction(const char* config_path = "../configs/config_crosss
             cFit->Modified();
             cFit->Update();
             cFit->Write();
-            cFit->SaveAs(Form("%scrosssection_extraction_fit_ptbin_%zu_multi_%g.pdf", outDir.c_str(), k, multiplier));
+            const std::string ptMinName = FormatNumberForFilename(fptmin);
+            const std::string ptMaxName = FormatNumberForFilename(fptmax);
+            cFit->SaveAs(Form("%scrosssection_extraction_fit_pt_%s_%s_multi_%g.pdf",
+                              outDir.c_str(), ptMinName.c_str(), ptMaxName.c_str(), multiplier));
             delete cFit;
             fitRes.fitfuncs[k]->Write();
         }
@@ -718,11 +1023,15 @@ void crosssection_extraction(const char* config_path = "../configs/config_crosss
     outfile->Close();
 }
 
+void ProcessCrossSecction(const char* config_path = "../../configs/crosssection_config.json") {
+    ProcessCrossSection(config_path);
+}
+
 // provide a simple main when compiled as standalone executable (no effect when used as ROOT macro)
 #if !defined(__CLING__) && !defined(__CINT__)
 int main(int argc, char** argv) {
     const char* cfg = (argc > 1) ? argv[1] : "config.json";
-    crosssection_extraction(cfg);
+    ProcessCrossSection(cfg);
     return 0;
 }
 #endif

@@ -23,11 +23,13 @@ public:
     GlobalChi2Roo(const char* name,
                   const vector<TH1*>& h_,
                   RooRealVar& tau_,
-                  vector<RooRealVar*>& A_)
+                  vector<RooRealVar*>& A_,
+                  bool useBinIntegral_ = false)
         : RooAbsReal(name, name),
           hists(h_),
           tauProxy("tauProxy", "tauProxy", this, tau_),
-          tauVar(&tau_)
+          tauVar(&tau_),
+          useBinIntegral(useBinIntegral_)
     {
         // store pointers to original RooRealVar objects
         Avars.reserve(A_.size());
@@ -45,7 +47,8 @@ public:
         : RooAbsReal(other, name),
           hists(other.hists),
           tauProxy("tauProxy", "tauProxy", this, *other.tauVar),
-          tauVar(other.tauVar)
+          tauVar(other.tauVar),
+          useBinIntegral(other.useBinIntegral)
     {
         // copy pointer list and construct proxies bound to same RooRealVar objects
         Avars = other.Avars;
@@ -97,17 +100,22 @@ protected:
                 double xlow = h->GetXaxis()->GetBinLowEdge(ib);
                 double xhigh = h->GetXaxis()->GetBinUpEdge(ib);
 
-                double expect = Aj * tau_v *
-                    (std::exp(-xlow/tau_v) - std::exp(-xhigh/tau_v));
-                double binwidth = xhigh - xlow;
-                double obs = h->GetBinContent(ib) * binwidth;
+                double expect = 0.0;
+                if (useBinIntegral) {
+                    expect = Aj * tau_v *
+                        (std::exp(-xlow/tau_v) - std::exp(-xhigh/tau_v));
+                } else {
+                    const double xcenter = h->GetXaxis()->GetBinCenter(ib);
+                    expect = Aj * std::exp(-xcenter / tau_v);
+                }
+                double obs = h->GetBinContent(ib);
                 double err = h->GetBinError(ib);
                 if (err <= 0) {
                     err = sqrt(std::max(1.0, obs));
                 }
 
                 double d = obs - expect;
-                chi2 += d*d / (err*err*binwidth);
+                chi2 += d*d / (err*err);
             }
         }
 
@@ -122,4 +130,5 @@ private:
     // store the original RooRealVar pointers so copy ctor can bind proxies correctly
     RooRealVar* tauVar = nullptr;
     std::vector<RooRealVar*> Avars;
+    bool useBinIntegral = false;
 };

@@ -37,6 +37,7 @@ ROOTWorkFlow/Outputs/PlotingScrips/
 | `CompareV0sCustomV0sSpectrumQA.C` | `CompareV0sCustomV0sSpectrumQA()` | Compares V0s and CustomV0s spectrum outputs. | `V0sSelectionQA/` |
 | `DrawAbsorptionEff.C` / `draw_absorption_eff.C` | `DrawAbsorptionEff()`, `draw_absorption_eff()` | Draws absorption-efficiency variations and nominal comparison plots. | `DrawAbsorptionEff/absorption_eff_ptbins_10_20.pdf` |
 | `DrawMergedCentralitySpectra.C` | `DrawMergedCentralitySpectra(...)` | Draws merged-centrality spectra and antimatter-over-matter ratios. | `MergedCentralitySpectra/` |
+| `FitHe3SpectrumBGBW.C` | `FitHe3SpectrumBGBW(...)` | Fits Run 2 He3 and antiHe3 spectra with BGBW, writes centrality-dependent TF1 functions, and saves per-centrality plus summary QA canvases. | `He3SpectrumBGBW/He3_spectrum.root`, `He3SpectrumBGBW/QA/` |
 | `SpectrumVsRun2Lite.C` | `SpectrumVsRun2Lite()` | Lightweight Run 3 versus Run 2 spectrum comparison. | `SpectrumvsRun2/Spectrum_vs_run2_lite_*.pdf` |
 | `SpectrumVsRun2Simple.C` | `SpectrumVsRun2Simple(...)` | Builds a more structured Run 3 versus Run 2 comparison ROOT file and plots. | `SpectrumvsRun2/Spectrum_vs_run2_simple.root` |
 | `extract_bwfits.C` | `extract_bwfits()` | Extracts and stores blast-wave fit functions for later reweighting or reference comparisons. | `extract_bwfits/` |

@@ -186,7 +186,21 @@ TLegend *BuildCentralityLegend(const std::vector<SpectrumItem> &items, double x1
 
 void DrawSysThenStat(const std::vector<SpectrumItem> &items, const char *statOpt) {
     for (const auto &item : items) {
-        if (item.sys) item.sys->Draw("2 SAME");
+        if (!item.sys) continue;
+        for (int ip = 0; ip < item.sys->GetN(); ++ip) {
+            double x = 0.0;
+            double y = 0.0;
+            item.sys->GetPoint(ip, x, y);
+            if (!std::isfinite(x) || !std::isfinite(y) || y <= 0.0) continue;
+            auto *box = new TBox(x - item.sys->GetErrorXlow(ip),
+                                 std::max(1e-30, y - item.sys->GetErrorYlow(ip)),
+                                 x + item.sys->GetErrorXhigh(ip),
+                                 y + item.sys->GetErrorYhigh(ip));
+            box->SetFillColorAlpha(item.color, 0.20);
+            box->SetLineColor(item.color);
+            box->SetLineWidth(1);
+            box->Draw("SAME");
+        }
     }
     for (const auto &item : items) {
         item.stat->Draw(statOpt);
@@ -395,7 +409,6 @@ void DrawMergedCentralitySpectra(
     if (!antimatter.empty()) legParticle->AddEntry(antimatter.front().stat.get(), "{}^{3}_{#bar{#Lambda}}#bar{H}", "pe");
     legParticle->Draw();
     cMA->SaveAs((std::string(outDir) + "/merged_centrality_spectra_matter_antimatter.pdf").c_str());
-    cMA->SaveAs((std::string(outDir) + "/merged_centrality_spectra_matter_antimatter.png").c_str());
 
     FindRange({&both}, xmin, xmax, ymin, ymax);
     auto cBoth = std::make_unique<TCanvas>("c_merged_both_spectra", "", 1200, 850);
@@ -420,7 +433,6 @@ void DrawMergedCentralitySpectra(
     if (!both.empty()) legBoth->AddEntry(both.front().stat.get(), "({}^{3}_{#Lambda}H + {}^{3}_{#bar{#Lambda}}#bar{H})/2", "pe");
     legBoth->Draw();
     cBoth->SaveAs((std::string(outDir) + "/merged_centrality_spectra_both.pdf").c_str());
-    cBoth->SaveAs((std::string(outDir) + "/merged_centrality_spectra_both.png").c_str());
 
     auto ratios = MakeAntimatterMatterRatios(matter, antimatter);
     FindHistOnlyRange(ratios, xmin, xmax, ymin, ymax);
@@ -465,7 +477,6 @@ void DrawMergedCentralitySpectra(
     }
     legRatio->Draw();
     cRatio->SaveAs((std::string(outDir) + "/merged_centrality_antimatter_over_matter_ratio.pdf").c_str());
-    cRatio->SaveAs((std::string(outDir) + "/merged_centrality_antimatter_over_matter_ratio.png").c_str());
 
     for (const auto &item : ratios) {
         std::vector<SpectrumItem> oneItem;
@@ -530,7 +541,6 @@ void DrawMergedCentralitySpectra(
         singleLeg->Draw();
 
         cSingleRatio->SaveAs((std::string(outDir) + "/antimatter_over_matter_ratio_" + tag + ".pdf").c_str());
-        cSingleRatio->SaveAs((std::string(outDir) + "/antimatter_over_matter_ratio_" + tag + ".png").c_str());
     }
 
     std::cout << "Saved plots in: " << outDir << std::endl;

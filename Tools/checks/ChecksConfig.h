@@ -22,6 +22,7 @@ struct Hist2DPair {
 struct CheckBlockConfig {
     bool enable{false};
     std::string file;
+    std::vector<std::string> files;
     std::string tree;
     std::string selection;
     std::vector<std::string> variables;

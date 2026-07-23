@@ -18,9 +18,11 @@
 #include <RooRealVar.h>
 #include <TFile.h>
 #include <TPad.h>
+#include <TGraphAsymmErrors.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -39,9 +41,47 @@
 using namespace AcceptanceHelper;
 using namespace GeneralHelper;
 
+namespace {
+bool ReadAcceptanceTwoBodySwitch(const std::string &configPath, bool fallback = true) {
+    if (configPath.empty()) return fallback;
+    try {
+        const auto cfg = GeneralHelper::LoadJsonFile(configPath);
+        const auto common = cfg.value("common", GeneralHelper::Json::object());
+        const auto selection = common.value("selection", GeneralHelper::Json::object());
+        return selection.value("mc_acceptance_require_two_body",
+                               selection.value("is_two_body_selected", fallback));
+    } catch (const std::exception &e) {
+        std::cerr << "[MCEffCheck] Failed to read two-body switch from config: " << e.what()
+                  << ". Use fallback=" << fallback << std::endl;
+        return fallback;
+    }
+}
+
+TGraphAsymmErrors *MakeBinWidthGraph(const TH1D *h, const std::string &name, Color_t color, Style_t marker, double markerSize = 1.05) {
+    if (!h) return nullptr;
+    auto *g = new TGraphAsymmErrors(h->GetNbinsX());
+    g->SetName(name.c_str());
+    for (int ib = 1; ib <= h->GetNbinsX(); ++ib) {
+        const int ip = ib - 1;
+        const double x = h->GetBinCenter(ib);
+        const double y = h->GetBinContent(ib);
+        const double ex = 0.5 * h->GetBinWidth(ib);
+        const double ey = h->GetBinError(ib);
+        g->SetPoint(ip, x, y);
+        g->SetPointError(ip, ex, ex, ey, ey);
+    }
+    g->SetLineColor(color);
+    g->SetMarkerColor(color);
+    g->SetMarkerStyle(marker);
+    g->SetMarkerSize(markerSize);
+    g->SetLineWidth(3);
+    return g;
+}
+}
+
 void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/NCrossedRows/reweighted/AO2D_CustomV0s_combined_reweighted.root",
                 const vector<string> &comparepaths = { "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/LHC23_PbPb_fullTPC/mc/apass5/LHC25g11_G4list/NCrossedRows/reweighted/AO2D_CustomV0s_combined_reweighted.root"},
-                const vector<bool> &TwoBodySelections = {true, true},
+                const vector<bool> &TwoBodySelections = {},
                 const vector<string> &labels = {"Pass5_NoITSCut",  "Pass5_ITSCut"},
                 const vector<double> cenbins = {0, 10, 30, 50, 80},
                 const vector<vector<double>> ptbinsforcent = { 
@@ -59,9 +99,15 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
                 const vector<string> &basic_selection_data_for_mc_eff = {"fDecRad > 0.8", "fDecRad > 0.8 && fAvgClusterSizeHe > 5"},
                 const string &outputpath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/Outputs/StandAloneChecks/MCEfficiency_ClusterSizeCheck",
                 const string &matterOpt = "both",
-                const string &plotNote = "") {
-    // Basic MT setup
-    if (!ROOT::IsImplicitMTEnabled()) {
+                const string &plotNote = "",
+                const string &configPath = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/ROOTWorkFlow/CodeSpace/configs/general_config.json") {
+    // Basic MT setup. Some AO2D layouts can be fragile with ROOT RDF MT;
+    // set MCEFFCHECK_DISABLE_MT=1 to force a single-thread fallback.
+    const char *disableMtEnv = std::getenv("MCEFFCHECK_DISABLE_MT");
+    const bool disableMt = disableMtEnv && std::string(disableMtEnv) != "0";
+    if (disableMt) {
+        ROOT::DisableImplicitMT();
+    } else if (!ROOT::IsImplicitMTEnabled()) {
         ROOT::EnableImplicitMT(std::clamp(std::thread::hardware_concurrency(), 2u, 12u));
     }
 
@@ -135,8 +181,9 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
         if (idx < basic_selection_data_for_mc_eff.size()) return basic_selection_data_for_mc_eff[idx];
         return basic_selection_data_for_mc_eff.back();
     };
+    const bool cfgTwoBody = ReadAcceptanceTwoBodySwitch(configPath, true);
     auto pickTwoBody = [&](size_t idx) -> bool {
-        if (TwoBodySelections.empty()) return true;
+        if (TwoBodySelections.empty()) return cfgTwoBody;
         if (idx < TwoBodySelections.size()) return static_cast<bool>(TwoBodySelections[idx]);
         return static_cast<bool>(TwoBodySelections.back());
     };
@@ -147,6 +194,7 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
     for (size_t i = 0; i < comparepaths.size(); ++i) {
         compRes.emplace_back(loadAcc(comparepaths[i], pickBasicSel(i + 1), pickTwoBody(i + 1)));
     }
+    const bool hasComparisons = !compRes.empty();
 
     std::filesystem::create_directories(outputpath);
 
@@ -199,7 +247,6 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
     };
     auto saveCanvas = [](TCanvas &canvas, const std::string &basePath) {
         canvas.SaveAs((basePath + ".pdf").c_str());
-        canvas.SaveAs((basePath + ".png").c_str());
     };
 
     auto drawSet = [&](const std::string &cname, const std::string &title,
@@ -362,7 +409,9 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
     std::vector<std::unique_ptr<TH1D>> compPtOwned;
     for (size_t i=0;i<compPt.size();++i) compPtOwned.push_back(cloneHist(compPt[i], Form("comp_pt_%zu", i)));
     std::vector<TH1D*> compPtPtrs; for (auto &p: compPtOwned) compPtPtrs.push_back(p.get());
-    drawSet("eff_pt", Form("Efficiency vs p_{T} (%s)", matterOpt.c_str()), stdPt.get(), compPtPtrs, "ratio to std", true);
+    if (hasComparisons) {
+        drawSet("eff_pt", Form("Efficiency vs p_{T} (%s)", matterOpt.c_str()), stdPt.get(), compPtPtrs, "ratio to std", true);
+    }
 
     // ct efficiency
     auto stdCt = cloneHist(pickCt(stdRes), "std_ct");
@@ -375,9 +424,11 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
 
     // ct per pt-bin
     auto pickVec = [&](const AcceptanceHelper::AcceptanceResult &res) -> const std::vector<TH1D*>& {
-        if (!res.acc_ct_per_pt_antimatter.empty()) return res.acc_ct_per_pt_antimatter;
+        if (matterOpt == "antimatter" && !res.acc_ct_per_pt_antimatter.empty()) return res.acc_ct_per_pt_antimatter;
+        if (matterOpt == "matter" && !res.acc_ct_per_pt_matter.empty()) return res.acc_ct_per_pt_matter;
+        if (!res.acc_ct_per_pt.empty()) return res.acc_ct_per_pt;
         if (!res.acc_ct_per_pt_matter.empty()) return res.acc_ct_per_pt_matter;
-        return res.acc_ct_per_pt;
+        return res.acc_ct_per_pt_antimatter;
     };
     const auto &stdCtPerPt = pickVec(stdRes);
     std::vector<const std::vector<TH1D*>*> compCtPerPt;
@@ -445,6 +496,62 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
 
     // 1) nCentBin plots: each plot compares different dataframes in one centrality bin
     for (size_t ic = 0; ic < nCentBins; ++ic) {
+        if (!hasComparisons) {
+            const auto &vec = *perCentSets.front();
+            TH1D *src = (ic < vec.size()) ? vec[ic] : nullptr;
+            auto h = cloneHist(src, Form("h_centbin_%zu_single", ic));
+            if (!h) continue;
+
+            TCanvas cCentBin(Form("eff_pt_centbin_%zu", ic), "Efficiency vs p_{T}", 920, 680);
+            cCentBin.SetLeftMargin(0.12);
+            cCentBin.SetRightMargin(0.04);
+            cCentBin.SetTopMargin(0.08);
+            cCentBin.SetBottomMargin(0.12);
+            cCentBin.SetTicks(1, 1);
+            gStyle->SetErrorX(0.5);
+
+            double localMax = 0.0;
+            for (int ib = 1; ib <= h->GetNbinsX(); ++ib) {
+                localMax = std::max(localMax, h->GetBinContent(ib) + h->GetBinError(ib));
+            }
+            h->SetStats(false);
+            h->SetLineColor(kBlack);
+            h->SetMarkerColor(kBlack);
+            h->SetMarkerStyle(kFullCircle);
+            h->SetMarkerSize(0.85);
+            h->SetLineWidth(2);
+            h->SetTitle(Form(";#it{p}_{T} (GeV/#it{c});Efficiency"));
+            h->SetMinimum(0.0);
+            h->SetMaximum(localMax > 0.0 ? std::min(1.0, localMax * 1.38) : 1.0);
+            h->GetXaxis()->SetTitleSize(0.050);
+            h->GetYaxis()->SetTitleSize(0.050);
+            h->GetXaxis()->SetLabelSize(0.043);
+            h->GetYaxis()->SetLabelSize(0.043);
+            h->GetYaxis()->SetTitleOffset(1.05);
+            h->Draw("HIST");
+            h->Draw("SAME E1 P");
+
+            TLegend leg(0.16, 0.72, 0.52, 0.86);
+            leg.SetFillStyle(0);
+            leg.SetBorderSize(0);
+            leg.SetTextFont(42);
+            leg.SetTextSize(0.038);
+            leg.AddEntry(h.get(), setLabel(0).c_str(), "lep");
+            leg.Draw();
+
+            TLatex text;
+            text.SetNDC();
+            text.SetTextFont(42);
+            text.SetTextSize(0.040);
+            text.DrawLatex(0.16, 0.91, Form("MC efficiency, %.0f-%.0f%%", cenbins[ic], cenbins[ic + 1]));
+            text.SetTextSize(0.034);
+            text.DrawLatex(0.60, 0.84, "p_{T} bins include 1.5-2 GeV/#it{c}");
+
+            const std::string baseName = "eff_pt_cen_" + edgeToToken(cenbins[ic]) + "_" + edgeToToken(cenbins[ic + 1]);
+            saveCanvas(cCentBin, outputpath + "/" + baseName);
+            continue;
+        }
+
         TCanvas cCentBin(Form("eff_pt_centbin_%zu", ic), "Efficiency vs p_{T} by dataframe", kCanvasW, kCanvasH);
         TPad pTop("pTop_centbin", "pTop_centbin", 0.0, 0.30, 1.0, 1.0);
         TPad pBot("pBot_centbin", "pBot_centbin", 0.0, 0.0, 1.0, 0.30);
@@ -454,8 +561,6 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
         pTop.Draw();
         pBot.Draw();
 
-        // Top pad: keep only Y error bars for efficiency points.
-        gStyle->SetErrorX(0.0);
         pTop.cd();
         TLegend leg(0.14, 0.68, 0.88, 0.88);
         leg.SetNColumns(2);
@@ -465,7 +570,9 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
 
         std::vector<std::unique_ptr<TH1D>> owned;
         owned.reserve(perCentSets.size());
-        bool firstDrawnCent = false;
+        std::vector<std::unique_ptr<TGraphAsymmErrors>> graphOwned;
+        graphOwned.reserve(perCentSets.size());
+        double localContentMax = 0.0;
         for (size_t iset = 0; iset < perCentSets.size(); ++iset) {
             const auto &vec = *perCentSets[iset];
             TH1D *src = (ic < vec.size()) ? vec[ic] : nullptr;
@@ -478,25 +585,49 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
             h->SetMarkerColor(color);
             h->SetMarkerStyle(markers[iset % markers.size()]);
             h->SetLineStyle(1);
-            h->SetLineWidth(2);
+            h->SetLineWidth(3);
             h->SetTitle(Form("Efficiency vs p_{T} (Cent %.0f-%.0f%%, %s);p_{T} (GeV/c);Efficiency", cenbins[ic], cenbins[ic + 1], matterOpt.c_str()));
             h->SetMinimum(0.0);
-            h->SetMaximum(yMaxAll);
             h->GetXaxis()->SetLabelSize(0.0);
             h->GetXaxis()->SetTitleSize(0.0);
-
-            if (!firstDrawnCent) {
-                h->Draw("E1 X0 P");
-                h->Draw("SAME HIST L");
-                firstDrawnCent = true;
-            } else {
-                h->Draw("SAME E1 X0 P");
-                h->Draw("SAME HIST L");
+            for (int ib = 1; ib <= h->GetNbinsX(); ++ib) {
+                const double y = h->GetBinContent(ib);
+                if (std::isfinite(y)) localContentMax = std::max(localContentMax, y);
             }
-            leg.AddEntry(h.get(), setLabel(iset).c_str(), "lp");
             owned.push_back(std::move(h));
         }
+        bool firstDrawnCent = !owned.empty();
         if (firstDrawnCent) {
+            auto frame = cloneHist(owned.front().get(), Form("h_frame_centbin_%zu", ic));
+            if (frame) {
+                frame->Reset("ICES");
+                frame->SetStats(false);
+                frame->SetTitle(Form("Efficiency vs p_{T} (Cent %.0f-%.0f%%, %s);p_{T} (GeV/c);Efficiency", cenbins[ic], cenbins[ic + 1], matterOpt.c_str()));
+                frame->SetMinimum(0.0);
+                frame->SetMaximum(localContentMax > 0.0 ? std::min(1.0, localContentMax * 1.30 + 0.015) : 1.0);
+                frame->GetXaxis()->SetLabelSize(0.0);
+                frame->GetXaxis()->SetTitleSize(0.0);
+                frame->GetYaxis()->SetTitleSize(0.055);
+                frame->GetYaxis()->SetLabelSize(0.050);
+                frame->GetYaxis()->SetTitleOffset(0.95);
+                frame->Draw("HIST");
+            }
+            const Float_t prevEndErrorSizeTop = gStyle->GetEndErrorSize();
+            gStyle->SetEndErrorSize(4.0f);
+            for (size_t i = 0; i < owned.size(); ++i) {
+                if (!owned[i]) continue;
+                auto g = std::unique_ptr<TGraphAsymmErrors>(MakeBinWidthGraph(
+                    owned[i].get(),
+                    Form("g_centbin_%zu_set_%zu", ic, i),
+                    owned[i]->GetLineColor(),
+                    owned[i]->GetMarkerStyle(),
+                    1.10));
+                if (!g) continue;
+                g->Draw("P SAME");
+                leg.AddEntry(g.get(), setLabel(i).c_str(), "lep");
+                graphOwned.push_back(std::move(g));
+            }
+            gStyle->SetEndErrorSize(prevEndErrorSizeTop);
             leg.Draw();
             drawPlotNote();
 
@@ -601,7 +732,7 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
     }
 
     // 2) nDataFrame plots: each plot compares different centrality bins in one dataframe
-    for (size_t iset = 0; iset < perCentSets.size(); ++iset) {
+    if (hasComparisons) for (size_t iset = 0; iset < perCentSets.size(); ++iset) {
         TCanvas cSet(Form("eff_pt_per_cent_set_%zu", iset), "Efficiency vs p_{T} by centrality", kCanvasW, kCanvasH);
         TLegend leg(0.14, 0.64, 0.88, 0.88);
         leg.SetNColumns(2);
@@ -651,6 +782,89 @@ void MCEffCheck(const string &stdmcpath = "/Users/zhengqingwang/alice/data/deriv
     }
 
     // 3) all points in one combined plot
+    if (!hasComparisons) {
+        gStyle->SetErrorX(0.5);
+        TCanvas cCent("eff_pt_per_cent_combined", "Efficiency vs p_{T} per centrality", 1120, 780);
+        cCent.SetLeftMargin(0.11);
+        cCent.SetRightMargin(0.04);
+        cCent.SetTopMargin(0.08);
+        cCent.SetBottomMargin(0.12);
+        cCent.SetTicks(1, 1);
+
+        const std::vector<Color_t> singleCentColors = {
+            kRed + 1, kOrange + 7, kSpring + 5, kGreen + 2, kCyan + 2,
+            kAzure + 2, kBlue + 1, kViolet + 2, kMagenta + 1
+        };
+        const auto &vec = *perCentSets.front();
+        double combinedMax = 0.0;
+        for (auto *src : vec) {
+            if (!src) continue;
+            for (int ib = 1; ib <= src->GetNbinsX(); ++ib) {
+                combinedMax = std::max(combinedMax, src->GetBinContent(ib) + src->GetBinError(ib));
+            }
+        }
+
+        std::vector<std::unique_ptr<TH1D>> owned;
+        owned.reserve(vec.size());
+        bool firstDrawn = false;
+        TLegend leg(0.15, 0.58, 0.88, 0.86);
+        leg.SetNColumns(3);
+        leg.SetFillStyle(0);
+        leg.SetBorderSize(0);
+        leg.SetTextFont(42);
+        leg.SetTextSize(0.030);
+
+        for (size_t ic = 0; ic < vec.size(); ++ic) {
+            auto h = cloneHist(vec[ic], Form("h_single_combined_cent_%zu", ic));
+            if (!h) continue;
+            const Color_t color = singleCentColors[ic % singleCentColors.size()];
+            h->SetStats(false);
+            h->SetLineColor(color);
+            h->SetMarkerColor(color);
+            h->SetMarkerStyle(centMarkers[ic % centMarkers.size()]);
+            h->SetMarkerSize(0.80);
+            h->SetLineStyle(1);
+            h->SetLineWidth(2);
+            h->SetTitle(";#it{p}_{T} (GeV/#it{c});Efficiency");
+            h->SetMinimum(0.0);
+            h->SetMaximum(combinedMax > 0.0 ? std::min(1.0, combinedMax * 1.45) : 1.0);
+            h->GetXaxis()->SetTitleSize(0.050);
+            h->GetYaxis()->SetTitleSize(0.050);
+            h->GetXaxis()->SetLabelSize(0.043);
+            h->GetYaxis()->SetLabelSize(0.043);
+            h->GetYaxis()->SetTitleOffset(1.00);
+            if (!firstDrawn) {
+                h->Draw("HIST");
+                h->Draw("SAME E1 P");
+                firstDrawn = true;
+            } else {
+                h->Draw("SAME HIST");
+                h->Draw("SAME E1 P");
+            }
+            if (ic + 1 < cenbins.size()) {
+                leg.AddEntry(h.get(), Form("%.0f-%.0f%%", cenbins[ic], cenbins[ic + 1]), "lep");
+            }
+            owned.push_back(std::move(h));
+        }
+
+        if (firstDrawn) {
+            TLatex text;
+            text.SetNDC();
+            text.SetTextFont(42);
+            text.SetTextSize(0.040);
+            text.DrawLatex(0.15, 0.91, "MC efficiency vs #it{p}_{T}");
+            text.SetTextSize(0.032);
+            text.DrawLatex(0.60, 0.91, setLabel(0).c_str());
+            text.DrawLatex(0.60, 0.865, "p_{T} bins include 1.5-2 GeV/#it{c}");
+            leg.Draw();
+            saveCanvas(cCent, outputpath + "/eff_pt_per_cent_combined");
+        }
+
+        gStyle->SetEndErrorSize(prevEndErrorSize);
+        gStyle->SetErrorX(prevErrorX);
+        return;
+    }
+
     gStyle->SetErrorX(0.0); // Combined efficiency plot keeps only Y error bars.
     TCanvas cCent("eff_pt_per_cent_combined", "Efficiency vs p_{T} per centrality", kCanvasW, kCanvasH);
 

@@ -344,44 +344,89 @@ inline std::unique_ptr<TCanvas> MakeSystematicsDetailCanvas(const std::string &n
                                                              TH1D *hSel,
                                                              TH1D *hAbso,
                                                              TH1D *hBr,
-                                                             TH1D *hTot) {
+                                                             TH1D *hTot,
+                                                             TH1D *hRef = nullptr) {
     auto c = std::make_unique<TCanvas>(name.c_str(), name.c_str(), 960, 720);
     if (!hSel || !hAbso || !hTot) return c;
 
-    hSel->SetStats(false);
-    hAbso->SetStats(false);
-    if (hBr) hBr->SetStats(false);
-    hTot->SetStats(false);
-    hTot->SetLineColor(kBlack);
-    hTot->SetLineWidth(3);
-    hSel->SetLineColor(kRed + 1);
-    hSel->SetLineWidth(2);
-    hAbso->SetLineColor(kAzure + 2);
-    hAbso->SetLineWidth(2);
-    if (hBr) {
-        hBr->SetLineColor(kGreen + 2);
-        hBr->SetLineWidth(2);
+    auto makeFraction = [&](TH1D *src, const char *histName, const char *title) -> std::unique_ptr<TH1D> {
+        if (!src) return nullptr;
+        auto h = std::unique_ptr<TH1D>(static_cast<TH1D *>(src->Clone(histName)));
+        h->SetDirectory(nullptr);
+        h->SetTitle(title);
+        h->SetStats(false);
+        h->GetYaxis()->SetTitle("Systematic uncertainty (%)");
+        for (int ib = 1; ib <= h->GetNbinsX(); ++ib) {
+            const double denom = hRef ? hRef->GetBinContent(ib) : 0.0;
+            const double value = h->GetBinContent(ib);
+            const double frac = (std::isfinite(denom) && std::abs(denom) > 0.0 && std::isfinite(value))
+                                    ? 100.0 * value / std::abs(denom)
+                                    : 0.0;
+            h->SetBinContent(ib, frac);
+            h->SetBinError(ib, 0.0);
+        }
+        return h;
+    };
+
+    auto hSelFrac = makeFraction(hSel, (name + "_selection_fraction").c_str(), hTot->GetTitle());
+    auto hAbsoFrac = makeFraction(hAbso, (name + "_absorption_fraction").c_str(), hTot->GetTitle());
+    auto hBrFrac = makeFraction(hBr, (name + "_br_fraction").c_str(), hTot->GetTitle());
+    auto hTotFrac = makeFraction(hTot, (name + "_total_fraction").c_str(), hTot->GetTitle());
+    if (!hSelFrac || !hAbsoFrac || !hTotFrac) return c;
+
+    hTotFrac->SetLineColor(kBlack);
+    hTotFrac->SetLineWidth(3);
+    hSelFrac->SetLineColor(kRed + 1);
+    hSelFrac->SetLineWidth(2);
+    hAbsoFrac->SetLineColor(kAzure + 2);
+    hAbsoFrac->SetLineWidth(2);
+    if (hBrFrac) {
+        hBrFrac->SetLineColor(kGreen + 2);
+        hBrFrac->SetLineWidth(2);
     }
 
-    hTot->Draw("HIST");
-    hSel->Draw("HIST SAME");
-    hAbso->Draw("HIST SAME");
-    if (hBr) hBr->Draw("HIST SAME");
+    double yMax = hTotFrac->GetMaximum();
+    yMax = std::max(yMax, hSelFrac->GetMaximum());
+    yMax = std::max(yMax, hAbsoFrac->GetMaximum());
+    if (hBrFrac) yMax = std::max(yMax, hBrFrac->GetMaximum());
+    if (!(yMax > 0.0)) yMax = 1.0;
+    hTotFrac->GetYaxis()->SetRangeUser(0.0, yMax * 1.25);
 
-    auto leg = std::make_unique<TLegend>(0.62, 0.70, 0.88, 0.88);
+    c->SetLeftMargin(0.12);
+    c->SetBottomMargin(0.12);
+    c->SetTicks(1, 1);
+    c->SetGrid(false, false);
+
+    hTotFrac->Draw("HIST");
+    hSelFrac->Draw("HIST SAME");
+    hAbsoFrac->Draw("HIST SAME");
+    if (hBrFrac) hBrFrac->Draw("HIST SAME");
+
+    auto leg = std::make_unique<TLegend>(0.58, 0.64, 0.88, 0.88);
     leg->SetBorderSize(0);
     leg->SetFillStyle(0);
     leg->SetTextFont(42);
     leg->SetTextSize(0.035);
-    leg->AddEntry(hTot, "Total sys", "l");
-    leg->AddEntry(hSel, "Selection sys", "l");
-    leg->AddEntry(hAbso, "Absorption sys", "l");
-    if (hBr) leg->AddEntry(hBr, "BR sys", "l");
+    leg->AddEntry(hTotFrac.get(), "Total sys", "l");
+    leg->AddEntry(hSelFrac.get(), "Selection sys", "l");
+    leg->AddEntry(hAbsoFrac.get(), "Absorption sys", "l");
+    if (hBrFrac) leg->AddEntry(hBrFrac.get(), "BR sys", "l");
     leg->DrawClone();
-    c->SetGrid();
+
+    c->Modified();
+    c->Update();
+    // The canvas keeps pointers to drawn histograms. Transfer ownership to ROOT
+    // so the percentage clones remain alive when this helper returns.
+    hTotFrac->SetBit(TObject::kCanDelete);
+    hSelFrac->SetBit(TObject::kCanDelete);
+    hAbsoFrac->SetBit(TObject::kCanDelete);
+    if (hBrFrac) hBrFrac->SetBit(TObject::kCanDelete);
+    hTotFrac.release();
+    hSelFrac.release();
+    hAbsoFrac.release();
+    if (hBrFrac) hBrFrac.release();
     return c;
 }
-
 inline std::unique_ptr<TCanvas> MakeFinalSpectrumCanvas(const std::string &name,
                                                         TH1D *hStat,
                                                         TGraphAsymmErrors *gSys,
@@ -568,7 +613,8 @@ inline std::unique_ptr<TCanvas> MakeBlastWaveFitCanvas(const std::string &name,
                                                        TH1D *hCorr,
                                                        TF1 *fBw,
                                                        double cenMin,
-                                                       double cenMax) {
+                                                       double cenMax,
+                                                       const std::vector<std::string> &parameterTextLines = {}) {
     auto c = std::make_unique<TCanvas>(name.c_str(), name.c_str(), 960, 720);
     if (!hCorr || !fBw) return c;
 
@@ -584,20 +630,48 @@ inline std::unique_ptr<TCanvas> MakeBlastWaveFitCanvas(const std::string &name,
     c->SetRightMargin(0.05);
     c->SetTopMargin(0.10);
     c->SetTicks(1, 1);
-    c->SetGridy(true);
     c->SetLogy();
 
     hDraw->SetStats(false);
     hDraw->SetMarkerStyle(20);
-    hDraw->SetMarkerSize(1.0);
+    hDraw->SetMarkerSize(1.15);
+    hDraw->SetLineWidth(2);
     hDraw->SetLineColor(kBlack);
     hDraw->SetMarkerColor(kBlack);
-    hDraw->SetMinimum(std::max(1e-12, hDraw->GetMinimum(1) * 0.5));
-    hDraw->SetMaximum(hDraw->GetMaximum() * 1.4);
-    hDraw->SetTitle(plotTitle.c_str());
+
+    const double xMin = 0.0;
+    const double xMax = 10.0;
+    double yMin = std::numeric_limits<double>::infinity();
+    double yMax = 0.0;
+    for (int ib = 1; ib <= hDraw->GetNbinsX(); ++ib) {
+        const double x = hDraw->GetXaxis()->GetBinCenter(ib);
+        if (x < xMin || x > xMax) continue;
+        const double y = hDraw->GetBinContent(ib);
+        const double e = hDraw->GetBinError(ib);
+        if (std::isfinite(y) && y > 0.0) {
+            yMin = std::min(yMin, std::max(1e-20, y - e));
+            yMax = std::max(yMax, y + e);
+        }
+    }
+    for (double x = xMin; x <= xMax; x += 0.05) {
+        const double y = fBw->Eval(x);
+        if (std::isfinite(y) && y > 0.0) {
+            yMin = std::min(yMin, y);
+            yMax = std::max(yMax, y);
+        }
+    }
+    if (!std::isfinite(yMin) || yMin <= 0.0) yMin = std::max(1e-14, hDraw->GetMinimum(1));
+    if (!std::isfinite(yMax) || yMax <= yMin) yMax = std::max(yMin * 10.0, hDraw->GetMaximum());
+    yMin *= 0.55;
+    yMax *= 1.8;
+    if (yMax / yMin > 1e6) yMin = yMax / 1e6;
+
+    hDraw->SetMinimum(yMin);
+    hDraw->SetMaximum(yMax);
+    hDraw->SetTitle("");
     hDraw->GetXaxis()->SetTitle("#it{p}_{T} (GeV/#it{c})");
     hDraw->GetYaxis()->SetTitle("Corrected counts");
-    hDraw->GetXaxis()->SetRangeUser(fBw->GetXmin(), fBw->GetXmax());
+    hDraw->GetXaxis()->SetRangeUser(xMin, xMax);
     hDraw->GetXaxis()->SetTitleSize(0.05);
     hDraw->GetXaxis()->SetTitleOffset(1.25);
     hDraw->GetYaxis()->SetTitleSize(0.05);
@@ -606,32 +680,46 @@ inline std::unique_ptr<TCanvas> MakeBlastWaveFitCanvas(const std::string &name,
 
     fBw->SetLineColor(kRed + 1);
     fBw->SetLineWidth(3);
+    fBw->SetLineStyle(kSolid);
+    fBw->SetRange(xMin, xMax);
     fBw->Draw("SAME");
-
-    auto pave = std::make_unique<TPaveText>(0.12, 0.14, 0.62, 0.40, "NDC");
-    pave->SetBorderSize(0);
-    pave->SetFillStyle(0);
-    pave->SetTextAlign(12);
-    pave->SetTextSize(0.036);
-    const double chi2 = fBw->GetChisquare();
-    const int ndf = fBw->GetNDF();
-    const double fitProb = (ndf > 0) ? TMath::Prob(chi2, ndf) : 0.0;
-    pave->AddText(Form("Cen: %.0f-%.0f%%", cenMin, cenMax));
-    pave->AddText(Form("#beta = %.3f #pm %.3f", fBw->GetParameter(1), fBw->GetParError(1)));
-    pave->AddText(Form("T = %.3f #pm %.3f", fBw->GetParameter(2), fBw->GetParError(2)));
-    pave->AddText(Form("n = %.3f #pm %.3f", fBw->GetParameter(3), fBw->GetParError(3)));
-    pave->AddText(Form("norm = %.3g #pm %.3g", fBw->GetParameter(4), fBw->GetParError(4)));
-    pave->AddText(Form("#chi^{2}/ndf = %.2f / %d", chi2, ndf));
-    pave->AddText(Form("Fit prob. = %.3f", fitProb));
-    pave->DrawClone();
 
     auto leg = std::make_unique<TLegend>(0.62, 0.76, 0.90, 0.90);
     leg->SetBorderSize(0);
     leg->SetFillStyle(0);
-    leg->SetTextSize(0.04);
+    leg->SetTextSize(0.036);
     leg->AddEntry(hDrawObj ? hDrawObj : hCorr, "Corrected spectrum", "lep");
     leg->AddEntry(fBw, "BGBW fit", "l");
     leg->DrawClone();
+
+    TLatex title;
+    title.SetNDC();
+    title.SetTextFont(42);
+    title.SetTextSize(0.040);
+    title.SetTextAlign(13);
+    title.DrawLatex(0.16, 0.91, plotTitle.c_str());
+
+    auto pave = std::make_unique<TPaveText>(0.16, 0.15, 0.58, 0.49, "NDC");
+    pave->SetBorderSize(0);
+    pave->SetFillStyle(0);
+    pave->SetTextAlign(12);
+    pave->SetTextFont(42);
+    pave->SetTextSize(0.030);
+    const double chi2 = fBw->GetChisquare();
+    const int ndf = fBw->GetNDF();
+    const double fitProb = (ndf > 0) ? TMath::Prob(chi2, ndf) : 0.0;
+    pave->AddText(Form("Cen: %.0f-%.0f%%", cenMin, cenMax));
+    if (!parameterTextLines.empty()) {
+        for (const auto &line : parameterTextLines) pave->AddText(line.c_str());
+    } else {
+        pave->AddText(Form("#beta = %.3f #pm %.3f", fBw->GetParameter(1), fBw->GetParError(1)));
+        pave->AddText(Form("T = %.3f #pm %.3f", fBw->GetParameter(2), fBw->GetParError(2)));
+        pave->AddText(Form("n = %.3f #pm %.3f", fBw->GetParameter(3), fBw->GetParError(3)));
+        pave->AddText(Form("Norm = %.3g #pm %.3g", fBw->GetParameter(4), fBw->GetParError(4)));
+    }
+    pave->AddText(Form("#chi^{2}/ndf = %.2f / %d", chi2, ndf));
+    pave->AddText(Form("Fit prob. = %.3f", fitProb));
+    pave->DrawClone();
 
     c->Modified();
     c->Update();

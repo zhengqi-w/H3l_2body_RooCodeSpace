@@ -28,12 +28,24 @@ struct BinningCorrectionConfig {
     std::string mcTree;
     std::string absorptionTree;
     std::string mcFileForAcceptance;
+    std::vector<std::string> mcFilesForAcceptance;
+    std::vector<double> mcFileWeights;
+    std::vector<std::vector<double>> mcFileWeightsByCentrality;
     std::string mcFileForAbsorption;
     std::string mcEfficiencySelection;
+    bool mcAcceptanceRequireTwoBody{true};
     double originalCtaoAbsorption{7.6};
     std::vector<double> cenBins;
     std::vector<std::vector<double>> ptBinsByCentrality;
     std::vector<std::vector<std::string>> topologySelectionsByCentrality;
+    struct SpectrumMcCentralityOverride {
+        double targetMin{0.0};
+        double targetMax{0.0};
+        double sourceMin{0.0};
+        double sourceMax{0.0};
+    };
+    bool useSpectrumMcCentralityOverrides{false};
+    std::vector<SpectrumMcCentralityOverride> spectrumMcCentralityOverrides;
     std::vector<double> ptBins;
     std::vector<std::vector<double>> ctBinsByPt;
 };
@@ -114,6 +126,19 @@ inline int FindPtIndexInPerCentBinning(const std::vector<std::vector<double>> &p
                                        double ptMax) {
     if (cenIdx < 0 || static_cast<size_t>(cenIdx) >= ptBinsByCentrality.size()) return -1;
     return FindPtIndex(ptBinsByCentrality[static_cast<size_t>(cenIdx)], ptMin, ptMax);
+}
+
+inline const BinningCorrectionConfig::SpectrumMcCentralityOverride*
+FindSpectrumMcCentralityOverride(const BinningCorrectionConfig &cfg, double cenMin, double cenMax) {
+    if (!cfg.useSpectrumMcCentralityOverrides) return nullptr;
+    for (const auto &ov : cfg.spectrumMcCentralityOverrides) {
+        if (std::abs(ov.targetMin - cenMin) < 1e-6 &&
+            std::abs(ov.targetMax - cenMax) < 1e-6 &&
+            ov.sourceMax > ov.sourceMin) {
+            return &ov;
+        }
+    }
+    return nullptr;
 }
 
 inline SpectrumEventSignalLossCache BuildSpectrumEventSignalLossCache(const BinningCorrectionConfig &cfg,
@@ -263,7 +288,10 @@ inline PtCtAcceptanceCache BuildPtCtAcceptanceCache(const BinningCorrectionConfi
         cfg.ctBinsByPt,
         std::vector<double>{},
         std::vector<std::vector<double>>{},
-        cfg.mcEfficiencySelection);
+        cfg.mcEfficiencySelection,
+        std::vector<std::string>{},
+        std::vector<std::vector<std::string>>{},
+        cfg.mcAcceptanceRequireTwoBody);
 
     const auto &hVec = (cfg.isMatter == "matter") ? accRes.acc_ct_per_pt_matter
                       : (cfg.isMatter == "antimatter") ? accRes.acc_ct_per_pt_antimatter
@@ -286,6 +314,50 @@ inline PtCtAcceptanceCache BuildPtCtAcceptanceCache(const BinningCorrectionConfi
     cache.ready = true;
     accRes.Clear();
     return cache;
+}
+
+inline std::vector<double> NormalizedWeights(std::vector<double> weights, size_t n) {
+    if (n == 0) return {};
+    if (weights.size() != n) weights.assign(n, 1.0);
+    double sum = 0.0;
+    for (double &w : weights) {
+        if (!std::isfinite(w) || w < 0.0) w = 0.0;
+        sum += w;
+    }
+    if (sum <= 0.0) {
+        weights.assign(n, 1.0 / static_cast<double>(n));
+        return weights;
+    }
+    for (double &w : weights) w /= sum;
+    return weights;
+}
+
+inline PtCtAcceptanceCache BuildWeightedPtCtAcceptanceCache(const BinningCorrectionConfig &cfg) {
+    PtCtAcceptanceCache out;
+    if (cfg.mcFilesForAcceptance.empty()) return out;
+    const auto weights = NormalizedWeights(cfg.mcFileWeights, cfg.mcFilesForAcceptance.size());
+
+    bool initialized = false;
+    for (size_t imc = 0; imc < cfg.mcFilesForAcceptance.size(); ++imc) {
+        auto one = BuildPtCtAcceptanceCache(cfg, cfg.mcFilesForAcceptance[imc]);
+        if (!one.ready) continue;
+        if (!initialized) {
+            out.ptBins = one.ptBins;
+            out.valuesByPt.assign(one.valuesByPt.size(), std::vector<double>{});
+            for (size_t ip = 0; ip < one.valuesByPt.size(); ++ip) {
+                out.valuesByPt[ip].assign(one.valuesByPt[ip].size(), 0.0);
+            }
+            initialized = true;
+        }
+        for (size_t ip = 0; ip < out.valuesByPt.size() && ip < one.valuesByPt.size(); ++ip) {
+            for (size_t ib = 0; ib < out.valuesByPt[ip].size() && ib < one.valuesByPt[ip].size(); ++ib) {
+                const double v = one.valuesByPt[ip][ib] > 0.0 ? one.valuesByPt[ip][ib] : 1.0;
+                out.valuesByPt[ip][ib] += weights[imc] * v;
+            }
+        }
+    }
+    out.ready = initialized;
+    return out;
 }
 
 inline PtCtAbsorptionCache BuildPtCtAbsorptionCache(const BinningCorrectionConfig &cfg,
@@ -339,7 +411,8 @@ inline SpectrumAcceptanceCache BuildSpectrumAcceptanceCache(const BinningCorrect
         cfg.mcEfficiencySelection,
         std::vector<std::string>{},
         cfg.mode == "topology_spectrum" ? cfg.topologySelectionsByCentrality
-                                        : std::vector<std::vector<std::string>>{});
+                                        : std::vector<std::vector<std::string>>{},
+        cfg.mcAcceptanceRequireTwoBody);
 
     const auto &hVec = (cfg.isMatter == "matter") ? accRes.acc_pt_per_cent_matter
                       : (cfg.isMatter == "antimatter") ? accRes.acc_pt_per_cent_antimatter
@@ -364,9 +437,100 @@ inline SpectrumAcceptanceCache BuildSpectrumAcceptanceCache(const BinningCorrect
         }
     }
 
+    if (cfg.useSpectrumMcCentralityOverrides) {
+        for (size_t ic = 0; ic < cfg.ptBinsByCentrality.size() && ic + 1 < cfg.cenBins.size(); ++ic) {
+            const auto *ov = FindSpectrumMcCentralityOverride(cfg, cfg.cenBins[ic], cfg.cenBins[ic + 1]);
+            if (!ov) continue;
+
+            const auto &ptEdges = cfg.ptBinsByCentrality[ic];
+            if (ptEdges.size() < 2) continue;
+
+            std::vector<std::vector<std::string>> topoForTarget;
+            if (cfg.mode == "topology_spectrum") {
+                topoForTarget.resize(1);
+                if (ic < cfg.topologySelectionsByCentrality.size()) {
+                    topoForTarget.front() = cfg.topologySelectionsByCentrality[ic];
+                }
+                if (topoForTarget.front().size() != ptEdges.size() - 1) {
+                    topoForTarget.front().assign(ptEdges.size() - 1, std::string{});
+                }
+            }
+
+            auto overrideAcc = AcceptanceHelper::ComputeAcceptanceFlexible(
+                mcNode,
+                std::vector<double>{},
+                std::vector<double>{},
+                std::vector<std::vector<double>>{},
+                std::vector<double>{ov->sourceMin, ov->sourceMax},
+                std::vector<std::vector<double>>{ptEdges},
+                cfg.mcEfficiencySelection,
+                std::vector<std::string>{},
+                cfg.mode == "topology_spectrum" ? topoForTarget
+                                                : std::vector<std::vector<std::string>>{},
+                cfg.mcAcceptanceRequireTwoBody);
+
+            TH1D *src = (cfg.isMatter == "matter")
+                            ? (!overrideAcc.acc_pt_per_cent_matter.empty() ? overrideAcc.acc_pt_per_cent_matter.front() : nullptr)
+                        : (cfg.isMatter == "antimatter")
+                            ? (!overrideAcc.acc_pt_per_cent_antimatter.empty() ? overrideAcc.acc_pt_per_cent_antimatter.front() : nullptr)
+                            : (!overrideAcc.acc_pt_per_cent.empty() ? overrideAcc.acc_pt_per_cent.front() : nullptr);
+            if (src) {
+                cache.valuesByCentrality[ic].assign(ptEdges.size() - 1, BinValueWithError{});
+                for (size_t ip = 0; ip + 1 < ptEdges.size(); ++ip) {
+                    const int bin = static_cast<int>(ip + 1);
+                    double v = src->GetBinContent(bin);
+                    double e = src->GetBinError(bin);
+                    if (v <= 0.0) v = 1.0;
+                    cache.valuesByCentrality[ic][ip] = BinValueWithError{v, e};
+                }
+                Info("BinningCorrectionHelper",
+                     "Spectrum MC acceptance for target %.0f-%.0f%% uses MC centrality %.0f-%.0f%%",
+                     cfg.cenBins[ic], cfg.cenBins[ic + 1], ov->sourceMin, ov->sourceMax);
+            }
+            overrideAcc.Clear();
+        }
+    }
+
     cache.ready = true;
     accRes.Clear();
     return cache;
+}
+
+inline SpectrumAcceptanceCache BuildWeightedSpectrumAcceptanceCache(const BinningCorrectionConfig &cfg) {
+    SpectrumAcceptanceCache out;
+    if (cfg.mcFilesForAcceptance.empty()) return out;
+
+    bool initialized = false;
+    for (size_t imc = 0; imc < cfg.mcFilesForAcceptance.size(); ++imc) {
+        auto one = BuildSpectrumAcceptanceCache(cfg, cfg.mcFilesForAcceptance[imc]);
+        if (!one.ready) continue;
+        if (!initialized) {
+            out.cenBins = one.cenBins;
+            out.ptBinsByCentrality = one.ptBinsByCentrality;
+            out.valuesByCentrality.assign(one.valuesByCentrality.size(), std::vector<BinValueWithError>{});
+            for (size_t ic = 0; ic < one.valuesByCentrality.size(); ++ic) {
+                out.valuesByCentrality[ic].assign(one.valuesByCentrality[ic].size(), BinValueWithError{0.0, 0.0});
+            }
+            initialized = true;
+        }
+        for (size_t ic = 0; ic < out.valuesByCentrality.size() && ic < one.valuesByCentrality.size(); ++ic) {
+            std::vector<double> weights = cfg.mcFileWeights;
+            if (ic < cfg.mcFileWeightsByCentrality.size() &&
+                cfg.mcFileWeightsByCentrality[ic].size() == cfg.mcFilesForAcceptance.size()) {
+                weights = cfg.mcFileWeightsByCentrality[ic];
+            }
+            weights = NormalizedWeights(std::move(weights), cfg.mcFilesForAcceptance.size());
+            for (size_t ip = 0; ip < out.valuesByCentrality[ic].size() && ip < one.valuesByCentrality[ic].size(); ++ip) {
+                const double v = one.valuesByCentrality[ic][ip].value > 0.0 ? one.valuesByCentrality[ic][ip].value : 1.0;
+                const double e = one.valuesByCentrality[ic][ip].error;
+                out.valuesByCentrality[ic][ip].value += weights[imc] * v;
+                out.valuesByCentrality[ic][ip].error =
+                    std::hypot(out.valuesByCentrality[ic][ip].error, weights[imc] * e);
+            }
+        }
+    }
+    out.ready = initialized;
+    return out;
 }
 
 inline std::vector<BinValueWithError> ComputeAcceptancePerBinWithErrors(const BinningCorrectionConfig &cfg,
@@ -376,7 +540,7 @@ inline std::vector<BinValueWithError> ComputeAcceptancePerBinWithErrors(const Bi
                                                                         const PtCtAcceptanceCache *ptCtCache = nullptr,
                                                                         const SpectrumAcceptanceCache *spectrumCache = nullptr) {
     std::vector<BinValueWithError> out(items.size(), BinValueWithError{});
-    if (edges.size() < 2 || items.empty() || mcFileForAcceptance.empty()) return out;
+    if (edges.size() < 2 || items.empty()) return out;
 
     if (cfg.mode == "pt_ct" && ptCtCache && ptCtCache->ready && ptCtCache->ptBins.size() >= 2) {
         const int ptIdx = FindPtIndex(ptCtCache->ptBins, items.front().ptMin, items.front().ptMax);
@@ -408,6 +572,34 @@ inline std::vector<BinValueWithError> ComputeAcceptancePerBinWithErrors(const Bi
         }
     }
 
+    if (cfg.mcFilesForAcceptance.size() > 1 && !cfg.mcFileWeights.empty()) {
+        const auto weights = NormalizedWeights(cfg.mcFileWeights, cfg.mcFilesForAcceptance.size());
+        for (auto &v : out) v = BinValueWithError{0.0, 0.0};
+        BinningCorrectionConfig singleCfg = cfg;
+        singleCfg.mcFilesForAcceptance.clear();
+        singleCfg.mcFileWeights.clear();
+        singleCfg.mcFileWeightsByCentrality.clear();
+        for (size_t imc = 0; imc < cfg.mcFilesForAcceptance.size(); ++imc) {
+            auto one = ComputeAcceptancePerBinWithErrors(singleCfg,
+                                                         items,
+                                                         edges,
+                                                         cfg.mcFilesForAcceptance[imc],
+                                                         nullptr,
+                                                         nullptr);
+            for (size_t ib = 0; ib < out.size() && ib < one.size(); ++ib) {
+                const double v = one[ib].value > 0.0 ? one[ib].value : 1.0;
+                out[ib].value += weights[imc] * v;
+                out[ib].error = std::hypot(out[ib].error, weights[imc] * one[ib].error);
+            }
+        }
+        for (auto &v : out) {
+            if (v.value <= 0.0) v.value = 1.0;
+        }
+        return out;
+    }
+
+    if (mcFileForAcceptance.empty()) return out;
+
     auto mcChain = MakeChainFromFileForCorrection(mcFileForAcceptance, cfg.mcTree);
     ROOT::RDataFrame rdf(*mcChain);
     auto mcReady = GeneralHelper::CorrectAndConvertRDF(rdf, false, true, false);
@@ -421,7 +613,10 @@ inline std::vector<BinValueWithError> ComputeAcceptancePerBinWithErrors(const Bi
             std::vector<std::vector<double>>{},
             std::vector<double>{},
             std::vector<std::vector<double>>{},
-            cfg.mcEfficiencySelection);
+            cfg.mcEfficiencySelection,
+            std::vector<std::string>{},
+            std::vector<std::vector<std::string>>{},
+            cfg.mcAcceptanceRequireTwoBody);
         TH1D *src = (cfg.isMatter == "matter") ? accRes.acc_pt_matter
                   : (cfg.isMatter == "antimatter") ? accRes.acc_pt_antimatter
                   : accRes.acc_pt_both;
@@ -450,7 +645,8 @@ inline std::vector<BinValueWithError> ComputeAcceptancePerBinWithErrors(const Bi
             std::vector<std::vector<double>>{edges},
             cfg.mcEfficiencySelection,
             std::vector<std::string>{},
-            std::vector<std::vector<std::string>>{topoSel});
+            std::vector<std::vector<std::string>>{topoSel},
+            cfg.mcAcceptanceRequireTwoBody);
         TH1D *src = (cfg.isMatter == "matter")
                         ? (!accRes.acc_pt_per_cent_matter.empty() ? accRes.acc_pt_per_cent_matter.front() : nullptr)
                     : (cfg.isMatter == "antimatter")
@@ -474,7 +670,10 @@ inline std::vector<BinValueWithError> ComputeAcceptancePerBinWithErrors(const Bi
         std::vector<std::vector<double>>{},
         std::vector<double>{},
         std::vector<std::vector<double>>{},
-        cfg.mcEfficiencySelection);
+        cfg.mcEfficiencySelection,
+        std::vector<std::string>{},
+        std::vector<std::vector<std::string>>{},
+        cfg.mcAcceptanceRequireTwoBody);
     TH1D *src = (cfg.isMatter == "matter") ? accRes.acc_ct_matter
               : (cfg.isMatter == "antimatter") ? accRes.acc_ct_antimatter
               : accRes.acc_ct_both;
