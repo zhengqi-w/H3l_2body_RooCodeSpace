@@ -75,6 +75,8 @@ static std::string NormalizeMixMode(std::string mode) {
   std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
   std::replace(mode.begin(), mode.end(), '-', '_');
   if (mode == "ptct") return "pt_ct";
+  if (mode == "radct") return "rad_ct";
+  if (mode == "decayradiusct" || mode == "decay_radius_ct") return "rad_ct";
   if (mode == "cenpt") return "cen_pt";
   if (mode == "ptctsingle") return "pt_ct_single";
   if (mode == "ptsingle") return "pt_single";
@@ -382,10 +384,14 @@ static json ResolveWpConfig(const json &raw_cfg) {
     copy_binning("cen_bins");
     copy_binning("pt_bins_by_centrality");
     copy_binning("pt_bins");
+    copy_binning("rad_bins");
     copy_binning("ct_bins_single");
     copy_binning("pt_bins_single");
     if (!cfg.contains("ct_bins") && binning.contains("ct_bins_by_pt")) {
       cfg["ct_bins"] = binning["ct_bins_by_pt"];
+    }
+    if (!cfg.contains("ct_bins_by_rad") && binning.contains("ct_bins_by_rad")) {
+      cfg["ct_bins_by_rad"] = binning["ct_bins_by_rad"];
     }
 
     if (!cfg.contains("mix_mode") &&
@@ -407,11 +413,13 @@ static std::string fmt_edge(double x){
   return std::string(buf);
 }
 
-static std::string make_label(bool hasCen, bool hasPt, bool hasCt,
-                              double cenmin, double cenmax, double ptmin, double ptmax, double ctmin, double ctmax){
+static std::string make_label(bool hasCen, bool hasPt, bool hasRad, bool hasCt,
+                              double cenmin, double cenmax, double ptmin, double ptmax,
+                              double radmin, double radmax, double ctmin, double ctmax){
   std::vector<std::string> parts;
   if(hasCen) parts.push_back(std::string("cen_") + fmt_edge(cenmin) + "_" + fmt_edge(cenmax));
   if(hasPt)  parts.push_back(std::string("pt_")  + fmt_edge(ptmin)  + "_" + fmt_edge(ptmax));
+  if(hasRad) parts.push_back(std::string("rad_") + fmt_edge(radmin) + "_" + fmt_edge(radmax));
   if(hasCt)  parts.push_back(std::string("ct_")  + fmt_edge(ctmin)  + "_" + fmt_edge(ctmax));
   if(parts.empty()) return std::string("all");
   std::string out = parts[0];
@@ -419,11 +427,13 @@ static std::string make_label(bool hasCen, bool hasPt, bool hasCt,
   return out;
 }
 
-static std::string make_desc(bool hasCen, bool hasPt, bool hasCt,
-                             double cenmin, double cenmax, double ptmin, double ptmax, double ctmin, double ctmax){
+static std::string make_desc(bool hasCen, bool hasPt, bool hasRad, bool hasCt,
+                             double cenmin, double cenmax, double ptmin, double ptmax,
+                             double radmin, double radmax, double ctmin, double ctmax){
   std::vector<std::string> parts;
   if(hasCen) parts.push_back(Form("centrality %.0f-%.0f", cenmin, cenmax));
   if(hasPt)  parts.push_back(Form("pT %.2f-%.2f GeV/c", ptmin, ptmax));
+  if(hasRad) parts.push_back(Form("DecayRadius %.2f-%.2f cm", radmin, radmax));
   if(hasCt)  parts.push_back(Form("ct %.2f-%.2f cm", ctmin, ctmax));
   if(parts.empty()) return std::string("full phase space");
   std::string out = parts[0];
@@ -442,6 +452,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
   catch(...) { printf("Invalid JSON config.\n"); return; }
   json cfg = ResolveWpConfig(raw_cfg);
   const bool combinePeriod = raw_cfg.value("execution", json::object()).value("combine_period", false);
+  const bool mcClosureTest = raw_cfg.value("execution", json::object()).value("mc_closure_test", false);
 
   // required fields
   std::string trained_data_dir = cfg.value("trained_data_dir", std::string(""));
@@ -459,6 +470,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
   auto wp_mode_to_profile_key = [](const std::string &m){
     if(m == "cen_pt") return std::string("bdt_spectrum");
     if(m == "pt_ct" || m == "pt_ct_single") return std::string("pt_ct");
+    if(m == "rad_ct") return std::string("rad_ct");
     if(m == "ct_single") return std::string("ct_single");
     return std::string();
   };
@@ -473,6 +485,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
     }
   }
   std::vector<double> pt_bins = cfg.value("pt_bins", std::vector<double>{});
+  std::vector<double> rad_bins = cfg.value("rad_bins", std::vector<double>{});
   std::vector<std::vector<double>> ct_bins;
   if(cfg.contains("ct_bins")){
     try {
@@ -487,6 +500,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
     }
   }
   std::vector<double> ct_bins_single = cfg.value("ct_bins_single", std::vector<double>{});
+  std::vector<std::vector<double>> ct_bins_by_rad = cfg.value("ct_bins_by_rad", std::vector<std::vector<double>>{});
   std::vector<double> cen_bins = cfg.value("cen_bins", std::vector<double>{});
   std::vector<std::vector<double>> pt_bins_by_centrality = cfg.value("pt_bins_by_centrality", std::vector<std::vector<double>>{});
   std::vector<double> pt_bins_single = cfg.value("pt_bins_single", std::vector<double>{});
@@ -518,6 +532,9 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
   std::string period_text = cfg.value("period_text", std::string("LHC23PbPb apass5"));
   std::string additional_text = cfg.value("additional_pave_text", std::string(""));
   std::vector<double> target_pt_range = cfg.value("target_pt_range", std::vector<double>{});
+  std::vector<double> target_rad_range = cfg.value("target_rad_range", std::vector<double>{});
+  std::vector<std::vector<double>> target_rad_ranges =
+      cfg.value("target_rad_ranges", std::vector<std::vector<double>>{});
   std::vector<double> target_ct_range = cfg.value("target_ct_range", std::vector<double>{});
   std::vector<double> target_cen_range = cfg.value("target_cen_range", std::vector<double>{});
   std::vector<double> yield_eff_range = cfg.value("yield_eff_range", std::vector<double>{0.5, 0.9});
@@ -648,12 +665,26 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
   } else {
     wp_txt = out_dir + "/WorkingPoint_" + name_suffix + ".txt";
   }
-  std::vector<std::string> wp_lines; // start empty; will be rebuilt for current run
+  std::vector<std::string> wp_lines;
+  const bool targeted_run =
+      target_cen_range.size() == 2 ||
+      target_pt_range.size() == 2 ||
+      target_rad_range.size() == 2 ||
+      !target_rad_ranges.empty() ||
+      target_ct_range.size() == 2;
+  if (targeted_run && !wp_txt.empty()) {
+    std::ifstream existing_wp(wp_txt.c_str());
+    std::string line;
+    while (std::getline(existing_wp, line)) {
+      if (!line.empty()) wp_lines.push_back(line);
+    }
+  }
 
-  enum class WPFormat { Full, CenPt, PtCt, PtOnly, CtOnly };
+  enum class WPFormat { Full, CenPt, PtCt, RadCt, PtOnly, CtOnly };
   auto format_from_mix = [](const std::string &mode){
     if(mode == "cen_pt") return WPFormat::CenPt;
     if(mode == "pt_ct" || mode == "pt_ct_single") return WPFormat::PtCt;
+    if(mode == "rad_ct") return WPFormat::RadCt;
     if(mode == "pt_single") return WPFormat::PtOnly;
     if(mode == "ct_single") return WPFormat::CtOnly;
     return WPFormat::Full; // fallback keeps legacy 6-column boundaries
@@ -664,6 +695,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
     switch(fmt){
       case WPFormat::CenPt: return std::string("# cenmin cenmax ptmin ptmax best_score best_eff max_significance");
       case WPFormat::PtCt:  return std::string("# ptmin ptmax ctmin ctmax best_score best_eff max_significance");
+      case WPFormat::RadCt: return std::string("# radmin radmax ctmin ctmax best_score best_eff max_significance");
       case WPFormat::PtOnly:return std::string("# ptmin ptmax best_score best_eff max_significance");
       case WPFormat::CtOnly:return std::string("# ctmin ctmax best_score best_eff max_significance");
       default:              return std::string("# cenmin cenmax ptmin ptmax ctmin ctmax best_score best_eff max_significance");
@@ -674,6 +706,7 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
     for(const auto &ln : wp_lines){
       if(ln.rfind("#",0)!=0) continue;
       if(ln.find("ptmin ptmax ctmin ctmax") != std::string::npos) return WPFormat::PtCt;
+      if(ln.find("radmin radmax ctmin ctmax") != std::string::npos) return WPFormat::RadCt;
       if(ln.find("cenmin cenmax ptmin ptmax") != std::string::npos) return WPFormat::CenPt;
       if(ln.find("ptmin ptmax best_score") != std::string::npos) return WPFormat::PtOnly;
       if(ln.find("ctmin ctmax best_score") != std::string::npos) return WPFormat::CtOnly;
@@ -682,10 +715,12 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
     return current;
   };
 
-  auto make_key_string = [&](double cenmin, double cenmax, double ptmin, double ptmax, double ctmin, double ctmax){
+  auto make_key_string = [&](double cenmin, double cenmax, double ptmin, double ptmax,
+                             double radmin, double radmax, double ctmin, double ctmax){
     switch(wp_format){
       case WPFormat::CenPt: return std::string(Form("%g %g %g %g", cenmin, cenmax, ptmin, ptmax));
       case WPFormat::PtCt:  return std::string(Form("%g %g %g %g", ptmin, ptmax, ctmin, ctmax));
+      case WPFormat::RadCt: return std::string(Form("%g %g %g %g", radmin, radmax, ctmin, ctmax));
       case WPFormat::PtOnly:return std::string(Form("%g %g", ptmin, ptmax));
       case WPFormat::CtOnly:return std::string(Form("%g %g", ctmin, ctmax));
       default:              return std::string(Form("%g %g %g %g %g %g", cenmin, cenmax, ptmin, ptmax, ctmin, ctmax));
@@ -698,37 +733,44 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
     std::vector<double> vals; double v;
     while(ss>>v) vals.push_back(v);
     if(wp_format == WPFormat::Full && vals.size() >= 6){
-      return make_key_string(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]);
+      return make_key_string(vals[0], vals[1], vals[2], vals[3], -1.0, -1.0, vals[4], vals[5]);
     }
     if(wp_format == WPFormat::CenPt && vals.size() >= 4){
-      return make_key_string(vals[0], vals[1], vals[2], vals[3], -1.0, -1.0);
+      return make_key_string(vals[0], vals[1], vals[2], vals[3], -1.0, -1.0, -1.0, -1.0);
     }
     if(wp_format == WPFormat::PtCt && vals.size() >= 4){
-      return make_key_string(-1.0, -1.0, vals[0], vals[1], vals[2], vals[3]);
+      return make_key_string(-1.0, -1.0, vals[0], vals[1], -1.0, -1.0, vals[2], vals[3]);
+    }
+    if(wp_format == WPFormat::RadCt && vals.size() >= 4){
+      return make_key_string(-1.0, -1.0, -1.0, -1.0, vals[0], vals[1], vals[2], vals[3]);
     }
     if(wp_format == WPFormat::PtOnly && vals.size() >= 2){
-      return make_key_string(-1.0, -1.0, vals[0], vals[1], -1.0, -1.0);
+      return make_key_string(-1.0, -1.0, vals[0], vals[1], -1.0, -1.0, -1.0, -1.0);
     }
     if(wp_format == WPFormat::CtOnly && vals.size() >= 2){
-      return make_key_string(-1.0, -1.0, -1.0, -1.0, vals[0], vals[1]);
+      return make_key_string(-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, vals[0], vals[1]);
     }
     return std::string();
   };
 
   wp_format = detect_format_from_lines(wp_format);
-  auto upsert_wp_line = [&](bool hasCen, bool hasPt, bool hasCt,
-                            double cenmin, double cenmax, double ptmin, double ptmax, double ctmin, double ctmax,
+  auto upsert_wp_line = [&](bool hasCen, bool hasPt, bool hasRad, bool hasCt,
+                            double cenmin, double cenmax, double ptmin, double ptmax,
+                            double radmin, double radmax, double ctmin, double ctmax,
                             double bestScore, double bestEff, double bestSig){
     double cenmin_w = hasCen ? cenmin : -1.0;
     double cenmax_w = hasCen ? cenmax : -1.0;
     double ptmin_w  = hasPt  ? ptmin  : -1.0;
     double ptmax_w  = hasPt  ? ptmax  : -1.0;
+    double radmin_w = hasRad ? radmin : -1.0;
+    double radmax_w = hasRad ? radmax : -1.0;
     double ctmin_w  = hasCt  ? ctmin  : -1.0;
     double ctmax_w  = hasCt  ? ctmax  : -1.0;
-    std::string key = make_key_string(cenmin_w, cenmax_w, ptmin_w, ptmax_w, ctmin_w, ctmax_w);
+    std::string key = make_key_string(cenmin_w, cenmax_w, ptmin_w, ptmax_w, radmin_w, radmax_w, ctmin_w, ctmax_w);
     std::string newline;
     if(wp_format == WPFormat::PtOnly || wp_format == WPFormat::CtOnly ||
-       wp_format == WPFormat::CenPt || wp_format == WPFormat::PtCt || wp_format == WPFormat::Full){
+       wp_format == WPFormat::CenPt || wp_format == WPFormat::PtCt ||
+       wp_format == WPFormat::RadCt || wp_format == WPFormat::Full){
       newline = Form("%s %g %g %g", key.c_str(), bestScore, bestEff, bestSig);
     }
     bool replaced=false;
@@ -757,9 +799,11 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
   struct BinContext {
     bool hasCen{false};
     bool hasPt{true};
+    bool hasRad{false};
     bool hasCt{true};
     double cenmin{0}, cenmax{0};
     double ptmin{0}, ptmax{0};
+    double radmin{0}, radmax{0};
     double ctmin{0}, ctmax{0};
     int mode{0}; // optional log code
     std::string label;
@@ -790,8 +834,9 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       printf("[WP] mode %d | %s\n", ctx.mode, ctx.desc.c_str());
       const bool use_spectrum_this_bin = use_spectrum_for_context(ctx);
 
-      std::string label = ctx.label.empty() ? make_label(ctx.hasCen, ctx.hasPt, ctx.hasCt,
-                                                         ctx.cenmin, ctx.cenmax, ctx.ptmin, ctx.ptmax, ctx.ctmin, ctx.ctmax)
+      std::string label = ctx.label.empty() ? make_label(ctx.hasCen, ctx.hasPt, ctx.hasRad, ctx.hasCt,
+                                                         ctx.cenmin, ctx.cenmax, ctx.ptmin, ctx.ptmax,
+                                                         ctx.radmin, ctx.radmax, ctx.ctmin, ctx.ctmax)
                                             : ctx.label;
       // snapshot and score-eff file paths aligned with BDTPreProcess labels
       std::string snap_path   = trained_data_dir + "/data_" + label + ".root";
@@ -1724,9 +1769,24 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       }
 
       // upsert working point line to summary vector (preserve other bins)
-      upsert_wp_line(ctx.hasCen, ctx.hasPt, ctx.hasCt, ctx.cenmin, ctx.cenmax, ctx.ptmin, ctx.ptmax, ctx.ctmin, ctx.ctmax, bestScore, bestEff, bestSig);
+      upsert_wp_line(ctx.hasCen, ctx.hasPt, ctx.hasRad, ctx.hasCt,
+                     ctx.cenmin, ctx.cenmax, ctx.ptmin, ctx.ptmax,
+                     ctx.radmin, ctx.radmax, ctx.ctmin, ctx.ctmax,
+                     bestScore, bestEff, bestSig);
 
-      return 1;
+	      return 1;
+	  };
+
+  auto process_context = [&](const BinContext &ctx){
+      if (mcClosureTest) {
+        printf("[WP][MCClosure] %s -> score=0, efficiency=1\n", ctx.desc.c_str());
+        upsert_wp_line(ctx.hasCen, ctx.hasPt, ctx.hasRad, ctx.hasCt,
+                       ctx.cenmin, ctx.cenmax, ctx.ptmin, ctx.ptmax,
+                       ctx.radmin, ctx.radmax, ctx.ctmin, ctx.ctmax,
+                       0.0, 1.0, 0.0);
+        return 1;
+      }
+      return process_one_bin(ctx);
   };
 
   // iterate bins per mix_mode 语义
@@ -1748,11 +1808,48 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         }
         BinContext ctx; ctx.hasPt=true; ctx.hasCt=true; ctx.mode=0;
         ctx.ptmin=ptmin; ctx.ptmax=ptmax; ctx.ctmin=ctmin; ctx.ctmax=ctmax;
-        ctx.label = make_label(false,true,true,0,0,ptmin,ptmax,ctmin,ctmax);
-        ctx.desc  = make_desc(false,true,true,0,0,ptmin,ptmax,ctmin,ctmax);
-        int status = process_one_bin(ctx); did_any = true;
+        ctx.label = make_label(false,true,false,true,0,0,ptmin,ptmax,0,0,ctmin,ctmax);
+        ctx.desc  = make_desc(false,true,false,true,0,0,ptmin,ptmax,0,0,ctmin,ctmax);
+        int status = process_context(ctx); did_any = true;
         if (status < 1){
           printf("  failed processing pt %g-%g ct %g-%g with error type: %d \n", ptmin, ptmax, ctmin, ctmax, status);}
+      }
+    }
+  } else if(mix_mode == "rad_ct"){
+    auto matches_target_rad = [&](double radmin, double radmax) {
+      if (!target_rad_ranges.empty()) {
+        for (const auto &range : target_rad_ranges) {
+          if (range.size() == 2 &&
+              fabs(radmin - range[0]) < 1e-6 &&
+              fabs(radmax - range[1]) < 1e-6) {
+            return true;
+          }
+        }
+        return false;
+      }
+      return target_rad_range.size() != 2 ||
+             (fabs(radmin - target_rad_range[0]) < 1e-6 &&
+              fabs(radmax - target_rad_range[1]) < 1e-6);
+    };
+    for(size_t i_rad=0; i_rad+1<rad_bins.size(); ++i_rad){
+      double radmin = rad_bins[i_rad];
+      double radmax = rad_bins[i_rad+1];
+      if(!matches_target_rad(radmin, radmax)) continue;
+      if(i_rad >= ct_bins_by_rad.size()) { printf("ct_bins_by_rad missing for rad index %zu\n", i_rad); break; }
+      const auto &ct_edges = ct_bins_by_rad[i_rad];
+      for(size_t i_ct=0; i_ct+1<ct_edges.size(); ++i_ct){
+        double ctmin = ct_edges[i_ct];
+        double ctmax = ct_edges[i_ct+1];
+        if(target_ct_range.size()==2){
+          if( !(fabs(ctmin - target_ct_range[0])<1e-6 && fabs(ctmax - target_ct_range[1])<1e-6) ) continue;
+        }
+        BinContext ctx; ctx.hasRad=true; ctx.hasCt=true; ctx.hasPt=false; ctx.mode=5;
+        ctx.radmin=radmin; ctx.radmax=radmax; ctx.ctmin=ctmin; ctx.ctmax=ctmax;
+        ctx.label = make_label(false,false,true,true,0,0,0,0,radmin,radmax,ctmin,ctmax);
+        ctx.desc  = make_desc(false,false,true,true,0,0,0,0,radmin,radmax,ctmin,ctmax);
+        int status = process_context(ctx); did_any = true;
+        if (status < 1){
+          printf("  failed processing DecayRadius %g-%g ct %g-%g with error type: %d \n", radmin, radmax, ctmin, ctmax, status);}
       }
     }
   } else if(mix_mode == "cen_pt"){
@@ -1780,9 +1877,9 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         }
         BinContext ctx; ctx.hasCen=true; ctx.hasPt=true; ctx.hasCt=false; ctx.mode=3;
         ctx.cenmin=cenmin; ctx.cenmax=cenmax; ctx.ptmin=ptmin; ctx.ptmax=ptmax; ctx.ctmin=0; ctx.ctmax=0;
-        ctx.label = make_label(true,true,false,cenmin,cenmax,ptmin,ptmax,0,0);
-        ctx.desc  = make_desc(true,true,false,cenmin,cenmax,ptmin,ptmax,0,0);
-        int status = process_one_bin(ctx); did_any = true;
+        ctx.label = make_label(true,true,false,false,cenmin,cenmax,ptmin,ptmax,0,0,0,0);
+        ctx.desc  = make_desc(true,true,false,false,cenmin,cenmax,ptmin,ptmax,0,0,0,0);
+        int status = process_context(ctx); did_any = true;
         if (status < 1){
           printf("  failed processing cen %g-%g pt %g-%g with error type: %d \n", cenmin, cenmax, ptmin, ptmax, status);
         }
@@ -1795,17 +1892,17 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       BinContext ctx; ctx.hasPt=true; ctx.hasCt=true; ctx.mode=4;
       ctx.ptmin=target_pt_range[0]; ctx.ptmax=target_pt_range[1];
       ctx.ctmin=target_ct_range[0]; ctx.ctmax=target_ct_range[1];
-      ctx.label = make_label(false,true,true,0,0,ctx.ptmin,ctx.ptmax,ctx.ctmin,ctx.ctmax);
-      ctx.desc  = make_desc(false,true,true,0,0,ctx.ptmin,ctx.ptmax,ctx.ctmin,ctx.ctmax);
-      int status = process_one_bin(ctx); did_any = true;
+      ctx.label = make_label(false,true,false,true,0,0,ctx.ptmin,ctx.ptmax,0,0,ctx.ctmin,ctx.ctmax);
+      ctx.desc  = make_desc(false,true,false,true,0,0,ctx.ptmin,ctx.ptmax,0,0,ctx.ctmin,ctx.ctmax);
+      int status = process_context(ctx); did_any = true;
       if (status < 1){ printf("  failed processing single pt-ct bin with error type: %d \n", status); }
     }
   } else if(mix_mode == "pt_single"){
     if(target_pt_range.size()==2){
       BinContext ctx; ctx.hasPt=true; ctx.hasCt=false; ctx.mode=1; ctx.ptmin=target_pt_range[0]; ctx.ptmax=target_pt_range[1];
-      ctx.label = make_label(false,true,false,0,0,ctx.ptmin,ctx.ptmax,0,0);
-      ctx.desc  = make_desc(false,true,false,0,0,ctx.ptmin,ctx.ptmax,0,0);
-      int status = process_one_bin(ctx); did_any = true;
+      ctx.label = make_label(false,true,false,false,0,0,ctx.ptmin,ctx.ptmax,0,0,0,0);
+      ctx.desc  = make_desc(false,true,false,false,0,0,ctx.ptmin,ctx.ptmax,0,0,0,0);
+      int status = process_context(ctx); did_any = true;
       if (status < 1){ printf("  failed processing pt %g-%g (pt-only) with error type: %d \n", ctx.ptmin, ctx.ptmax, status); }
     } else {
       const std::vector<double> &pt_edges = (pt_bins_single.size()>1) ? pt_bins_single : pt_bins;
@@ -1813,9 +1910,9 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
         double ptmin = pt_edges[i_pt];
         double ptmax = pt_edges[i_pt+1];
         BinContext ctx; ctx.hasPt=true; ctx.hasCt=false; ctx.mode=1; ctx.ptmin=ptmin; ctx.ptmax=ptmax;
-        ctx.label = make_label(false,true,false,0,0,ptmin,ptmax,0,0);
-        ctx.desc  = make_desc(false,true,false,0,0,ptmin,ptmax,0,0);
-        int status = process_one_bin(ctx); did_any = true;
+        ctx.label = make_label(false,true,false,false,0,0,ptmin,ptmax,0,0,0,0);
+        ctx.desc  = make_desc(false,true,false,false,0,0,ptmin,ptmax,0,0,0,0);
+        int status = process_context(ctx); did_any = true;
         if (status < 1){ printf("  failed processing pt %g-%g (pt-only) with error type: %d \n", ptmin, ptmax, status); }
       }
     }
@@ -1825,9 +1922,9 @@ void ProcessWP(const char *config_path = "../configs/PreProcess/config_WP.json",
       BinContext ctx; ctx.hasCt=true; ctx.hasPt = (target_pt_range.size()==2); ctx.mode=2;
       ctx.ctmin=ctmin; ctx.ctmax=ctmax;
       if(ctx.hasPt){ ctx.ptmin=target_pt_range[0]; ctx.ptmax=target_pt_range[1]; }
-      ctx.label = make_label(false, ctx.hasPt, true, 0,0, ctx.ptmin, ctx.ptmax, ctx.ctmin, ctx.ctmax);
-      ctx.desc  = make_desc(false, ctx.hasPt, true, 0,0, ctx.ptmin, ctx.ptmax, ctx.ctmin, ctx.ctmax);
-      int status = process_one_bin(ctx); did_any = true;
+      ctx.label = make_label(false, ctx.hasPt, false, true, 0,0, ctx.ptmin, ctx.ptmax, 0,0, ctx.ctmin, ctx.ctmax);
+      ctx.desc  = make_desc(false, ctx.hasPt, false, true, 0,0, ctx.ptmin, ctx.ptmax, 0,0, ctx.ctmin, ctx.ctmax);
+      int status = process_context(ctx); did_any = true;
       if (status < 1){ printf("  failed processing ct %g-%g (ct-only) with error type: %d \n", ctx.ctmin, ctx.ctmax, status); }
     };
 

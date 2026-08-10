@@ -195,6 +195,9 @@ std::string BuildSimpleBinTitle(const BinPlanItem &item) {
     if (item.hasPt) {
         parts.push_back("p_{T} " + FormatTitleNumber(item.ptMin) + "-" + FormatTitleNumber(item.ptMax) + " GeV/c");
     }
+    if (item.hasRad) {
+        parts.push_back("DecayRadius " + FormatTitleNumber(item.radMin) + "-" + FormatTitleNumber(item.radMax) + " cm");
+    }
     if (item.hasCt) {
         parts.push_back("ct " + FormatTitleNumber(item.ctMin) + "-" + FormatTitleNumber(item.ctMax) + " cm");
     }
@@ -216,11 +219,13 @@ std::string BuildSimpleGroupTitle(const std::vector<BinPlanItem> &items,
     const auto &first = items.front();
     bool sameCen = first.hasCen;
     bool samePt = first.hasPt;
+    bool sameRad = first.hasRad;
     bool sameCt = first.hasCt;
     for (size_t i = 1; i < items.size(); ++i) {
         const auto &it = items[i];
         sameCen = sameCen && it.hasCen && it.cenMin == first.cenMin && it.cenMax == first.cenMax;
         samePt = samePt && it.hasPt && it.ptMin == first.ptMin && it.ptMax == first.ptMax;
+        sameRad = sameRad && it.hasRad && it.radMin == first.radMin && it.radMax == first.radMax;
         sameCt = sameCt && it.hasCt && it.ctMin == first.ctMin && it.ctMax == first.ctMax;
     }
 
@@ -228,11 +233,14 @@ std::string BuildSimpleGroupTitle(const std::vector<BinPlanItem> &items,
     fixed.label = fallbackLabel;
     fixed.hasCen = sameCen;
     fixed.hasPt = samePt;
+    fixed.hasRad = sameRad;
     fixed.hasCt = sameCt;
     fixed.cenMin = first.cenMin;
     fixed.cenMax = first.cenMax;
     fixed.ptMin = first.ptMin;
     fixed.ptMax = first.ptMax;
+    fixed.radMin = first.radMin;
+    fixed.radMax = first.radMax;
     fixed.ctMin = first.ctMin;
     fixed.ctMax = first.ctMax;
 
@@ -325,6 +333,9 @@ std::string ResolveWpFile(const GeneralHelper::Json &cfg, const std::string &mod
     }
     if (mode == "pt_ct") {
         return (std::filesystem::path(wpDir) / "WorkingPoint_Crosssection_CustomV0s.txt").string();
+    }
+    if (mode == "rad_ct") {
+        return (std::filesystem::path(wpDir) / "WorkingPoint_RadCt.txt").string();
     }
     return std::string();
 }
@@ -427,6 +438,7 @@ struct RunConfig {
     std::vector<std::string> mcFilesForAcceptance;
     std::vector<double> mcFileWeights;
     std::vector<std::vector<double>> mcFileWeightsByCentrality;
+    bool mcClosureTest{false};
     std::string eventSignalLossFile;
     std::string eventSignalLossMethod{"multiplicity"};
     std::vector<double> cenBins;
@@ -443,6 +455,7 @@ struct RunConfig {
     std::string scoreEffDir;
     std::string basicSelectionDataForMcEff;
     bool mcAcceptanceRequireTwoBody{true};
+    bool mcAcceptanceConstrainDenominatorOuterBin{true};
     std::string additionalDataSelectionGeneral;
     std::string additionalDataSelection;
     std::string centralitySelection;
@@ -462,6 +475,8 @@ struct RunConfig {
     std::string onTheFlyChecksPdfDir;
     std::vector<double> ptBins;
     std::vector<std::vector<double>> ctBinsByPt;
+    std::vector<double> radBins;
+    std::vector<std::vector<double>> ctBinsByRad;
     bool addAbsorptionCorrectionPtCt{false};
 
     bool doSystematics{false};
@@ -554,6 +569,9 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     out.basicSelectionDataForMcEff = GetS(commonSel, "basic_selection_data", "");
     out.mcAcceptanceRequireTwoBody = commonSel.value("mc_acceptance_require_two_body",
                                                      commonSel.value("is_two_body_selected", true));
+    out.mcAcceptanceConstrainDenominatorOuterBin =
+        profile.value("mc_acceptance_outer_bin_cut_denominator",
+                      commonSel.value("mc_acceptance_outer_bin_cut_denominator", true));
     out.additionalDataSelectionGeneral = GetS(selection, "additional_data_selection_general", "");
     out.additionalDataSelection = GetS(profile, "additional_data_selection", "");
     out.centralitySelection = GetS(profile, "centrality_selection", "");
@@ -567,6 +585,7 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
         out.onTheFlyQaTreeSkipLabels = onFlyChecks["qa_tree_skip_labels"].get<std::vector<std::string>>();
     }
     out.saveResultsToPdf = execution.value("save_results_to_pdf", false);
+    out.mcClosureTest = execution.value("mc_closure_test", false);
     out.onTheFlyMassWindowNSigmas = onFlyChecks.value("nsigmas_mass_window", 0.0);
     if (onFlyChecks.contains("variables") && onFlyChecks["variables"].is_array()) {
         out.onTheFlyVariables = onFlyChecks["variables"].get<std::vector<std::string>>();
@@ -605,6 +624,12 @@ RunConfig BuildRunConfig(const GeneralHelper::Json &cfg, const std::string &mode
     }
     if (commonBinning.contains("ct_bins_by_pt") && commonBinning["ct_bins_by_pt"].is_array()) {
         out.ctBinsByPt = commonBinning["ct_bins_by_pt"].get<std::vector<std::vector<double>>>();
+    }
+    if (commonBinning.contains("rad_bins") && commonBinning["rad_bins"].is_array()) {
+        out.radBins = commonBinning["rad_bins"].get<std::vector<double>>();
+    }
+    if (commonBinning.contains("ct_bins_by_rad") && commonBinning["ct_bins_by_rad"].is_array()) {
+        out.ctBinsByRad = commonBinning["ct_bins_by_rad"].get<std::vector<std::vector<double>>>();
     }
     out.addAbsorptionCorrectionPtCt = profile.value("add_absorption_correction", false);
     out.mcFileForAcceptance = GetS(path, "mc_path", "");
@@ -832,8 +857,8 @@ std::string ResolveAcceptanceMcFileForGroup(const RunConfig &runCfg, const Group
 }
 
 bool IsAbsorptionCorrectionEnabled(const RunConfig &runCfg) {
-    // add_absorption_correction switch is currently defined for pt_ct/ct_single profiles.
-    if (runCfg.mode == "pt_ct" || runCfg.mode == "ct_single") {
+    // add_absorption_correction switch is currently defined for lifetime-like profiles.
+    if (runCfg.mode == "pt_ct" || runCfg.mode == "rad_ct" || runCfg.mode == "ct_single") {
         return runCfg.addAbsorptionCorrectionPtCt;
     }
     return true;
@@ -858,6 +883,9 @@ std::vector<GroupContext> BuildGroups(const std::string &mode, const BinPlan &pl
                 ctx.key = BuildRangeLabel("pt", item.ptMin, item.ptMax);
                 ctx.dirName = ctx.key;
             }
+        } else if (mode == "rad_ct") {
+            ctx.key = BuildRangeLabel("rad", item.radMin, item.radMax);
+            ctx.dirName = ctx.key;
         } else {
             ctx.key = "ct_single";
             ctx.dirName = "ct_single";
@@ -874,7 +902,7 @@ std::vector<GroupContext> BuildGroups(const std::string &mode, const BinPlan &pl
     out.reserve(grouped.size());
     for (auto &kv : grouped) {
         auto &items = kv.second.items;
-        if (mode == "ct_single" || mode == "pt_ct") {
+        if (mode == "ct_single" || mode == "pt_ct" || mode == "rad_ct") {
             std::sort(items.begin(), items.end(), [](const BinPlanItem &a, const BinPlanItem &b) { return a.ctMin < b.ctMin; });
         } else {
             std::sort(items.begin(), items.end(), [](const BinPlanItem &a, const BinPlanItem &b) { return a.ptMin < b.ptMin; });
@@ -889,7 +917,7 @@ std::vector<double> BuildAxisEdges(const std::string &mode, const std::vector<Bi
     edges.reserve(items.size() + 1);
     if (items.empty()) return edges;
 
-    const bool useCtAxis = (mode == "ct_single" || mode == "pt_ct");
+    const bool useCtAxis = (mode == "ct_single" || mode == "pt_ct" || mode == "rad_ct");
     edges.push_back(useCtAxis ? items.front().ctMin : items.front().ptMin);
     for (const auto &item : items) {
         edges.push_back(useCtAxis ? item.ctMax : item.ptMax);
@@ -907,6 +935,9 @@ GeneralHelper::WorkingPointResult GetWorkingPointForItem(const std::string &mode
     }
     if (mode == "pt_ct") {
         return GeneralHelper::GetWpForPtCt(wpFile, item.ptMin, item.ptMax, item.ctMin, item.ctMax, item.cenMin, item.cenMax);
+    }
+    if (mode == "rad_ct") {
+        return GeneralHelper::GetWp(wpFile, -1.0, -1.0, item.radMin, item.radMax, item.ctMin, item.ctMax);
     }
     return GeneralHelper::GetWpForCenPt(wpFile, item.cenMin, item.cenMax, item.ptMin, item.ptMax);
 }
@@ -981,7 +1012,7 @@ CorrectedCountsResult ComputeCorrectedCounts(const std::string &mode,
         out.absorption = absoFactor;
         out.binWidth = std::max(1e-12, binWidth);
         return out;
-    } else if (mode == "pt_ct") {
+    } else if (mode == "pt_ct" || mode == "rad_ct") {
         const double binwidthCt = item.ctMax - item.ctMin;
         const double absoFactor = addAbsorptionCorrectionPtCt ? absoVal : 1.0;
         const double base = raw / accVal / absoFactor / eff;
@@ -1009,6 +1040,7 @@ std::string BuildPdfNameWithSuffix(const std::string &baseName,
     const bool hasBinInfoInName =
         (stem.find("cen_") != std::string::npos) ||
         (stem.find("_pt_") != std::string::npos) ||
+        (stem.find("_rad_") != std::string::npos) ||
         (stem.find("_ct_") != std::string::npos);
 
     std::string candidate = stem;
@@ -1200,6 +1232,7 @@ BinningCorrectionConfig BuildCorrectionConfig(const RunConfig &runCfg) {
                                                     runCfg.additionalDataSelectionGeneral,
                                                     runCfg.additionalDataSelection});
     cfg.mcAcceptanceRequireTwoBody = runCfg.mcAcceptanceRequireTwoBody;
+    cfg.mcAcceptanceConstrainDenominatorOuterBin = runCfg.mcAcceptanceConstrainDenominatorOuterBin;
     cfg.originalCtaoAbsorption = runCfg.originalCtaoAbsorption;
     cfg.cenBins = runCfg.cenBins;
     cfg.ptBinsByCentrality = runCfg.ptBinsByCentrality;
@@ -1208,6 +1241,8 @@ BinningCorrectionConfig BuildCorrectionConfig(const RunConfig &runCfg) {
     cfg.spectrumMcCentralityOverrides = runCfg.spectrumMcCentralityOverrides;
     cfg.ptBins = runCfg.ptBins;
     cfg.ctBinsByPt = runCfg.ctBinsByPt;
+    cfg.radBins = runCfg.radBins;
+    cfg.ctBinsByRad = runCfg.ctBinsByRad;
     return cfg;
 }
 
@@ -1252,7 +1287,7 @@ AxisSpec ResolveQaAxis(const std::string &var,
 }
 
 std::string MakeSysSubBinName(const std::string &mode, const BinPlanItem &item) {
-    if (mode == "pt_ct" || mode == "ct_single") {
+    if (mode == "pt_ct" || mode == "rad_ct" || mode == "ct_single") {
         return BuildRangeLabel("ct", item.ctMin, item.ctMax);
     }
     return BuildRangeLabel("pt", item.ptMin, item.ptMax);
@@ -2235,6 +2270,9 @@ struct ExpoPostFit {
     bool hasTau{false};
     double tauPs{0.0};
     double tauPsErr{0.0};
+    bool hasChi2Ndf{false};
+    double chi2Ndf{0.0};
+    int ndf{0};
 };
 
 ExpoPostFit BuildExponentialPostFit(const std::string &tag,
@@ -2260,6 +2298,10 @@ ExpoPostFit BuildExponentialPostFit(const std::string &tag,
     out.tauPs = tauCm / kSpeedOfLightCmPerPs;
     out.tauPsErr = tauCmErr / kSpeedOfLightCmPerPs;
     out.hasTau = std::isfinite(out.tauPs) && std::isfinite(out.tauPsErr);
+    const double chi2 = out.fit->GetChisquare();
+    out.ndf = out.fit->GetNDF();
+    out.chi2Ndf = (out.ndf > 0 && std::isfinite(chi2)) ? chi2 / static_cast<double>(out.ndf) : 0.0;
+    out.hasChi2Ndf = out.ndf > 0 && std::isfinite(out.chi2Ndf);
 
     out.canvas = MakeExponentialFitCanvas("c_exp_fit_" + cleanName,
                                           hCorr,
@@ -2292,7 +2334,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
     }
 
     const bool isSpectrumMode = (modeName == "bdt_spectrum" || modeName == "topology_spectrum");
-    const bool isLifetimeMode = (modeName == "ct_single" || modeName == "pt_ct");
+    const bool isLifetimeMode = (modeName == "ct_single" || modeName == "pt_ct" || modeName == "rad_ct");
     const bool applyBrSystematic = runCfg.doSystematics &&
                                    (isSpectrumMode || isLifetimeMode) &&
                                    runCfg.branchingRatioFractionalUncertainty > 0.0;
@@ -2310,7 +2352,9 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
     }
 
     PtCtAcceptanceCache ptCtAccCache;
+    RadCtAcceptanceCache radCtAccCache;
     PtCtAbsorptionCache ptCtAbsoCache;
+    RadCtAbsorptionCache radCtAbsoCache;
     SpectrumAcceptanceCache spectrumAccCache;
     SpectrumEventSignalLossCache spectrumEvtSigLossCache;
     if (modeName == "pt_ct") {
@@ -2321,6 +2365,15 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         }
         if (runCfg.addAbsorptionCorrectionPtCt) {
             ptCtAbsoCache = BuildPtCtAbsorptionCache(corrCfg, runCfg.mcFileForAbsorption);
+        }
+    } else if (modeName == "rad_ct") {
+        if (corrCfg.mcFilesForAcceptance.size() > 1) {
+            radCtAccCache = BuildWeightedRadCtAcceptanceCache(corrCfg);
+        } else {
+            radCtAccCache = BuildRadCtAcceptanceCache(corrCfg, runCfg.mcFileForAcceptance);
+        }
+        if (runCfg.addAbsorptionCorrectionPtCt) {
+            radCtAbsoCache = BuildRadCtAbsorptionCache(corrCfg, runCfg.mcFileForAbsorption);
         }
     } else if (isSpectrumMode) {
         const std::string mcFileForAccSpectrum = ResolveAcceptanceMcFileForGroup(runCfg, GroupContext{});
@@ -2359,6 +2412,9 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
     }
 
     std::unique_ptr<TH1D> hTauPerPt;
+    std::unique_ptr<TH1D> hTauPerRad;
+    std::unique_ptr<TH1D> hExpChi2NdfPerPt;
+    std::unique_ptr<TH1D> hExpChi2NdfPerRad;
     if (modeName == "pt_ct" && runCfg.ptBins.size() >= 2) {
         hTauPerPt = std::make_unique<TH1D>("tau_per_ptbin",
                                            ";#it{p}_{T} (GeV/#it{c});#tau (ps)",
@@ -2366,6 +2422,26 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                                            runCfg.ptBins.data());
         hTauPerPt->SetDirectory(nullptr);
         hTauPerPt->SetStats(false);
+        hExpChi2NdfPerPt = std::make_unique<TH1D>("exp_chi2ndf_per_ptbin",
+                                                  ";#it{p}_{T} (GeV/#it{c});Exponential fit #chi^{2}/ndf",
+                                                  static_cast<int>(runCfg.ptBins.size() - 1),
+                                                  runCfg.ptBins.data());
+        hExpChi2NdfPerPt->SetDirectory(nullptr);
+        hExpChi2NdfPerPt->SetStats(false);
+    }
+    if (modeName == "rad_ct" && runCfg.radBins.size() >= 2) {
+        hTauPerRad = std::make_unique<TH1D>("tau_per_radbin",
+                                            ";DecayRadius (cm);#tau (ps)",
+                                            static_cast<int>(runCfg.radBins.size() - 1),
+                                            runCfg.radBins.data());
+        hTauPerRad->SetDirectory(nullptr);
+        hTauPerRad->SetStats(false);
+        hExpChi2NdfPerRad = std::make_unique<TH1D>("exp_chi2ndf_per_radbin",
+                                                   ";DecayRadius (cm);Exponential fit #chi^{2}/ndf",
+                                                   static_cast<int>(runCfg.radBins.size() - 1),
+                                                   runCfg.radBins.data());
+        hExpChi2NdfPerRad->SetDirectory(nullptr);
+        hExpChi2NdfPerRad->SetStats(false);
     }
 
     struct IntegralSummaryRow {
@@ -2396,7 +2472,7 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         double rawSumGroup = 0.0;
         double rawSumGroupErr2 = 0.0;
 
-        const bool useCtAxis = (modeName == "ct_single" || modeName == "pt_ct");
+        const bool useCtAxis = (modeName == "ct_single" || modeName == "pt_ct" || modeName == "rad_ct");
         auto hRaw = std::make_unique<TH1D>("h_raw_counts", useCtAxis ? ";ct;N_{raw}" : ";p_{T};N_{raw}",
                                            static_cast<int>(edges.size() - 1), edges.data());
         auto hCorr = std::make_unique<TH1D>("h_corrected_counts", useCtAxis ? ";ct;N_{corr}" : ";p_{T};N_{corr}",
@@ -2504,11 +2580,12 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                                       edges,
                                       mcFileForAccGroup,
                                       &ptCtAccCache,
+                                      &radCtAccCache,
                                       &spectrumAccCache);
         const bool applyAbsorptionCorrection = IsAbsorptionCorrectionEnabled(runCfg);
         std::vector<BinValueWithError> absoVec(group.items.size(), BinValueWithError{});
         if (applyAbsorptionCorrection) {
-            absoVec = ComputeAbsorptionPerBinWithErrors(corrCfg, group.items, edges, "", &ptCtAbsoCache);
+            absoVec = ComputeAbsorptionPerBinWithErrors(corrCfg, group.items, edges, "", &ptCtAbsoCache, &radCtAbsoCache);
         }
 
         std::map<std::string, std::vector<double>> absoVecByFile;
@@ -2523,9 +2600,11 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                 absoFiles.push_back(runCfg.mcFileForAbsorption);
             }
             for (const auto &absoFile : absoFiles) {
-                const PtCtAbsorptionCache *cachePtr =
+                const PtCtAbsorptionCache *ptCachePtr =
                     (modeName == "pt_ct" && absoFile == runCfg.mcFileForAbsorption) ? &ptCtAbsoCache : nullptr;
-                absoVecByFile[absoFile] = ComputeAbsorptionPerBin(corrCfg, group.items, edges, absoFile, cachePtr);
+                const RadCtAbsorptionCache *radCachePtr =
+                    (modeName == "rad_ct" && absoFile == runCfg.mcFileForAbsorption) ? &radCtAbsoCache : nullptr;
+                absoVecByFile[absoFile] = ComputeAbsorptionPerBin(corrCfg, group.items, edges, absoFile, ptCachePtr, radCachePtr);
             }
         }
 
@@ -2653,7 +2732,27 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                 }
             }
 
-            const auto &fitRes = oneBinRes.massFit;
+            GeneralHelper::MassFitResult closureCountFitRes;
+            const GeneralHelper::MassFitResult *fitResPtr = &oneBinRes.massFit;
+            if (runCfg.mcClosureTest) {
+                closureCountFitRes.signal = static_cast<double>(oneBinRes.nDataSelected);
+                closureCountFitRes.signalErr = std::sqrt(std::max(0.0, closureCountFitRes.signal));
+                closureCountFitRes.significance =
+                    closureCountFitRes.signalErr > 0.0 ? closureCountFitRes.signal / closureCountFitRes.signalErr : 0.0;
+                closureCountFitRes.significanceErr = 0.0;
+                closureCountFitRes.meanData = oneBinRes.massFit.meanData;
+                closureCountFitRes.meanDataErr = oneBinRes.massFit.meanDataErr;
+                closureCountFitRes.sigmaData = oneBinRes.massFit.sigmaData;
+                closureCountFitRes.sigmaDataErr = oneBinRes.massFit.sigmaDataErr;
+                closureCountFitRes.sigmaMc = oneBinRes.massFit.sigmaMc;
+                closureCountFitRes.sigmaMcErr = oneBinRes.massFit.sigmaMcErr;
+                closureCountFitRes.chi2Data = oneBinRes.massFit.chi2Data;
+                closureCountFitRes.chi2Mc = oneBinRes.massFit.chi2Mc;
+                closureCountFitRes.ndfData = oneBinRes.massFit.ndfData;
+                closureCountFitRes.ndfMc = oneBinRes.massFit.ndfMc;
+                fitResPtr = &closureCountFitRes;
+            }
+            const auto &fitRes = *fitResPtr;
             const double xCenter = useCtAxis ? 0.5 * (item.ctMin + item.ctMax) : 0.5 * (item.ptMin + item.ptMax);
             const int ib = hRaw->FindBin(xCenter);
             const double acc = (static_cast<size_t>(ib - 1) < accVec.size()) ? accVec[static_cast<size_t>(ib - 1)].value : 1.0;
@@ -2789,6 +2888,33 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
                 const int ptBin = hTauPerPt->FindBin(ptCenter);
                 hTauPerPt->SetBinContent(ptBin, expoOut.tauPs);
                 hTauPerPt->SetBinError(ptBin, expoOut.tauPsErr);
+            }
+            if (hExpChi2NdfPerPt && expoOut.hasChi2Ndf && !group.items.empty()) {
+                const double ptCenter = 0.5 * (group.items.front().ptMin + group.items.front().ptMax);
+                const int ptBin = hExpChi2NdfPerPt->FindBin(ptCenter);
+                hExpChi2NdfPerPt->SetBinContent(ptBin, expoOut.chi2Ndf);
+                hExpChi2NdfPerPt->SetBinError(ptBin, 0.0);
+            }
+        }
+        if (modeName == "rad_ct") {
+            auto expoOut = BuildExponentialPostFit(group.dirName,
+                                                   hCorr.get(),
+                                                   edges.front(),
+                                                   edges.back(),
+                                                   "#it{c}t (cm)");
+            if (expoOut.fit) shapeFits.push_back(std::move(expoOut.fit));
+            if (expoOut.canvas) shapeFitCanvases.push_back(std::move(expoOut.canvas));
+            if (hTauPerRad && expoOut.hasTau && !group.items.empty()) {
+                const double radCenter = 0.5 * (group.items.front().radMin + group.items.front().radMax);
+                const int radBin = hTauPerRad->FindBin(radCenter);
+                hTauPerRad->SetBinContent(radBin, expoOut.tauPs);
+                hTauPerRad->SetBinError(radBin, expoOut.tauPsErr);
+            }
+            if (hExpChi2NdfPerRad && expoOut.hasChi2Ndf && !group.items.empty()) {
+                const double radCenter = 0.5 * (group.items.front().radMin + group.items.front().radMax);
+                const int radBin = hExpChi2NdfPerRad->FindBin(radCenter);
+                hExpChi2NdfPerRad->SetBinContent(radBin, expoOut.chi2Ndf);
+                hExpChi2NdfPerRad->SetBinError(radBin, 0.0);
             }
         }
         if (modeName == "ct_single") {
@@ -3731,6 +3857,55 @@ int RunSpectrumMode(const GeneralHelper::Json &cfg,
         cTau->Write("c_tau_per_ptbin", TObject::kOverwrite);
     }
 
+    if (modeName == "pt_ct" && hExpChi2NdfPerPt) {
+        fout.cd();
+        hExpChi2NdfPerPt->Write("exp_chi2ndf_per_ptbin", TObject::kOverwrite);
+        auto cChi2 = std::make_unique<TCanvas>("c_exp_chi2ndf_per_ptbin", "c_exp_chi2ndf_per_ptbin", 960, 720);
+        cChi2->SetLeftMargin(0.14);
+        cChi2->SetBottomMargin(0.12);
+        cChi2->SetTicks(1, 1);
+        cChi2->SetGridy(true);
+        hExpChi2NdfPerPt->SetLineColor(kBlack);
+        hExpChi2NdfPerPt->SetLineWidth(2);
+        hExpChi2NdfPerPt->SetMinimum(0.0);
+        const double ymax = hExpChi2NdfPerPt->GetMaximum();
+        hExpChi2NdfPerPt->SetMaximum(ymax > 0.0 ? ymax * 1.25 : 1.0);
+        hExpChi2NdfPerPt->Draw("Hist");
+        cChi2->Write("c_exp_chi2ndf_per_ptbin", TObject::kOverwrite);
+    }
+
+    if (modeName == "rad_ct" && hTauPerRad) {
+        fout.cd();
+        hTauPerRad->Write("tau_per_radbin", TObject::kOverwrite);
+        auto cTau = std::make_unique<TCanvas>("c_tau_per_radbin", "c_tau_per_radbin", 960, 720);
+        cTau->SetLeftMargin(0.14);
+        cTau->SetBottomMargin(0.12);
+        cTau->SetTicks(1, 1);
+        cTau->SetGridy(true);
+        hTauPerRad->SetMarkerStyle(20);
+        hTauPerRad->SetMarkerColor(kBlack);
+        hTauPerRad->SetLineColor(kBlack);
+        hTauPerRad->Draw("E1");
+        cTau->Write("c_tau_per_radbin", TObject::kOverwrite);
+    }
+
+    if (modeName == "rad_ct" && hExpChi2NdfPerRad) {
+        fout.cd();
+        hExpChi2NdfPerRad->Write("exp_chi2ndf_per_radbin", TObject::kOverwrite);
+        auto cChi2 = std::make_unique<TCanvas>("c_exp_chi2ndf_per_radbin", "c_exp_chi2ndf_per_radbin", 960, 720);
+        cChi2->SetLeftMargin(0.14);
+        cChi2->SetBottomMargin(0.12);
+        cChi2->SetTicks(1, 1);
+        cChi2->SetGridy(true);
+        hExpChi2NdfPerRad->SetLineColor(kBlack);
+        hExpChi2NdfPerRad->SetLineWidth(2);
+        hExpChi2NdfPerRad->SetMinimum(0.0);
+        const double ymax = hExpChi2NdfPerRad->GetMaximum();
+        hExpChi2NdfPerRad->SetMaximum(ymax > 0.0 ? ymax * 1.25 : 1.0);
+        hExpChi2NdfPerRad->Draw("Hist");
+        cChi2->Write("c_exp_chi2ndf_per_radbin", TObject::kOverwrite);
+    }
+
     if (runCfg.onTheFlyChecksEnabled) {
         WriteOnTheFlyChecksOutput(runCfg.onTheFlyChecksRoot,
                                   onTheFlyAccumulator,
@@ -3765,6 +3940,12 @@ int UnifiedTaskRunner::RunCtExtraction(const GeneralHelper::Json &cfg, const Bin
     return RunSpectrumMode(cfg, plan, "pt_ct");
 }
 
+int UnifiedTaskRunner::RunRadCt(const GeneralHelper::Json &cfg, const BinPlan &plan) const {
+    RooMsgService::instance().setGlobalKillBelow(RooFit::ERROR);
+    RooMsgService::instance().setSilentMode(true);
+    return RunSpectrumMode(cfg, plan, "rad_ct");
+}
+
 int UnifiedTaskRunner::RunCtSingle(const GeneralHelper::Json &cfg, const BinPlan &plan) const {
     RooMsgService::instance().setGlobalKillBelow(RooFit::ERROR);
     RooMsgService::instance().setSilentMode(true);
@@ -3782,6 +3963,9 @@ int UnifiedTaskRunner::Run(const GeneralHelper::Json &cfg,
     }
     if (policy.mode == "pt_ct") {
         return RunCtExtraction(cfg, plan);
+    }
+    if (policy.mode == "rad_ct") {
+        return RunRadCt(cfg, plan);
     }
     if (policy.mode == "ct_single") {
         return RunCtSingle(cfg, plan);

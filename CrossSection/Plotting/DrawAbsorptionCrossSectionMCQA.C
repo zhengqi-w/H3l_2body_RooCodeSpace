@@ -70,6 +70,16 @@ void EnsureDir(const std::string& dir)
     gSystem->mkdir(dir.c_str(), true);
 }
 
+std::string AddSuffixBeforeExtension(const std::string& fileName, const std::string& suffix)
+{
+    const size_t slash = fileName.find_last_of("/\\");
+    const size_t dot = fileName.find_last_of('.');
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
+        return fileName + suffix;
+    }
+    return fileName.substr(0, dot) + suffix + fileName.substr(dot);
+}
+
 int StatusCategory(int status)
 {
     if (status == 0) return 1;
@@ -244,6 +254,12 @@ struct SampleQA {
     std::unique_ptr<TH1D> hAbsVertexX;
     std::unique_ptr<TH1D> hAbsVertexY;
     std::unique_ptr<TH2D> hAbsVertexXY;
+    std::unique_ptr<TH1D> hAllVertexX;
+    std::unique_ptr<TH1D> hAllVertexY;
+    std::unique_ptr<TH2D> hAllVertexXY;
+    std::unique_ptr<TH1D> hRecoVertexX;
+    std::unique_ptr<TH1D> hRecoVertexY;
+    std::unique_ptr<TH2D> hRecoVertexXY;
     std::unique_ptr<TH2D> hStatusVsPt;
 };
 
@@ -265,16 +281,26 @@ void InitSample(SampleQA& s)
         s.hCtAbsInclusivePt.push_back(MakeHist1D("h_ct_absinclusive_" + s.name + "_" + tag, ";stored c#tau (cm);Entries", kCtBins));
         s.hCtDen23Pt.push_back(MakeHist1D("h_ct_den23_" + s.name + "_" + tag, ";stored c#tau (cm);Entries", kCtBins));
     }
-    s.hAbsVertexLogR = std::make_unique<TH1D>(("h_abs_vertex_logr_" + s.name).c_str(), ";log_{10}(stored |#Delta r| / cm);Entries", 120, -8.0, 20.0);
+    s.hAbsVertexLogR = std::make_unique<TH1D>(("h_abs_vertex_logr_" + s.name).c_str(), ";log_{10}(|r_{decay}| / cm);Entries", 120, -8.0, 20.0);
     s.hAbsVertexLogR->Sumw2();
     s.hAbsVertexLogR->SetDirectory(nullptr);
-    s.hAbsVertexRxy = MakeFixedHist1D("h_abs_vertex_rxy_" + s.name, ";stored R_{xy} = #sqrt{x^{2}+y^{2}} (cm);Entries", 160, 0.0, 400.0);
-    s.hAbsVertexLength = MakeFixedHist1D("h_abs_vertex_length_" + s.name, ";stored length = #sqrt{x^{2}+y^{2}+z^{2}} (cm);Entries", 200, 0.0, 1000.0);
-    s.hAbsVertexX = MakeFixedHist1D("h_abs_vertex_x_" + s.name, ";stored x (cm);Entries", 160, -400.0, 400.0);
-    s.hAbsVertexY = MakeFixedHist1D("h_abs_vertex_y_" + s.name, ";stored y (cm);Entries", 160, -400.0, 400.0);
-    s.hAbsVertexXY = std::make_unique<TH2D>(("h_abs_vertex_xy_" + s.name).c_str(), ";stored x (cm);stored y (cm)",
+    s.hAbsVertexRxy = MakeFixedHist1D("h_abs_vertex_rxy_" + s.name, ";absolute R_{xy} = #sqrt{x^{2}+y^{2}} (cm);Entries", 160, 0.0, 400.0);
+    s.hAbsVertexLength = MakeFixedHist1D("h_abs_vertex_length_" + s.name, ";absolute |r_{decay}| (cm);Entries", 200, 0.0, 1000.0);
+    s.hAbsVertexX = MakeFixedHist1D("h_abs_vertex_x_" + s.name, ";absolute x_{decay} (cm);Entries", 160, -400.0, 400.0);
+    s.hAbsVertexY = MakeFixedHist1D("h_abs_vertex_y_" + s.name, ";absolute y_{decay} (cm);Entries", 160, -400.0, 400.0);
+    s.hAbsVertexXY = std::make_unique<TH2D>(("h_abs_vertex_xy_" + s.name).c_str(), ";absolute x_{decay} (cm);absolute y_{decay} (cm)",
                                             120, -400.0, 400.0, 120, -400.0, 400.0);
     s.hAbsVertexXY->SetDirectory(nullptr);
+    s.hAllVertexX = MakeFixedHist1D("h_all_vertex_x_" + s.name, ";absolute x_{decay} (cm);Entries", 160, -400.0, 400.0);
+    s.hAllVertexY = MakeFixedHist1D("h_all_vertex_y_" + s.name, ";absolute y_{decay} (cm);Entries", 160, -400.0, 400.0);
+    s.hAllVertexXY = std::make_unique<TH2D>(("h_all_vertex_xy_" + s.name).c_str(), ";absolute x_{decay} (cm);absolute y_{decay} (cm)",
+                                            120, -400.0, 400.0, 120, -400.0, 400.0);
+    s.hAllVertexXY->SetDirectory(nullptr);
+    s.hRecoVertexX = MakeFixedHist1D("h_reco_vertex_x_" + s.name, ";absolute x_{decay} (cm);Entries", 160, -40.0, 40.0);
+    s.hRecoVertexY = MakeFixedHist1D("h_reco_vertex_y_" + s.name, ";absolute y_{decay} (cm);Entries", 160, -40.0, 40.0);
+    s.hRecoVertexXY = std::make_unique<TH2D>(("h_reco_vertex_xy_" + s.name).c_str(), ";absolute x_{decay} (cm);absolute y_{decay} (cm)",
+                                             160, -40.0, 40.0, 160, -40.0, 40.0);
+    s.hRecoVertexXY->SetDirectory(nullptr);
     s.hStatusVsPt = std::make_unique<TH2D>(("h_status_vs_pt_" + s.name).c_str(), ";p_{T} (GeV/c);TMCProcess category",
                                            static_cast<int>(kPtBins.size() - 1), kPtBins.data(), 7, 0.5, 7.5);
     s.hStatusVsPt->SetDirectory(nullptr);
@@ -283,10 +309,8 @@ void InitSample(SampleQA& s)
     }
 }
 
-void ReadSample(const std::string& filePath, SampleQA& s)
+void AppendSampleFile(const std::string& filePath, SampleQA& s)
 {
-    InitSample(s);
-
     TFile input(filePath.c_str(), "READ");
     if (input.IsZombie()) {
         std::cerr << "[Error] Cannot open " << filePath << "\n";
@@ -307,6 +331,9 @@ void ReadSample(const std::string& filePath, SampleQA& s)
         Float_t genX = 0.f;
         Float_t genY = 0.f;
         Float_t genZ = 0.f;
+        Float_t primX = 0.f;
+        Float_t primY = 0.f;
+        Float_t primZ = 0.f;
         Bool_t isSignal = false;
         Bool_t isTwoBody = false;
         Bool_t isReco = false;
@@ -317,6 +344,9 @@ void ReadSample(const std::string& filePath, SampleQA& s)
         tree->SetBranchAddress("fGenXDecVtx", &genX);
         tree->SetBranchAddress("fGenYDecVtx", &genY);
         tree->SetBranchAddress("fGenZDecVtx", &genZ);
+        tree->SetBranchAddress("fXPrimVtx", &primX);
+        tree->SetBranchAddress("fYPrimVtx", &primY);
+        tree->SetBranchAddress("fZPrimVtx", &primZ);
         tree->SetBranchAddress("fIsSignal", &isSignal);
         tree->SetBranchAddress("fIsTwoBodyDecay", &isTwoBody);
         tree->SetBranchAddress("fIsReco", &isReco);
@@ -340,7 +370,20 @@ void ReadSample(const std::string& filePath, SampleQA& s)
             const double p = pt * std::cosh(static_cast<double>(genEta));
             const double l = std::sqrt(genX * genX + genY * genY + genZ * genZ);
             const double ct = (p > 0.0) ? l * kH3LMass / p : -1.0;
+            const double absoluteGenX = genX + primX;
+            const double absoluteGenY = genY + primY;
+            const double absoluteGenZ = genZ + primZ;
             const bool hasValidStoredCt = ct >= kCtBins.front() && ct < kCtBins.back() && std::isfinite(ct);
+            if (std::isfinite(absoluteGenX) && std::isfinite(absoluteGenY)) {
+                s.hAllVertexX->Fill(absoluteGenX);
+                s.hAllVertexY->Fill(absoluteGenY);
+                s.hAllVertexXY->Fill(absoluteGenX, absoluteGenY);
+                if (isReco) {
+                    s.hRecoVertexX->Fill(absoluteGenX);
+                    s.hRecoVertexY->Fill(absoluteGenY);
+                    s.hRecoVertexXY->Fill(absoluteGenX, absoluteGenY);
+                }
+            }
 
             const bool abs23 = IsAbsorptionConservative(status);
             const bool absInclusive = IsAbsorptionInclusive(status);
@@ -367,8 +410,10 @@ void ReadSample(const std::string& filePath, SampleQA& s)
                 if (hasValidStoredCt && ptBin >= 0) {
                     s.hCtAbs23Pt[static_cast<size_t>(ptBin)]->Fill(ct);
                 }
-                const double rxy = std::sqrt(genX * genX + genY * genY);
-                const double length = std::sqrt(genX * genX + genY * genY + genZ * genZ);
+                const double rxy = std::sqrt(absoluteGenX * absoluteGenX + absoluteGenY * absoluteGenY);
+                const double length = std::sqrt(absoluteGenX * absoluteGenX +
+                                                absoluteGenY * absoluteGenY +
+                                                absoluteGenZ * absoluteGenZ);
                 if (std::isfinite(length) && length > 0.0) {
                     s.hAbsVertexLogR->Fill(std::log10(length));
                     s.hAbsVertexLength->Fill(length);
@@ -376,10 +421,10 @@ void ReadSample(const std::string& filePath, SampleQA& s)
                 if (std::isfinite(rxy) && rxy >= 0.0) {
                     s.hAbsVertexRxy->Fill(rxy);
                 }
-                if (std::isfinite(static_cast<double>(genX)) && std::isfinite(static_cast<double>(genY))) {
-                    s.hAbsVertexX->Fill(genX);
-                    s.hAbsVertexY->Fill(genY);
-                    s.hAbsVertexXY->Fill(genX, genY);
+                if (std::isfinite(absoluteGenX) && std::isfinite(absoluteGenY)) {
+                    s.hAbsVertexX->Fill(absoluteGenX);
+                    s.hAbsVertexY->Fill(absoluteGenY);
+                    s.hAbsVertexXY->Fill(absoluteGenX, absoluteGenY);
                 }
             }
 
@@ -390,6 +435,21 @@ void ReadSample(const std::string& filePath, SampleQA& s)
                 }
             }
         }
+    }
+}
+
+void ReadSample(const std::string& filePath, SampleQA& s)
+{
+    InitSample(s);
+    AppendSampleFile(filePath, s);
+}
+
+void ReadSamples(const std::vector<std::string>& filePaths, SampleQA& s)
+{
+    InitSample(s);
+    for (const auto& filePath : filePaths) {
+        std::cout << "  " << filePath << "\n";
+        AppendSampleFile(filePath, s);
     }
 }
 
@@ -681,8 +741,8 @@ ProxyAbsorptionQA ReadHe3ProxyAbsorptionTree(const std::string& filePath,
     out.hAbsXY->SetDirectory(nullptr);
     for (size_t ipt = 0; ipt + 1 < kPtBins.size(); ++ipt) {
         const std::string tag = Form("pt_%g_%g", kPtBins[ipt], kPtBins[ipt + 1]);
-        out.hCtAbsPt.push_back(MakeHist1D("h_proxy_ct_abs_" + tag, ";generated c#tau (cm);Entries", kCtBins));
-        out.hCtDenPt.push_back(MakeHist1D("h_proxy_ct_den_" + tag, ";generated c#tau (cm);Entries", kCtBins));
+        out.hCtAbsPt.push_back(MakeHist1D("h_proxy_ct_abs_" + tag, ";absorption c#tau (cm);Entries", kCtBins));
+        out.hCtDenPt.push_back(MakeHist1D("h_proxy_ct_den_" + tag, ";absorption c#tau (cm);Entries", kCtBins));
     }
 
     TFile input(filePath.c_str(), "READ");
@@ -710,6 +770,7 @@ ProxyAbsorptionQA ReadHe3ProxyAbsorptionTree(const std::string& filePath,
     tree->SetBranchAddress("absoY", &absoY);
     tree->SetBranchAddress("absoZ", &absoZ);
     tree->SetBranchAddress("pdg", &pdg);
+    std::cout << "[ReadHe3ProxyAbsorptionTree] Sampling He3 proxy entries with P(survive to absoCt) = exp(-absoCt/(253 ps*c)), using m_H3L.\n";
 
     TRandom3 rng(0);
     const Long64_t entries = tree->GetEntries();
@@ -720,11 +781,16 @@ ProxyAbsorptionQA ReadHe3ProxyAbsorptionTree(const std::string& filePath,
 
         const double p = static_cast<double>(pt) * std::cosh(static_cast<double>(eta));
         const double absoL = std::sqrt(absoX * absoX + absoY * absoY + absoZ * absoZ);
-        const double absoCt = (p > 0.0) ? absoL * kHe3Mass / p : 1e30;
-        const double decCt = -kOriginalTauCt * std::log(std::max(1e-12, rng.Uniform()));
-        if (decCt < kCtBins.front() || decCt >= kCtBins.back() || !std::isfinite(decCt)) continue;
+        const double absoCt = (p > 0.0) ? absoL * kH3LMass / p : 1e30;
+        if (!std::isfinite(absoCt) || absoCt < 0.0) continue;
 
         const double absoRxy = std::sqrt(absoX * absoX + absoY * absoY);
+        const bool inCtRange = absoCt >= kCtBins.front() && absoCt < kCtBins.back();
+        if (inCtRange) out.hCtDenPt[static_cast<size_t>(ptBin)]->Fill(absoCt);
+
+        const double survivalProbability = std::exp(-absoCt / kOriginalTauCt);
+        if (rng.Uniform() >= survivalProbability) continue;
+
         if (std::isfinite(absoRxy) && absoRxy >= 0.0) out.hAbsRxy->Fill(absoRxy);
         if (std::isfinite(absoL) && absoL >= 0.0) out.hAbsLength->Fill(absoL);
         if (std::isfinite(static_cast<double>(absoX)) && std::isfinite(static_cast<double>(absoY))) {
@@ -732,11 +798,7 @@ ProxyAbsorptionQA ReadHe3ProxyAbsorptionTree(const std::string& filePath,
             out.hAbsY->Fill(absoY);
             out.hAbsXY->Fill(absoX, absoY);
         }
-
-        out.hCtDenPt[static_cast<size_t>(ptBin)]->Fill(decCt);
-        if (absoCt <= decCt) {
-            out.hCtAbsPt[static_cast<size_t>(ptBin)]->Fill(decCt);
-        }
+        if (inCtRange) out.hCtAbsPt[static_cast<size_t>(ptBin)]->Fill(absoCt);
     }
     return out;
 }
@@ -824,7 +886,9 @@ void DrawAbsorbedRadiusDistributions(const SampleQA& abs,
 
 void DrawAbsorbedXYDistributions(const SampleQA& abs,
                                  const ProxyAbsorptionQA* proxy,
-                                 const std::string& outDir)
+                                 const std::string& outDir,
+                                 const std::string& outputName = "absorbed_xy_distributions.pdf",
+                                 bool zoomMcXY = true)
 {
     auto c = std::make_unique<TCanvas>("c_absorbed_xy_distributions", "absorbed xy distributions", 1100, 900);
     c->Divide(2, 2);
@@ -867,23 +931,35 @@ void DrawAbsorbedXYDistributions(const SampleQA& abs,
             proxyHist->SetLineWidth(3);
             proxyHist->Draw("HIST SAME");
         }
-        auto leg = std::make_unique<TLegend>(0.46, 0.72, 0.90, 0.88);
+        auto* leg = new TLegend(0.48, 0.72, 0.91, 0.88);
         leg->SetBorderSize(0);
         leg->SetFillStyle(0);
         leg->SetTextFont(42);
-        leg->SetTextSize(0.033);
+        leg->SetTextSize(0.031);
         leg->AddEntry(mc, mcLabel, "l");
         if (proxyHist) leg->AddEntry(proxyHist, proxyLabel, "l");
         leg->Draw();
+
+        auto* stats = new TPaveText(0.16, 0.70, 0.45, 0.86, "NDC");
+        stats->SetBorderSize(0);
+        stats->SetFillStyle(0);
+        stats->SetTextFont(42);
+        stats->SetTextAlign(12);
+        stats->SetTextSize(0.030);
+        stats->AddText(Form("MC entries: %.0f", mc->GetEntries()));
+        if (proxyHist) {
+            stats->AddText(Form("He3 entries: %.0f", proxyHist->GetEntries()));
+        }
+        stats->Draw();
     };
 
     c->cd(1);
     drawOverlay(hMcX.get(), hProxyX.get(), "Absorbed-candidate x distribution",
-                "MC AO2D status 23: fGenXDecVtx", "He3 proxy all entries: absoX");
+                "MC AO2D status 23: x_{gen} + x_{PV}", "He3 proxy absorbed: #tau=253 ps, m_{H3L}");
 
     c->cd(2);
     drawOverlay(hMcY.get(), hProxyY.get(), "Absorbed-candidate y distribution",
-                "MC AO2D status 23: fGenYDecVtx", "He3 proxy all entries: absoY");
+                "MC AO2D status 23: y_{gen} + y_{PV}", "He3 proxy absorbed: #tau=253 ps, m_{H3L}");
 
     c->cd(3);
     gPad->SetLeftMargin(0.13);
@@ -893,10 +969,161 @@ void DrawAbsorbedXYDistributions(const SampleQA& abs,
     gPad->SetTicks();
     gPad->SetLogz();
     hMcXY->SetStats(0);
-    hMcXY->SetTitle("MC AO2D status 23: fGenXDecVtx vs fGenYDecVtx");
+    hMcXY->SetTitle("MC AO2D status 23: absolute generated decay vertex");
+    if (zoomMcXY) {
+        hMcXY->GetXaxis()->SetRangeUser(-40.0, 40.0);
+        hMcXY->GetYaxis()->SetRangeUser(-40.0, 40.0);
+    }
     hMcXY->GetZaxis()->SetTitle("Entries");
     hMcXY->SetMinimum(1.0);
     hMcXY->Draw("COLZ");
+
+    c->cd(4);
+    gPad->SetLeftMargin(0.13);
+    gPad->SetRightMargin(0.15);
+    gPad->SetBottomMargin(0.13);
+    gPad->SetTopMargin(0.08);
+    gPad->SetTicks();
+    gPad->SetLogz();
+    if (hProxyXY) {
+        hProxyXY->SetStats(0);
+        hProxyXY->SetTitle("He3 proxy absorbed: sampled c#tau with #tau=253 ps, m_{H3L}");
+        hProxyXY->GetZaxis()->SetTitle("Entries");
+        hProxyXY->SetMinimum(1.0);
+        hProxyXY->Draw("COLZ");
+    } else {
+        auto frame = std::make_unique<TH2D>("h_abs_xy_empty_proxy_frame", ";absoX (cm);absoY (cm)", 1, -400.0, 400.0, 1, -400.0, 400.0);
+        frame->SetStats(0);
+        frame->SetTitle("He3 proxy all entries: absoX vs absoY");
+        frame->Draw();
+    }
+
+    c->SaveAs(Form("%s/%s", outDir.c_str(), outputName.c_str()));
+}
+
+void DrawReconstructedXYDistribution(const SampleQA& abs, const std::string& outDir)
+{
+    auto c = std::make_unique<TCanvas>("c_reconstructed_xy_distribution", "reconstructed xy distribution", 1000, 840);
+    c->SetLeftMargin(0.12);
+    c->SetRightMargin(0.16);
+    c->SetBottomMargin(0.12);
+    c->SetTopMargin(0.07);
+    c->SetTicks();
+    c->SetLogz();
+
+    auto hRecoXY = std::unique_ptr<TH2D>(dynamic_cast<TH2D*>(abs.hRecoVertexXY->Clone("h_reco_vertex_xy_draw")));
+    hRecoXY->SetStats(0);
+    hRecoXY->SetTitle("G4 absorption sample: reconstructed absolute generated decay vertex");
+    hRecoXY->GetXaxis()->SetTitle("absolute x_{decay} (cm)");
+    hRecoXY->GetYaxis()->SetTitle("absolute y_{decay} (cm)");
+    hRecoXY->GetZaxis()->SetTitle("Entries");
+    hRecoXY->GetXaxis()->SetTitleSize(0.043);
+    hRecoXY->GetYaxis()->SetTitleSize(0.043);
+    hRecoXY->GetZaxis()->SetTitleSize(0.043);
+    hRecoXY->GetYaxis()->SetTitleOffset(1.25);
+    hRecoXY->SetMinimum(1.0);
+    hRecoXY->Draw("COLZ");
+
+    auto note = std::make_unique<TPaveText>(0.15, 0.78, 0.50, 0.89, "NDC");
+    note->SetBorderSize(0);
+    note->SetFillStyle(0);
+    note->SetTextFont(42);
+    note->SetTextAlign(12);
+    note->SetTextSize(0.032);
+    note->AddText("fIsReco == true");
+    note->AddText(Form("Entries: %.0f", hRecoXY->GetEntries()));
+    note->Draw();
+
+    c->SaveAs(Form("%s/reconstructed_xy_distribution.pdf", outDir.c_str()));
+}
+
+void DrawAllMCVsHe3ProxyXYDistributions(const SampleQA& abs,
+                                        const ProxyAbsorptionQA* proxy,
+                                        const std::string& outDir)
+{
+    auto c = std::make_unique<TCanvas>("c_all_mc_vs_he3_proxy_xy", "all MC vs He3 proxy xy", 1100, 900);
+    c->Divide(2, 2);
+
+    auto hMcAllX = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(abs.hAllVertexX->Clone("h_mc_all_x_draw")));
+    auto hMcAllY = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(abs.hAllVertexY->Clone("h_mc_all_y_draw")));
+    auto hMcAllXY = std::unique_ptr<TH2D>(dynamic_cast<TH2D*>(abs.hAllVertexXY->Clone("h_mc_all_xy_draw")));
+    std::unique_ptr<TH1D> hProxyX;
+    std::unique_ptr<TH1D> hProxyY;
+    std::unique_ptr<TH2D> hProxyXY;
+    if (proxy && proxy->hAbsX && proxy->hAbsY && proxy->hAbsXY) {
+        hProxyX = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(proxy->hAbsX->Clone("h_proxy_all_x_draw")));
+        hProxyY = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(proxy->hAbsY->Clone("h_proxy_all_y_draw")));
+        hProxyXY = std::unique_ptr<TH2D>(dynamic_cast<TH2D*>(proxy->hAbsXY->Clone("h_proxy_all_xy_draw")));
+    }
+
+    auto normalize = [](TH1D* h) {
+        if (h && h->Integral() > 0.0) h->Scale(1.0 / h->Integral());
+    };
+    normalize(hMcAllX.get());
+    normalize(hMcAllY.get());
+    normalize(hProxyX.get());
+    normalize(hProxyY.get());
+
+    auto drawOverlay = [](TH1D* mc, TH1D* proxyHist, const char* title, const char* mcLabel, const char* proxyLabel) {
+        gPad->SetLeftMargin(0.13);
+        gPad->SetRightMargin(0.04);
+        gPad->SetBottomMargin(0.13);
+        gPad->SetTopMargin(0.08);
+        gPad->SetTicks();
+        gPad->SetLogy();
+        StyleHist(mc, kRed + 1, 20);
+        mc->SetTitle(title);
+        mc->GetYaxis()->SetTitle("Normalized entries");
+        mc->SetMinimum(1e-5);
+        mc->SetMaximum(2.0 * std::max(mc->GetMaximum(), proxyHist ? proxyHist->GetMaximum() : 0.0));
+        mc->Draw("HIST");
+        if (proxyHist) {
+            StyleHist(proxyHist, kAzure + 2, 24);
+            proxyHist->SetLineWidth(3);
+            proxyHist->Draw("HIST SAME");
+        }
+        auto* leg = new TLegend(0.48, 0.72, 0.91, 0.88);
+        leg->SetBorderSize(0);
+        leg->SetFillStyle(0);
+        leg->SetTextFont(42);
+        leg->SetTextSize(0.031);
+        leg->AddEntry(mc, mcLabel, "l");
+        if (proxyHist) leg->AddEntry(proxyHist, proxyLabel, "l");
+        leg->Draw();
+
+        auto* stats = new TPaveText(0.16, 0.70, 0.45, 0.86, "NDC");
+        stats->SetBorderSize(0);
+        stats->SetFillStyle(0);
+        stats->SetTextFont(42);
+        stats->SetTextAlign(12);
+        stats->SetTextSize(0.030);
+        stats->AddText(Form("MC entries: %.0f", mc->GetEntries()));
+        if (proxyHist) {
+            stats->AddText(Form("He3 entries: %.0f", proxyHist->GetEntries()));
+        }
+        stats->Draw();
+    };
+
+    c->cd(1);
+    drawOverlay(hMcAllX.get(), hProxyX.get(), "All-candidate x distribution",
+                "MC AO2D all entries: x_{gen} + x_{PV}", "He3 proxy all entries: absoX");
+
+    c->cd(2);
+    drawOverlay(hMcAllY.get(), hProxyY.get(), "All-candidate y distribution",
+                "MC AO2D all entries: y_{gen} + y_{PV}", "He3 proxy all entries: absoY");
+
+    c->cd(3);
+    gPad->SetLeftMargin(0.13);
+    gPad->SetRightMargin(0.15);
+    gPad->SetBottomMargin(0.13);
+    gPad->SetTopMargin(0.08);
+    gPad->SetTicks();
+    gPad->SetLogz();
+    hMcAllXY->SetStats(0);
+    hMcAllXY->SetTitle("MC AO2D all entries: absolute generated decay vertex");
+    hMcAllXY->GetZaxis()->SetTitle("Entries");
+    hMcAllXY->SetMinimum(1.0);
+    hMcAllXY->Draw("COLZ");
 
     c->cd(4);
     gPad->SetLeftMargin(0.13);
@@ -912,13 +1139,13 @@ void DrawAbsorbedXYDistributions(const SampleQA& abs,
         hProxyXY->SetMinimum(1.0);
         hProxyXY->Draw("COLZ");
     } else {
-        auto frame = std::make_unique<TH2D>("h_abs_xy_empty_proxy_frame", ";absoX (cm);absoY (cm)", 1, -400.0, 400.0, 1, -400.0, 400.0);
+        auto frame = std::make_unique<TH2D>("h_all_mc_vs_proxy_empty_frame", ";absoX (cm);absoY (cm)", 1, -400.0, 400.0, 1, -400.0, 400.0);
         frame->SetStats(0);
         frame->SetTitle("He3 proxy all entries: absoX vs absoY");
         frame->Draw();
     }
 
-    c->SaveAs(Form("%s/absorbed_xy_distributions.pdf", outDir.c_str()));
+    c->SaveAs(Form("%s/all_mc_vs_he3_proxy_xy_distributions.pdf", outDir.c_str()));
 }
 
 void DrawHe3ProxyAbsorptionFractionVsCtPtBins(const ProxyAbsorptionQA& proxy, const std::string& outDir)
@@ -1084,6 +1311,12 @@ void WriteResults(const SampleQA& noAbs, const SampleQA& abs, const std::string&
     noAbs.hAbsVertexX->Write();
     noAbs.hAbsVertexY->Write();
     noAbs.hAbsVertexXY->Write();
+    noAbs.hAllVertexX->Write();
+    noAbs.hAllVertexY->Write();
+    noAbs.hAllVertexXY->Write();
+    noAbs.hRecoVertexX->Write();
+    noAbs.hRecoVertexY->Write();
+    noAbs.hRecoVertexXY->Write();
     noAbs.hStatusVsPt->Write();
     abs.hStatus->Write();
     abs.hPtSurvived->Write();
@@ -1101,6 +1334,12 @@ void WriteResults(const SampleQA& noAbs, const SampleQA& abs, const std::string&
     abs.hAbsVertexX->Write();
     abs.hAbsVertexY->Write();
     abs.hAbsVertexXY->Write();
+    abs.hAllVertexX->Write();
+    abs.hAllVertexY->Write();
+    abs.hAllVertexXY->Write();
+    abs.hRecoVertexX->Write();
+    abs.hRecoVertexY->Write();
+    abs.hRecoVertexXY->Write();
     abs.hStatusVsPt->Write();
 
     auto fracAbs23 = MakeFraction(abs.hPtAbs23.get(), abs.hPtDen23.get(), "h_absorption_fraction_status23", ";p_{T} (GeV/c);Material-loss fraction");
@@ -1119,7 +1358,8 @@ void DrawAbsorptionCrossSectionMCQA(
     const char* he3ProxyAbsorptionFile = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/AbsorptionTrees/absorption_tree_x3.root")
 {
     gStyle->SetOptStat(0);
-    gStyle->SetPalette(kBird);
+    gStyle->SetPalette(kRainBow);
+    gStyle->SetNumberContours(255);
     gStyle->SetTitleFont(42, "XYZ");
     gStyle->SetLabelFont(42, "XYZ");
     gStyle->SetLegendFont(42);
@@ -1167,9 +1407,196 @@ void DrawAbsorptionCrossSectionMCQA(
     }
     DrawAbsorbedRadiusDistributions(abs, proxyAbsorption.get(), outDir);
     DrawAbsorbedXYDistributions(abs, proxyAbsorption.get(), outDir);
+    DrawReconstructedXYDistribution(abs, outDir);
+    DrawAllMCVsHe3ProxyXYDistributions(abs, proxyAbsorption.get(), outDir);
     DrawVertexSanity(abs, outDir);
     DrawStatusVsPt(abs, outDir);
     WriteResults(noAbs, abs, outDir);
 
     std::cout << "QA plots written to: " << outDir << "\n";
+}
+
+void DrawAbsorbedXYDistributionsReweightedUpdatedMCG4list(
+    const char* outputDir = "../../../Outputs/CrossSection/Plotting/AbsorptionMCQA",
+    const char* he3ProxyAbsorptionFile = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/AbsorptionTrees/absorption_tree_x3.root",
+    const char* outputName = "absorbed_xy_distributions_full_proxy.pdf",
+    const char* rootOutputName = "absorbed_xy_distributions_full_proxy.root")
+{
+    gStyle->SetOptStat(0);
+    gStyle->SetPalette(kRainBow);
+    gStyle->SetNumberContours(255);
+
+    const std::string outDir = ResolveOutputPath(outputDir ? outputDir : "");
+    EnsureDir(outDir);
+
+    SampleQA abs;
+    abs.name = "updated_g4_absorption_reweighted";
+    abs.title = "Updated G4list MC";
+    abs.color = kOrange + 7;
+
+    const std::vector<std::pair<std::string, std::string>> updatedG4listFiles = {
+        {"LHC25g11", "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/updatedMC_G4list/AO2D_LHC25g11_G4list.root"},
+        {"LHC26e5", "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/updatedMC_G4list/AO2D_LHC26e5_G4list.root"},
+        {"LHC26e6", "/Users/zhengqingwang/alice/data/derived/Hypertriton_2body/updatedMC_G4list/AO2D_LHC26e6_G4list.root"}
+    };
+    std::vector<std::string> combinedPaths;
+    combinedPaths.reserve(updatedG4listFiles.size());
+    for (const auto& period : updatedG4listFiles) combinedPaths.push_back(period.second);
+
+    std::cout << "Reading updated G4list MC samples:\n";
+    ReadSamples(combinedPaths, abs);
+
+    std::unique_ptr<ProxyAbsorptionQA> proxyAbsorption;
+    if (he3ProxyAbsorptionFile && std::string(he3ProxyAbsorptionFile).size() > 0) {
+        std::cout << "Reading full He3 proxy absorption tree:\n  " << he3ProxyAbsorptionFile << "\n";
+        proxyAbsorption = std::make_unique<ProxyAbsorptionQA>(ReadHe3ProxyAbsorptionTree(he3ProxyAbsorptionFile));
+    }
+
+    DrawAbsorbedXYDistributions(abs,
+                                proxyAbsorption.get(),
+                                outDir,
+                                outputName,
+                                false);
+
+    TFile fout(Form("%s/%s", outDir.c_str(), rootOutputName), "RECREATE");
+    abs.hAbsVertexX->Write("h_abs_vertex_x_combined");
+    abs.hAbsVertexY->Write("h_abs_vertex_y_combined");
+    abs.hAbsVertexXY->Write("h_abs_vertex_xy_combined");
+    if (proxyAbsorption) {
+        proxyAbsorption->hAbsX->Write("h_proxy_abs_x_full_proxy");
+        proxyAbsorption->hAbsY->Write("h_proxy_abs_y_full_proxy");
+        proxyAbsorption->hAbsXY->Write("h_proxy_abs_xy_full_proxy");
+    }
+    for (const auto& period : updatedG4listFiles) {
+        SampleQA periodAbs;
+        periodAbs.name = "updated_g4_absorption_" + period.first;
+        periodAbs.title = "Updated G4list MC " + period.first;
+        periodAbs.color = kOrange + 7;
+        std::cout << "Reading updated G4list MC sample for period " << period.first << ":\n"
+                  << "  " << period.second << "\n";
+        ReadSample(period.second, periodAbs);
+        const std::string periodOutputName = AddSuffixBeforeExtension(outputName, "_" + period.first);
+        DrawAbsorbedXYDistributions(periodAbs,
+                                    proxyAbsorption.get(),
+                                    outDir,
+                                    periodOutputName,
+                                    false);
+        fout.cd();
+        periodAbs.hAbsVertexX->Write(("h_abs_vertex_x_" + period.first).c_str());
+        periodAbs.hAbsVertexY->Write(("h_abs_vertex_y_" + period.first).c_str());
+        periodAbs.hAbsVertexXY->Write(("h_abs_vertex_xy_" + period.first).c_str());
+    }
+    fout.Close();
+
+    std::cout << "Updated-G4list absorbed XY reweighted plot written to: "
+              << outDir << "/" << outputName << "\n";
+    std::cout << "Period-split absorbed XY plots written with suffixes next to the combined plot\n";
+}
+
+void DrawHe3ProxyAbsoCtQA(
+    const char* he3ProxyAbsorptionFile = "/Users/zhengqingwang/alice/run3task/H3l_2body_spectrum/AbsorptionTrees/absorption_tree_x3.root",
+    const char* outputDir = "../../../Outputs/CrossSection/Plotting/AbsorptionMCQA",
+    const char* outputName = "he3_proxy_absoct_distribution_full_proxy.pdf")
+{
+    gStyle->SetOptStat(0);
+    const std::string outDir = ResolveOutputPath(outputDir ? outputDir : "");
+    EnsureDir(outDir);
+
+    TFile input(he3ProxyAbsorptionFile, "READ");
+    auto* tree = dynamic_cast<TTree*>(input.Get("he3candidates"));
+    if (!tree) {
+        std::cerr << "[DrawHe3ProxyAbsoCtQA] Cannot find he3candidates in " << he3ProxyAbsorptionFile << "\n";
+        return;
+    }
+
+    Float_t pt = 0.f;
+    Float_t eta = 0.f;
+    Float_t absoX = 0.f;
+    Float_t absoY = 0.f;
+    Float_t absoZ = 0.f;
+    tree->SetBranchAddress("pt", &pt);
+    tree->SetBranchAddress("eta", &eta);
+    tree->SetBranchAddress("absoX", &absoX);
+    tree->SetBranchAddress("absoY", &absoY);
+    tree->SetBranchAddress("absoZ", &absoZ);
+
+    auto hRaw = std::make_unique<TH1D>("h_he3_proxy_absoct_raw", ";absorption c#tau = |r_{abs}| m_{H3L}/p (cm);Entries / cm", 140, 0.0, 700.0);
+    auto hWeighted = std::make_unique<TH1D>("h_he3_proxy_absoct_tau253_weighted", ";absorption c#tau = |r_{abs}| m_{H3L}/p (cm);Expected entries / cm", 140, 0.0, 700.0);
+    hRaw->Sumw2();
+    hWeighted->Sumw2();
+
+    std::vector<double> cts;
+    cts.reserve(tree->GetEntries());
+    double expectedKept = 0.0;
+    long long selectedPt = 0;
+    for (Long64_t i = 0; i < tree->GetEntries(); ++i) {
+        tree->GetEntry(i);
+        if (FindPtBin(pt) < 0) continue;
+        const double p = static_cast<double>(pt) * std::cosh(static_cast<double>(eta));
+        const double absoL = std::sqrt(absoX * absoX + absoY * absoY + absoZ * absoZ);
+        const double absoCt = (p > 0.0) ? absoL * kH3LMass / p : -1.0;
+        if (!std::isfinite(absoCt) || absoCt < 0.0) continue;
+        const double survival = std::exp(-absoCt / kOriginalTauCt);
+        hRaw->Fill(absoCt);
+        hWeighted->Fill(absoCt, survival);
+        cts.push_back(absoCt);
+        expectedKept += survival;
+        ++selectedPt;
+    }
+
+    auto hRawDensity = MakeDensityClone(hRaw.get(), "h_he3_proxy_absoct_raw_density");
+    auto hWeightedDensity = MakeDensityClone(hWeighted.get(), "h_he3_proxy_absoct_weighted_density");
+    auto hSurvival = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(hWeighted.get()->Clone("h_he3_proxy_absoct_survival_probability")));
+    hSurvival->SetDirectory(nullptr);
+    hSurvival->Divide(hWeighted.get(), hRaw.get(), 1.0, 1.0, "B");
+    hSurvival->GetYaxis()->SetTitle("Expected survival probability");
+
+    TCanvas c("c_he3_proxy_absoct_distribution", "He3 proxy absoCt distribution", 950, 900);
+    c.Divide(1, 2);
+    c.cd(1);
+    gPad->SetLogy();
+    gPad->SetTicks();
+    StyleHist(hRawDensity.get(), kBlack, 20);
+    StyleHist(hWeightedDensity.get(), kRed + 1, 24);
+    hRawDensity->SetTitle("He3 proxy absorption c#tau before/after #tau=253 ps survival sampling");
+    hRawDensity->SetMinimum(1e-4);
+    hRawDensity->SetMaximum(std::max(1.0, 4.0 * hRawDensity->GetMaximum()));
+    hRawDensity->Draw("HIST");
+    hWeightedDensity->Draw("HIST SAME");
+    TLegend leg(0.50, 0.72, 0.88, 0.88);
+    leg.SetBorderSize(0);
+    leg.SetFillStyle(0);
+    leg.SetTextFont(42);
+    leg.SetTextSize(0.032);
+    leg.AddEntry(hRawDensity.get(), Form("Raw proxy, N = %lld", selectedPt), "l");
+    leg.AddEntry(hWeightedDensity.get(), Form("Expected kept, N = %.0f", expectedKept), "l");
+    leg.Draw();
+
+    TLatex text;
+    text.SetNDC();
+    text.SetTextFont(42);
+    text.SetTextSize(0.030);
+    text.DrawLatex(0.16, 0.84, Form("c#tau_{0} = 253 ps #times c = %.2f cm", kOriginalTauCt));
+
+    c.cd(2);
+    gPad->SetTicks();
+    StyleHist(hSurvival.get(), kBlue + 1, 20);
+    hSurvival->SetTitle(";absorption c#tau = |r_{abs}| m_{H3L}/p (cm);#LT exp(-c#tau_{abs}/c#tau_{0}) #GT");
+    hSurvival->SetMinimum(0.0);
+    hSurvival->SetMaximum(1.05);
+    hSurvival->Draw("E1");
+    c.SaveAs(Form("%s/%s", outDir.c_str(), outputName));
+
+    std::sort(cts.begin(), cts.end());
+    auto quantile = [&](double q) {
+        if (cts.empty()) return -1.0;
+        return cts[std::min(static_cast<size_t>((cts.size() - 1) * q), cts.size() - 1)];
+    };
+    std::cout << "[DrawHe3ProxyAbsoCtQA] N=" << selectedPt
+              << ", expected kept=" << expectedKept
+              << ", fraction=" << (selectedPt > 0 ? expectedKept / selectedPt : 0.0)
+              << ", absoCt q10/q25/median/q75/q90/q99="
+              << quantile(0.10) << "/" << quantile(0.25) << "/" << quantile(0.50) << "/"
+              << quantile(0.75) << "/" << quantile(0.90) << "/" << quantile(0.99)
+              << " cm\n";
 }

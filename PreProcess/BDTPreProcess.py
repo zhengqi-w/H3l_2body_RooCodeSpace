@@ -49,6 +49,9 @@ def normalize_mix_mode(mode_raw, default_mode='pt_ct'):
     mode = str(mode_raw if mode_raw is not None else default_mode).strip().lower().replace('-', '_')
     aliases = {
         'ptct': 'pt_ct',
+        'radct': 'rad_ct',
+        'decayradiusct': 'rad_ct',
+        'decay_radius_ct': 'rad_ct',
         'cenpt': 'cen_pt',
         'ptctsingle': 'pt_ct_single',
         'ptsingle': 'pt_single',
@@ -92,6 +95,7 @@ def resolve_bdt_config(raw_config):
     tree_names = common.get('tree_names', {}) if isinstance(common.get('tree_names', {}), dict) else {}
     periods = common.get('periods', []) if isinstance(common.get('periods', []), list) else []
     combine_period = bool(execution.get('combine_period', False))
+    cfg['mc_closure_test'] = bool(execution.get('mc_closure_test', cfg.get('mc_closure_test', False)))
 
     path_map = {
         'data_path': ['data_path'],
@@ -143,11 +147,13 @@ def resolve_bdt_config(raw_config):
         mode_profile.get('additional_data_selection', None),
     )
 
-    for key in ['cen_bins', 'pt_bins_by_centrality', 'pt_bins', 'ct_bins_single', 'pt_bins_single']:
+    for key in ['cen_bins', 'pt_bins_by_centrality', 'pt_bins', 'rad_bins', 'ct_bins_single', 'pt_bins_single']:
         if key not in cfg and key in binning:
             cfg[key] = binning[key]
     if 'ct_bins' not in cfg and 'ct_bins_by_pt' in binning:
         cfg['ct_bins'] = binning['ct_bins_by_pt']
+    if 'ct_bins_by_rad' not in cfg and 'ct_bins_by_rad' in binning:
+        cfg['ct_bins_by_rad'] = binning['ct_bins_by_rad']
     return cfg
 
 
@@ -155,6 +161,7 @@ class BDTPreProcess:
     """
     可配置的训练模式：
             - mix_mode = "pt_ct"        : 原始行为，pt_bins 为 1D，ct_bins 为与 pt 对应的 2D 边界列表。
+            - mix_mode = "rad_ct"       : DecayRadius-ct 模式，rad_bins 为 1D，ct_bins_by_rad 为与 rad 对应的 2D 边界列表。
             - mix_mode = "cen_pt"       : 新增模式，cen_bins 为 1D，pt_bins(或 pt_bins_by_centrality) 为随 centrality 变化的 2D 边界列表。
             - mix_mode = "pt_ct_single" : 单一 pt、ct 区间训练。
             - mix_mode = "pt_single"    : 仅按单一 pt 区间训练（ct 不切分）。
@@ -167,6 +174,7 @@ class BDTPreProcess:
         self.mc_path = config['mc_path']
         self.periods = config.get('periods', [])
         self.period_weight_mode = str(config.get('period_weight_mode', 'none')).strip().lower()
+        self.mc_closure_test = bool(config.get('mc_closure_test', False))
         self.use_training_overrides = bool(config.get('use_training_overrides', False))
         self.training_overrides = config.get('training_overrides', [])
         if not isinstance(self.training_overrides, list):
@@ -175,7 +183,9 @@ class BDTPreProcess:
         self.tree_name_data = config['tree_name_data']
         self.tree_name_mc = config['tree_name_mc']
         self.pt_bins = config.get('pt_bins', None)
+        self.rad_bins = config.get('rad_bins', None)
         self.ct_bins = config.get('ct_bins', None)
+        self.ct_bins_by_rad = config.get('ct_bins_by_rad', None)
         self.pt_bins_single = config.get('pt_bins_single', None)
         self.ct_bins_single = config.get('ct_bins_single', None)
         self.pt_bin = config.get('pt_bin', None)   # for separate mode optional
@@ -216,6 +226,8 @@ class BDTPreProcess:
         self.pt_bins_by_centrality = config.get('pt_bins_by_centrality', None)
         self.target_cen_ranges = config.get('target_cen_ranges', config.get('target_centrality_ranges', []))
         self.target_pt_ranges = config.get('target_pt_ranges', config.get('target_pt_range', []))
+        self.target_rad_ranges = config.get('target_rad_ranges', config.get('target_rad_range', []))
+        self.target_ct_ranges = config.get('target_ct_ranges', config.get('target_ct_range', []))
         self.snapshot_dir = Path(config.get('snapshot_dir', 'snapshots'))
         self.models_dir = Path(config.get('model_dir', 'models'))
         self.QA_dir = Path(config.get('QA_dir', 'QAPlots'))
@@ -255,11 +267,11 @@ class BDTPreProcess:
         if self.extra_vars_save_data:
             self.data_columns = self._unique_columns(self._all_configured_training_variables() + self.extra_vars_save_data)
         else:
-            self.data_columns = self._unique_columns(self._all_configured_training_variables() + ["fPt", "fCt", "fMassH3L", "fIsMatter"])
+            self.data_columns = self._unique_columns(self._all_configured_training_variables() + ["fPt", "fDecRad", "fCt", "fMassH3L", "fIsMatter"])
         if self.extra_vars_save_mc:
             self.mc_columns = self._unique_columns(self._all_configured_training_variables() + self.extra_vars_save_mc)
         else:
-            self.mc_columns = self._unique_columns(self._all_configured_training_variables() + ["fPt", "fAbsGenPt", "fGenCt", "fMassH3L", "fIsMatter"])
+            self.mc_columns = self._unique_columns(self._all_configured_training_variables() + ["fPt", "fDecRad", "fAbsGenPt", "fGenDecRad", "fGenCt", "fMassH3L", "fIsMatter"])
 
     @staticmethod
     def _unique_columns(columns):
@@ -308,7 +320,7 @@ class BDTPreProcess:
         bins = override.get('bins', None)
         if bins is None:
             bins = []
-            for key in ('cen_pt', 'pt_ct', 'ct_single', 'pt_single', 'pt_ct_single'):
+            for key in ('cen_pt', 'pt_ct', 'rad_ct', 'ct_single', 'pt_single', 'pt_ct_single'):
                 if key in override and isinstance(override[key], dict):
                     bins.append({'type': key, **override[key]})
             legacy = {}
@@ -316,6 +328,8 @@ class BDTPreProcess:
                 legacy['centrality_ranges'] = override.get('centrality_ranges', override.get('cen_ranges', []))
             if 'pt_ranges' in override or 'pt_bins' in override:
                 legacy['pt_ranges'] = override.get('pt_ranges', override.get('pt_bins', []))
+            if 'rad_ranges' in override or 'rad_bins' in override:
+                legacy['rad_ranges'] = override.get('rad_ranges', override.get('rad_bins', []))
             if 'ct_ranges' in override or 'ct_bins' in override:
                 legacy['ct_ranges'] = override.get('ct_ranges', override.get('ct_bins', []))
             if legacy:
@@ -350,7 +364,7 @@ class BDTPreProcess:
             return True
         return normalize_mix_mode(bin_type) == normalize_mix_mode(mix_mode)
 
-    def _override_matches(self, override, cen_range=None, pt_range=None, ct_range=None):
+    def _override_matches(self, override, cen_range=None, pt_range=None, ct_range=None, rad_range=None):
         if not isinstance(override, dict):
             return False
         if not self._override_enabled(override):
@@ -368,17 +382,20 @@ class BDTPreProcess:
                 continue
             cen_ranges = bin_cfg.get('centrality_ranges', bin_cfg.get('cen_ranges', None))
             pt_ranges = bin_cfg.get('pt_ranges', bin_cfg.get('pt_bins', None))
+            rad_ranges = bin_cfg.get('rad_ranges', bin_cfg.get('rad_bins', None))
             ct_ranges = bin_cfg.get('ct_ranges', bin_cfg.get('ct_bins', None))
             if not self._range_matches(cen_ranges, cen_range):
                 continue
             if not self._range_matches(pt_ranges, pt_range):
+                continue
+            if not self._range_matches(rad_ranges, rad_range):
                 continue
             if not self._range_matches(ct_ranges, ct_range):
                 continue
             return True
         return False
 
-    def _active_training_config(self, cen_range=None, pt_range=None, ct_range=None):
+    def _active_training_config(self, cen_range=None, pt_range=None, ct_range=None, rad_range=None):
         cfg = {
             'name': 'default',
             'training_variables': list(self.training_variables),
@@ -395,7 +412,7 @@ class BDTPreProcess:
         }
         if self.use_training_overrides:
             for override in self.training_overrides:
-                if not self._override_matches(override, cen_range, pt_range, ct_range):
+                if not self._override_matches(override, cen_range, pt_range, ct_range, rad_range):
                     continue
                 cfg['name'] = override.get('name', cfg['name'])
                 if isinstance(override.get('training_variables', None), list):
@@ -544,7 +561,11 @@ class BDTPreProcess:
         else:
             df = df.Define('fDecLen', 'sqrt(fXDecVtx*fXDecVtx + fYDecVtx*fYDecVtx + fZDecVtx*fZDecVtx)') \
                    .Define('fCt', 'fDecLen * 3.922 / fP')
-        df = df.Define('fDecRad', 'sqrt(fXDecVtx*fXDecVtx + fYDecVtx*fYDecVtx)') \
+        df = df.Define(
+                   'fDecRad',
+                   'sqrt((fXDecVtx + fXPrimVtx)*(fXDecVtx + fXPrimVtx) + '
+                   '(fYDecVtx + fYPrimVtx)*(fYDecVtx + fYPrimVtx))'
+               ) \
                .Define('fCosPA', '(fPx * fXDecVtx + fPy * fYDecVtx + fPz * fZDecVtx) / (fP * fDecLen)') \
                .Define('fMassH3L', 'sqrt(fEn*fEn - fP*fP)') \
                .Define('fMassH4L', 'sqrt(fEn4*fEn4 - fP*fP)') \
@@ -552,6 +573,11 @@ class BDTPreProcess:
                .Define('fGloSignMomHe3', 'fPHe3 / 2. * (-1 + 2*fIsMatter)')
         if isMC:
             df = df.Define('fGenDecLen', 'sqrt(fGenXDecVtx*fGenXDecVtx + fGenYDecVtx*fGenYDecVtx + fGenZDecVtx*fGenZDecVtx)') \
+                   .Define(
+                       'fGenDecRad',
+                       'sqrt((fGenXDecVtx + fXPrimVtx)*(fGenXDecVtx + fXPrimVtx) + '
+                       '(fGenYDecVtx + fYPrimVtx)*(fGenYDecVtx + fYPrimVtx))'
+                   ) \
                    .Define('fGenPz', 'fGenPt * sinh(fGenEta)') \
                    .Define('fGenP', 'sqrt(fGenPt*fGenPt + fGenPz*fGenPz)') \
                    .Define('fAbsGenPt', 'abs(fGenPt)')
@@ -571,22 +597,26 @@ class BDTPreProcess:
         print('Columns after correction:', colounm_name_after)
         return df
 
-    def _make_label(self, pt_range=None, ct_range=None, cen_range=None):
+    def _make_label(self, pt_range=None, ct_range=None, cen_range=None, rad_range=None):
         parts = []
         if cen_range and None not in cen_range:
             parts.append(f"cen_{format_bin_edge(cen_range[0])}_{format_bin_edge(cen_range[1])}")
         if pt_range and None not in pt_range:
             parts.append(f"pt_{format_bin_edge(pt_range[0])}_{format_bin_edge(pt_range[1])}")
+        if rad_range and None not in rad_range:
+            parts.append(f"rad_{format_bin_edge(rad_range[0])}_{format_bin_edge(rad_range[1])}")
         if ct_range and None not in ct_range:
             parts.append(f"ct_{format_bin_edge(ct_range[0])}_{format_bin_edge(ct_range[1])}")
         return "_".join(parts) if parts else "all"
 
-    def _make_description(self, pt_range=None, ct_range=None, cen_range=None):
+    def _make_description(self, pt_range=None, ct_range=None, cen_range=None, rad_range=None):
         parts = []
         if cen_range and None not in cen_range:
             parts.append(f"centrality {cen_range[0]}-{cen_range[1]}")
         if pt_range and None not in pt_range:
             parts.append(f"pT {pt_range[0]}-{pt_range[1]} GeV/c")
+        if rad_range and None not in rad_range:
+            parts.append(f"DecayRadius {rad_range[0]}-{rad_range[1]} cm")
         if ct_range and None not in ct_range:
             parts.append(f"ct {ct_range[0]}-{ct_range[1]} cm")
         return ", ".join(parts) if parts else "full phase space"
@@ -628,13 +658,14 @@ class BDTPreProcess:
             raise ValueError(f"{name} range must have exactly two values.")
         return rng[0], rng[1]
 
-    def _make_snapshot_for_bin(self, pt_range=None, ct_range=None, cen_range=None, label=None, active_cfg=None):
-        active_cfg = active_cfg or self._active_training_config(cen_range, pt_range, ct_range)
+    def _make_snapshot_for_bin(self, pt_range=None, ct_range=None, cen_range=None, label=None, active_cfg=None, rad_range=None):
+        active_cfg = active_cfg or self._active_training_config(cen_range, pt_range, ct_range, rad_range)
         pt_min, pt_max = pt_range if pt_range else (None, None)
         ct_min, ct_max = ct_range if ct_range else (None, None)
         cen_min, cen_max = cen_range if cen_range else (None, None)
+        rad_min, rad_max = rad_range if rad_range else (None, None)
 
-        label = label or self._make_label(pt_range, ct_range, cen_range)
+        label = label or self._make_label(pt_range, ct_range, cen_range, rad_range)
 
         sel_data_parts = []
         sel_mc_parts = []
@@ -643,7 +674,10 @@ class BDTPreProcess:
             sel_mc_parts.append(f"{self.mc_pt_bin_var} > {pt_min} && {self.mc_pt_bin_var} < {pt_max}")
         if ct_min is not None and ct_max is not None:
             sel_data_parts.append(f"fCt > {ct_min} && fCt < {ct_max}")
-            sel_mc_parts.append(f"fGenCt > {ct_min} && fGenCt < {ct_max}")
+            sel_mc_parts.append(f"fCt > {ct_min} && fCt < {ct_max}")
+        if rad_min is not None and rad_max is not None:
+            sel_data_parts.append(f"fDecRad > {rad_min} && fDecRad < {rad_max}")
+            sel_mc_parts.append(f"fDecRad > {rad_min} && fDecRad < {rad_max}")
         if cen_min is not None and cen_max is not None:
             sel_data_parts.append(f"fCentralityFT0C > {cen_min} && fCentralityFT0C < {cen_max}")
             mc_centrality_range = active_cfg.get('mc_centrality_range', None)
@@ -654,6 +688,8 @@ class BDTPreProcess:
 
         sel_data = " && ".join(sel_data_parts) if sel_data_parts else "1"
         sel_mc = " && ".join(sel_mc_parts) if sel_mc_parts else "1"
+        if self.mc_closure_test:
+            sel_data = f"({sel_data}) && fIsReco == 1"
         sel_mc = sel_mc + " && fIsReco == 1"  # ensure only reconstructed MC is used for training
 
         data_root = self.snapshot_dir / f"data_{label}.root"
@@ -670,8 +706,12 @@ class BDTPreProcess:
                 try:
                     if data_part.exists():
                         data_part.unlink()
-                    period['data_rdf'].Filter(sel_data).Define('fPeriodIndex', str(iper)).Snapshot(
-                        self.tree_name_data, str(data_part), self.data_columns + ['fPeriodIndex'])
+                    data_node = period['data_rdf'].Filter(sel_data).Define('fPeriodIndex', str(iper))
+                    data_cols = list(self.data_columns) + ['fPeriodIndex']
+                    if self.mc_closure_test:
+                        data_node = data_node.Define('model_output', '1.0')
+                        data_cols.append('model_output')
+                    data_node.Snapshot(self.tree_name_data, str(data_part), data_cols)
                     if data_part.exists():
                         data_parts.append(data_part)
                         print(f"Saved period data snapshot: {data_part}")
@@ -698,7 +738,12 @@ class BDTPreProcess:
         try:
             if data_root.exists():
                 data_root.unlink()
-            self.data_rdf.Filter(sel_data).Snapshot(self.tree_name_data, str(data_root), self.data_columns)
+            data_node = self.data_rdf.Filter(sel_data)
+            data_cols = list(self.data_columns)
+            if self.mc_closure_test:
+                data_node = data_node.Define('model_output', '1.0')
+                data_cols.append('model_output')
+            data_node.Snapshot(self.tree_name_data, str(data_root), data_cols)
             print(f"Saved data snapshot: {data_root}")
         except Exception as e:
             print(f"Warning: data snapshot failed for {label}: {e}")
@@ -1047,9 +1092,9 @@ class BDTPreProcess:
             print(f"_predict_and_rewrite_data_file: unexpected error: {e}")
             return False
 
-    def _process_training_unit(self, pt_range=None, ct_range=None, cen_range=None):
-        label = self._make_label(pt_range, ct_range, cen_range)
-        pretty_label = self._make_description(pt_range, ct_range, cen_range)
+    def _process_training_unit(self, pt_range=None, ct_range=None, cen_range=None, rad_range=None):
+        label = self._make_label(pt_range, ct_range, cen_range, rad_range)
+        pretty_label = self._make_description(pt_range, ct_range, cen_range, rad_range)
         if self.skip_existing_training_outputs and self._has_completed_training_outputs(label):
             score_eff_path = self.WP_dir / f"score_efficiency_array_{label}.txt"
             self.score_efficiency_files.append(str(score_eff_path))
@@ -1060,7 +1105,7 @@ class BDTPreProcess:
                 self._predict_and_rewrite_data_file(data_root, model_hdl, column_name="model_output")
             return
         print(f"[SNAPSHOT+ML] Processing {pretty_label}")
-        active_cfg = self._active_training_config(cen_range, pt_range, ct_range)
+        active_cfg = self._active_training_config(cen_range, pt_range, ct_range, rad_range)
         print(
             f"Training config for {pretty_label}: {active_cfg['name']} "
             f"(side_band_edges={active_cfg['side_band_edges']}, "
@@ -1071,7 +1116,11 @@ class BDTPreProcess:
             f"variables={active_cfg['training_variables']})"
         )
 
-        data_root, mc_root = self._make_snapshot_for_bin(pt_range, ct_range, cen_range, label, active_cfg)
+        data_root, mc_root = self._make_snapshot_for_bin(pt_range, ct_range, cen_range, label, active_cfg, rad_range)
+        if self.mc_closure_test:
+            print(f"[MCClosure] Saved reconstructed snapshots with model_output=1 for {pretty_label}; skip BDT training.")
+            print(f"Completed processing for {pretty_label}\n")
+            return
         bin_data_hdl, bin_mc_hdl = self._read_handlers(data_root, mc_root)
 
         if bin_mc_hdl is None or len(bin_mc_hdl) == 0:
@@ -1121,6 +1170,7 @@ class BDTPreProcess:
         print("Using models dir:", self.models_dir)
         print("mix_mode:", self.mix_mode)
         print(f"BDT efficiency grid: {self.efficiency_min:.3f} -> {self.efficiency_max:.3f} ({self.npoints_for_effi} points)")
+        print(f"MC closure test: {'enabled' if self.mc_closure_test else 'disabled'}")
         print(f"Training QA plots: {'enabled' if self.make_training_qa else 'disabled'}")
         print(f"Skip existing training outputs: {'enabled' if self.skip_existing_training_outputs else 'disabled'}")
         print(f"Score-efficiency retraining attempts: {self.score_efficiency_max_retrain_attempts}")
@@ -1134,6 +1184,20 @@ class BDTPreProcess:
                     continue
                 for ct_min, ct_max in zip(self.ct_bins[i_pt][:-1], self.ct_bins[i_pt][1:]):
                     self._process_training_unit((pt_min, pt_max), (ct_min, ct_max), None)
+
+        elif self.mix_mode == 'rad_ct':
+            if self.rad_bins is None or self.ct_bins_by_rad is None:
+                raise ValueError("mix_mode 'rad_ct' requires 'rad_bins' (1D edges) and 'ct_bins_by_rad' (list of ct edges per DecayRadius bin).")
+            for i_rad, (rad_min, rad_max) in enumerate(zip(self.rad_bins[:-1], self.rad_bins[1:])):
+                if self.target_rad_ranges and not self._range_matches(self.target_rad_ranges, (rad_min, rad_max)):
+                    continue
+                if i_rad >= len(self.ct_bins_by_rad):
+                    print(f"Warning: ct_bins_by_rad missing index {i_rad}, skip")
+                    continue
+                for ct_min, ct_max in zip(self.ct_bins_by_rad[i_rad][:-1], self.ct_bins_by_rad[i_rad][1:]):
+                    if self.target_ct_ranges and not self._range_matches(self.target_ct_ranges, (ct_min, ct_max)):
+                        continue
+                    self._process_training_unit(None, (ct_min, ct_max), None, (rad_min, rad_max))
 
         elif self.mix_mode == 'cen_pt':
             if self.cen_bins is None:

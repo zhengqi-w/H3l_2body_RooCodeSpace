@@ -166,8 +166,6 @@ inline auto CorrectAndConvertRDF(RDFType rdf, bool calibrate_he3_pt = false, boo
 {
     // We'll create sequential temporaries to avoid assigning different RInterface types
     auto out0 = rdf;
-    auto cols0 = out0.GetColumnNames();
-    auto has0 = [&](const std::string &n){ return std::find(cols0.begin(), cols0.end(), n) != cols0.end(); };
 
     // fFlags
     // Define fHePIDHypo / fPiPIDHypo unconditionally (assumes fFlags exists in input)

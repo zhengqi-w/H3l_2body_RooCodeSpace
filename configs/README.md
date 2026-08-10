@@ -92,6 +92,7 @@ Working-point text file names for each analysis mode.
 | --- | --- |
 | `bdt_spectrum` | WP file used when `analysis_mode=bdt_spectrum`. |
 | `pt_ct` | WP file used when `analysis_mode=pt_ct`. |
+| `rad_ct` | WP file used when `analysis_mode=rad_ct`. |
 | `ct_single` | WP file used when `analysis_mode=ct_single`. |
 
 ### `common.tree_names`
@@ -137,6 +138,7 @@ Strings used in plot labels and output naming.
 | --- | --- |
 | `basic_selection_data` | Baseline candidate selection applied to data and MC, for example `fDecRad > 0.8`. |
 | `mc_acceptance_require_two_body` | If `true`, MC acceptance denominators and numerators require `fIsTwoBodyDecay > 0`. If `false`, the acceptance calculation does not apply the two-body decay filter. Defaults to `true`; the legacy alias `is_two_body_selected` is also accepted. |
+| `mc_acceptance_outer_bin_cut_denominator` | Optional default for 2D MC acceptance modes. If `true`, the generated denominator is restricted to the outer pT/radius bin. If `false`, the denominator is filled from the full generated sample while the numerator remains selected in the outer bin. Mode profiles can override this value. Defaults to `true`. |
 
 ### `common.binning`
 
@@ -148,6 +150,8 @@ Strings used in plot labels and output naming.
 | `pt_bins_by_centrality` | pT-bin edges for each centrality bin in `bdt_spectrum` and `topology_spectrum` modes. |
 | `pt_bins` | pT-bin edges used in `pt_ct` mode. |
 | `ct_bins_by_pt` | ct-bin edges for each pT bin in `pt_ct` mode. |
+| `rad_bins` | DecayRadius-bin edges used in `rad_ct` mode. |
+| `ct_bins_by_rad` | ct-bin edges for each DecayRadius bin in `rad_ct` mode. Its length must equal `rad_bins.size()-1`. |
 | `ct_bins_single` | ct-bin edges used in `ct_single` mode. |
 | `pt_bins_single` | pT bins used by single-pT-dimension QA or auxiliary checks. |
 
@@ -197,6 +201,12 @@ BDT training and snapshot-building configuration.
 | `use_training_overrides` | Enables `training_overrides`. |
 | `training_overrides` | List of centrality-dependent training overrides. |
 
+MC signal snapshots are binned with the reconstructed `fCt` and `fDecRad`
+variables, matching the data snapshot bin definitions, and always require
+`fIsReco == 1`. Generated variables such as `fGenCt` and `fGenDecRad` remain
+available for QA and correction calculations but are not used to assign BDT
+training bins. MC pT binning remains configurable through `mc_pt_bin_var`.
+
 ### `preprocess.bdt.hyperparams`
 
 | Parameter | Description |
@@ -218,8 +228,8 @@ Each override can contain:
 | Parameter | Description |
 | --- | --- |
 | `name` | Override name, used only for identification. |
-| `modes` | Optional list of training modes to which the override applies, for example `["cen_pt"]`, `["pt_ct"]`, or `["ct_single"]`. If omitted, the override can match any mode. |
-| `bins` | Optional list of bin-matching blocks. Each block can contain `type`, `centrality_ranges`, `pt_ranges`, and/or `ct_ranges`. If omitted, the override applies to all bins in the selected modes. |
+| `modes` | Optional list of training modes to which the override applies, for example `["cen_pt"]`, `["pt_ct"]`, `["rad_ct"]`, or `["ct_single"]`. If omitted, the override can match any mode. |
+| `bins` | Optional list of bin-matching blocks. Each block can contain `type`, `centrality_ranges`, `pt_ranges`, `rad_ranges`, and/or `ct_ranges`. If omitted, the override applies to all bins in the selected modes. |
 | `mc_use_full_centrality` | Whether to use full-centrality MC signal candidates for the selected centrality ranges. Useful when central-bin MC signal statistics are limited. |
 | `side_band_edges` | Overrides the default sideband boundaries. |
 | `training_variables` | Overrides the default training-variable list. |
@@ -230,6 +240,7 @@ This block is used only when `use_training_overrides=true`. The bin matcher is s
 
 - `type: "cen_pt"` matches centrality-pT bins used by `bdt_spectrum` and `topology_spectrum` training.
 - `type: "pt_ct"` matches pT-ct bins.
+- `type: "rad_ct"` matches DecayRadius-ct bins.
 - `type: "ct_single"` matches single-ct-bin training, optionally with a common pT filter.
 - `type: "pt_single"` and `type: "pt_ct_single"` are also accepted for the corresponding auxiliary modes.
 
@@ -437,6 +448,7 @@ Mode-dependent dimensions and selections.
 | `bdt_spectrum` | Centrality + pT spectrum analysis using BDT working points. |
 | `topology_spectrum` | Centrality + pT spectrum analysis using manual topology cuts. |
 | `pt_ct` | pT + ct analysis mode, used for lifetime/cross-section-related studies. |
+| `rad_ct` | DecayRadius + ct analysis mode. Training and WP are performed per `(DecayRadius, ct)` bin, while analysis groups bins by DecayRadius and fits the corrected ct spectrum in each group. |
 | `ct_single` | Single-ct-dimension analysis mode. |
 
 Common fields:
@@ -447,6 +459,7 @@ Common fields:
 | `additional_data_selection` | Extra data selection applied within this mode. |
 | `centrality_selection` | Centrality selection used by `pt_ct` and `ct_single`. |
 | `add_absorption_correction` | Whether absorption correction is applied. |
+| `mc_acceptance_outer_bin_cut_denominator` | Optional mode-specific override of the denominator outer-bin cut. This is useful for rad-ct tests where the numerator keeps the DecayRadius-bin cut but the denominator intentionally does not. |
 | `data_selection_topology` | Manual per-centrality/per-pT topology selections used by `topology_spectrum`. |
 
 ## `checks`

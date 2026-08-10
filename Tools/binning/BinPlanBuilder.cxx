@@ -174,6 +174,41 @@ BinPlan BinPlanBuilder::Build(const GeneralHelper::Json &cfg, const ModePolicy &
                 AddEdge(out.ctEdges, item.ctMax);
             }
         }
+    } else if (policy.useRad && policy.useCt) {
+        const auto radEdges = ReadDoubleArray(commonBinning.value("rad_bins", GeneralHelper::Json::array()));
+        const auto ctByRad = commonBinning.value("ct_bins_by_rad", GeneralHelper::Json::array());
+        if (radEdges.size() < 2) {
+            throw std::runtime_error("Invalid rad_bins for mode: " + policy.mode);
+        }
+        if (!ctByRad.is_array() || ctByRad.size() != radEdges.size() - 1) {
+            throw std::runtime_error("ct_bins_by_rad size must equal rad_bins.size()-1");
+        }
+
+        for (size_t ir = 0; ir + 1 < radEdges.size(); ++ir) {
+            const auto ctEdges = ReadDoubleArray(ctByRad.at(ir));
+            if (ctEdges.size() < 2) {
+                throw std::runtime_error("Invalid ct_bins_by_rad row");
+            }
+            for (size_t ict = 0; ict + 1 < ctEdges.size(); ++ict) {
+                BinPlanItem item;
+                item.mode = policy.mode;
+                item.hasRad = true;
+                item.hasCt = true;
+                item.radMin = radEdges[ir];
+                item.radMax = radEdges[ir + 1];
+                item.ctMin = ctEdges[ict];
+                item.ctMax = ctEdges[ict + 1];
+                item.label = MakeLabel(item);
+                item.snapshotDataPath = BuildDataSnapshotPath(snapshotDir, item);
+                item.snapshotMcPath = BuildMcSnapshotPath(snapshotDir, item);
+                out.items.push_back(item);
+
+                AddEdge(out.radEdges, item.radMin);
+                AddEdge(out.radEdges, item.radMax);
+                AddEdge(out.ctEdges, item.ctMin);
+                AddEdge(out.ctEdges, item.ctMax);
+            }
+        }
     } else if (policy.useCt && !policy.usePt) {
         const auto ctEdges = ReadDoubleArray(commonBinning.value("ct_bins_single", GeneralHelper::Json::array()));
         if (ctEdges.size() < 2) {
@@ -199,6 +234,7 @@ BinPlan BinPlanBuilder::Build(const GeneralHelper::Json &cfg, const ModePolicy &
 
     std::sort(out.cenEdges.begin(), out.cenEdges.end());
     std::sort(out.ptEdges.begin(), out.ptEdges.end());
+    std::sort(out.radEdges.begin(), out.radEdges.end());
     std::sort(out.ctEdges.begin(), out.ctEdges.end());
     return out;
 }
@@ -221,6 +257,9 @@ std::string BinPlanBuilder::MakeLabel(const BinPlanItem &item) {
     if (item.hasPt) {
         label += "pt_" + FormatEdge(item.ptMin) + "_" + FormatEdge(item.ptMax) + "_";
     }
+    if (item.hasRad) {
+        label += "rad_" + FormatEdge(item.radMin) + "_" + FormatEdge(item.radMax) + "_";
+    }
     if (item.hasCt) {
         label += "ct_" + FormatEdge(item.ctMin) + "_" + FormatEdge(item.ctMax) + "_";
     }
@@ -238,6 +277,10 @@ std::string BinPlanBuilder::BuildDataSnapshotPath(const std::string &dir, const 
         return dir + "/data_pt_" + FormatEdge(item.ptMin) + "_" + FormatEdge(item.ptMax) +
                "_ct_" + FormatEdge(item.ctMin) + "_" + FormatEdge(item.ctMax) + ".root";
     }
+    if (item.hasRad && item.hasCt) {
+        return dir + "/data_rad_" + FormatEdge(item.radMin) + "_" + FormatEdge(item.radMax) +
+               "_ct_" + FormatEdge(item.ctMin) + "_" + FormatEdge(item.ctMax) + ".root";
+    }
     if (item.hasCt) {
         return dir + "/data_ct_" + FormatEdge(item.ctMin) + "_" + FormatEdge(item.ctMax) + ".root";
     }
@@ -252,6 +295,10 @@ std::string BinPlanBuilder::BuildMcSnapshotPath(const std::string &dir, const Bi
     }
     if (item.hasPt && item.hasCt) {
         return dir + "/mc_pt_" + FormatEdge(item.ptMin) + "_" + FormatEdge(item.ptMax) +
+               "_ct_" + FormatEdge(item.ctMin) + "_" + FormatEdge(item.ctMax) + ".root";
+    }
+    if (item.hasRad && item.hasCt) {
+        return dir + "/mc_rad_" + FormatEdge(item.radMin) + "_" + FormatEdge(item.radMax) +
                "_ct_" + FormatEdge(item.ctMin) + "_" + FormatEdge(item.ctMax) + ".root";
     }
     if (item.hasCt) {

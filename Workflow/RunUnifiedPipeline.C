@@ -36,6 +36,8 @@ std::string NormalizeMode(std::string mode) {
     });
     std::replace(mode.begin(), mode.end(), '-', '_');
     if (mode == "ptct") return "pt_ct";
+    if (mode == "radct") return "rad_ct";
+    if (mode == "decayradiusct" || mode == "decay_radius_ct") return "rad_ct";
     if (mode == "cenpt") return "cen_pt";
     if (mode == "ptctsingle") return "pt_ct_single";
     if (mode == "ptsingle") return "pt_single";
@@ -45,7 +47,7 @@ std::string NormalizeMode(std::string mode) {
 
 bool IsAllowedMode(const std::string &mode) {
     static const std::unordered_set<std::string> kAllowed = {
-        "pt_ct", "cen_pt", "pt_ct_single", "pt_single", "ct_single", "bdt_spectrum", "topology_spectrum"
+        "pt_ct", "rad_ct", "cen_pt", "pt_ct_single", "pt_single", "ct_single", "bdt_spectrum", "topology_spectrum"
     };
     return kAllowed.find(mode) != kAllowed.end();
 }

@@ -9,12 +9,15 @@ namespace UnifiedAnalysis {
 struct BinPlanItem {
     bool hasCen{false};
     bool hasPt{false};
+    bool hasRad{false};
     bool hasCt{false};
 
     double cenMin{-1.0};
     double cenMax{-1.0};
     double ptMin{-1.0};
     double ptMax{-1.0};
+    double radMin{-1.0};
+    double radMax{-1.0};
     double ctMin{-1.0};
     double ctMax{-1.0};
 
@@ -31,6 +34,7 @@ struct BinPlan {
 
     std::vector<double> cenEdges;
     std::vector<double> ptEdges;
+    std::vector<double> radEdges;
     std::vector<double> ctEdges;
 };
 

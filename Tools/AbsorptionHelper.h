@@ -228,6 +228,152 @@ private:
     std::string keyAnti = "antimatter";
 };
 
+// RadCtAbsorptionCalculator: survival efficiency in decay-ct bins, grouped by
+// absorption radius R = sqrt(absoX^2 + absoY^2).
+class RadCtAbsorptionCalculator {
+public:
+    RadCtAbsorptionCalculator(ROOT::RDataFrame* rdf,
+                              const std::vector<double> &radBins,
+                              const std::vector<std::vector<double>> &ctBins,
+                              double org_ctao=7.6,
+                              std::string histNameSuffix="")
+    : fRdfPtr(rdf), fRadBins(radBins), fCtBins(ctBins), fOrgCtao(org_ctao), fHistNameSuffix(histNameSuffix) {}
+
+    ~RadCtAbsorptionCalculator() {
+        fHCounts.clear();
+        fHCountsAbsorb.clear();
+        fHRatio.clear();
+    }
+
+    void Calculate() {
+        if (!fRdfPtr) return;
+        if (fHCounts.empty()) initHistos();
+        for (auto &p : fHCounts)
+            for (auto &h : p.second) h->Reset();
+        for (auto &p : fHCountsAbsorb)
+            for (auto &h : p.second) h->Reset();
+        for (auto &p : fHRatio)
+            for (auto &h : p.second) h->Reset();
+
+        fRdfPtr->Foreach([&](float pt, float eta, float phi, float ax, float ay, float az, int pdg){
+            std::string mat = (pdg>0) ? "matter" : "antimatter";
+            TLorentzVector lv; lv.SetPtEtaPhiM(pt, eta, phi, HE3_MASS);
+            float he3p = lv.P();
+            float absoL = std::sqrt(ax*ax + ay*ay + az*az);
+            float absoCt = (he3p!=0) ? absoL * HE3_MASS / he3p : 1e9;
+            float rad = std::sqrt(ax*ax + ay*ay);
+            for (size_t i=0;i+1<fRadBins.size();++i) {
+                if (rad >= fRadBins[i] && rad < fRadBins[i+1]) {
+                    TH1F *hCountsBoth = fHCounts[keyBoth][i];
+                    TH1F *hCountsMat = fHCounts[mat][i];
+                    TH1F *hAbsBoth = fHCountsAbsorb[keyBoth][i];
+                    TH1F *hAbsMat = fHCountsAbsorb[mat][i];
+                    for (int ib = 1; ib <= hCountsBoth->GetNbinsX(); ++ib) {
+                        const double lo = hCountsBoth->GetXaxis()->GetBinLowEdge(ib);
+                        const double hi = hCountsBoth->GetXaxis()->GetBinUpEdge(ib);
+                        const double denW = std::exp(-lo / fOrgCtao) - std::exp(-hi / fOrgCtao);
+                        double numW = 0.0;
+                        if (absoCt > lo) {
+                            const double up = std::min<double>(hi, absoCt);
+                            numW = std::exp(-lo / fOrgCtao) - std::exp(-up / fOrgCtao);
+                        }
+                        hCountsBoth->AddBinContent(ib, denW);
+                        hCountsMat->AddBinContent(ib, denW);
+                        hAbsBoth->AddBinContent(ib, numW);
+                        hAbsMat->AddBinContent(ib, numW);
+                    }
+                    break;
+                }
+            }
+        }, {"pt","eta","phi","absoX","absoY","absoZ","pdg"});
+
+        for (size_t i=0;i+1<fRadBins.size();++i) {
+            for (const auto &key : {keyBoth, keyMat, keyAnti}) {
+                TH1F *hCounts = fHCounts[key][i];
+                TH1F *hCountsAbsorb = fHCountsAbsorb[key][i];
+                TH1F *hRatio = fHRatio[key][i];
+                hRatio->Divide(hCountsAbsorb, hCounts, 1.0, 1.0, "B");
+                for (int ib = 1; ib <= hRatio->GetNbinsX(); ++ib) {
+                    if (hCounts->GetBinContent(ib) <= 0.0) {
+                        hRatio->SetBinContent(ib, 1.0);
+                        hRatio->SetBinError(ib, 0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    std::pair<std::vector<std::vector<double>>, std::vector<std::vector<double>>> GetAbsorptionEfficiency(const std::string &which="both") const {
+        std::vector<std::vector<double>> vals, errs;
+        if (fHRatio.empty()) return {vals, errs};
+        auto it = fHRatio.find(which);
+        if (it == fHRatio.end()) return {vals, errs};
+        for (size_t i=0;i+1<fRadBins.size();++i) {
+            TH1F *h = it->second[i];
+            int nb = h->GetNbinsX();
+            std::vector<double> vbin(nb), ebin(nb);
+            for (int b=0;b<nb;++b) {
+                vbin[b] = h->GetBinContent(b+1);
+                ebin[b] = h->GetBinError(b+1);
+            }
+            vals.push_back(vbin);
+            errs.push_back(ebin);
+        }
+        return {vals, errs};
+    }
+
+    const std::map<std::string, std::vector<TH1F*>>& HistCounts() const { return fHCounts; }
+    const std::map<std::string, std::vector<TH1F*>>& HistCountsAbsorb() const { return fHCountsAbsorb; }
+    const std::map<std::string, std::vector<TH1F*>>& HistRatio() const { return fHRatio; }
+
+private:
+    void initHistos() {
+        for (size_t i=0;i+1<fRadBins.size();++i) {
+            std::string name = Form("h_he_counts_rad%zu", i);
+            std::string name_abs = Form("h_he_counts_absorb_rad%zu", i);
+            std::string name_ratio = Form("h_he_ratio_absorb_rad%zu", i);
+            std::vector<double> bins;
+            if (i < fCtBins.size() && fCtBins[i].size() >= 2) {
+                bins = fCtBins[i];
+            } else {
+                bins.reserve(101);
+                double xmin = 0.0, xmax = 50.0; int nb=100;
+                for (int b=0;b<=nb;++b) bins.push_back(xmin + (xmax-xmin)/nb * b);
+            }
+            TH1F* fHCountsBinBoth = MakeTH1((name+"_both"+fHistNameSuffix).c_str(), Form("Both c#tau before absorption R: %g - %g ;c#tau;Counts", fRadBins[i], fRadBins[i+1]), bins);
+            TH1F* fHCountsBinMatter = MakeTH1((name+"_matter"+fHistNameSuffix).c_str(), Form("Matter c#tau before absorption R: %g - %g ;c#tau;Counts", fRadBins[i], fRadBins[i+1]), bins);
+            TH1F* fHCountsBinAnti = MakeTH1((name+"_antimat"+fHistNameSuffix).c_str(), Form("Antimatter c#tau before absorption R: %g - %g ;c#tau;Counts", fRadBins[i], fRadBins[i+1]), bins);
+            TH1F* fHCountsAbsorbBinBoth = MakeTH1((name_abs+"_both"+fHistNameSuffix).c_str(), Form("Both c#tau after absorption R: %g - %g ;c#tau;Counts", fRadBins[i], fRadBins[i+1]), bins);
+            TH1F* fHCountsAbsorbBinMatter = MakeTH1((name_abs+"_matter"+fHistNameSuffix).c_str(), Form("Matter c#tau after absorption R: %g - %g ;c#tau;Counts", fRadBins[i], fRadBins[i+1]), bins);
+            TH1F* fHCountsAbsorbBinAnti = MakeTH1((name_abs+"_antimat"+fHistNameSuffix).c_str(), Form("Antimatter c#tau after absorption R: %g - %g ;c#tau;Counts", fRadBins[i], fRadBins[i+1]), bins);
+            TH1F* fHRatioBinBoth = MakeTH1((name_ratio+"_both"+fHistNameSuffix).c_str(), Form("Both absorption survival efficiency R: %g - %g ;c#tau;Efficiency", fRadBins[i], fRadBins[i+1]), bins);
+            TH1F* fHRatioBinMatter = MakeTH1((name_ratio+"_matter"+fHistNameSuffix).c_str(), Form("Matter absorption survival efficiency R: %g - %g ;c#tau;Efficiency", fRadBins[i], fRadBins[i+1]), bins);
+            TH1F* fHRatioBinAnti = MakeTH1((name_ratio+"_antimat"+fHistNameSuffix).c_str(), Form("Antimatter absorption survival efficiency R: %g - %g ;c#tau;Efficiency", fRadBins[i], fRadBins[i+1]), bins);
+            fHCounts[keyBoth].push_back(fHCountsBinBoth);
+            fHCounts[keyMat].push_back(fHCountsBinMatter);
+            fHCounts[keyAnti].push_back(fHCountsBinAnti);
+            fHCountsAbsorb[keyBoth].push_back(fHCountsAbsorbBinBoth);
+            fHCountsAbsorb[keyMat].push_back(fHCountsAbsorbBinMatter);
+            fHCountsAbsorb[keyAnti].push_back(fHCountsAbsorbBinAnti);
+            fHRatio[keyBoth].push_back(fHRatioBinBoth);
+            fHRatio[keyMat].push_back(fHRatioBinMatter);
+            fHRatio[keyAnti].push_back(fHRatioBinAnti);
+        }
+    }
+
+    ROOT::RDataFrame* fRdfPtr;
+    std::vector<double> fRadBins;
+    std::vector<std::vector<double>> fCtBins;
+    double fOrgCtao{7.6};
+    std::string fHistNameSuffix{""};
+    std::map<std::string, std::vector<TH1F*>> fHCounts;
+    std::map<std::string, std::vector<TH1F*>> fHCountsAbsorb;
+    std::map<std::string, std::vector<TH1F*>> fHRatio;
+    std::string keyBoth = "both";
+    std::string keyMat = "matter";
+    std::string keyAnti = "antimatter";
+};
+
 // SpectrumAbsorptionCalculator: fills pt-binned absorption efficiencies (both/matter/antimatter)
 // using a simple survival test per candidate. Histograms are 1D in pt with the provided binning.
 class SpectrumAbsorptionCalculator {

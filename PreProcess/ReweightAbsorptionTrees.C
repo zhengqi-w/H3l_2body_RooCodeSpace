@@ -89,7 +89,7 @@ void ReweightOneFile(const std::filesystem::path &inputPath,
                      const std::filesystem::path &outputPath,
                      TF1 *func,
                      const std::vector<double> &ptBins,
-                     const std::vector<double> &funcMaxByBin,
+                     double funcMax,
                      const std::string &treeName,
                      unsigned int seed) {
   TFile input(inputPath.c_str(), "READ");
@@ -148,8 +148,8 @@ void ReweightOneFile(const std::filesystem::path &inputPath,
     if (ib >= 0) {
       ++nInReweightBins;
       const double y = func ? func->Eval(pt) : 0.0;
-      const double prob = (std::isfinite(y) && y > 0.0 && funcMaxByBin[ib] > 0.0)
-                              ? std::clamp(y / funcMaxByBin[ib], 0.0, 1.0)
+      const double prob = (std::isfinite(y) && y > 0.0 && funcMax > 0.0)
+                              ? std::clamp(y / funcMax, 0.0, 1.0)
                               : 0.0;
       keep = rng.Uniform() < prob;
       if (keep) ++nAcceptedInBins;
@@ -189,7 +189,7 @@ void ReweightAbsorptionTrees(
     const std::string &funcName = "BlastWave_0_80",
     const std::string &treeName = "he3candidates",
     const std::string &outputDir = "",
-    const std::vector<double> &ptBins = {2.0, 3.0, 4.0, 5.5, 8.0},
+    const std::vector<double> &ptBins = {0.0, 10.0},
     unsigned int seed = 12345) {
   if (ROOT::IsImplicitMTEnabled()) {
     ROOT::DisableImplicitMT();
@@ -205,14 +205,11 @@ void ReweightAbsorptionTrees(
   if (ptBins.size() < 2) {
     throw std::runtime_error("Need at least two pT bin edges");
   }
-  std::vector<double> funcMaxByBin;
-  funcMaxByBin.reserve(ptBins.size() - 1);
-  for (size_t i = 0; i + 1 < ptBins.size(); ++i) {
-    const double maxVal = func->GetMaximum(ptBins[i], ptBins[i + 1]);
-    if (!(maxVal > 0.0) || !std::isfinite(maxVal)) {
-      throw std::runtime_error("Invalid maximum for " + funcName + " in pT bin");
-    }
-    funcMaxByBin.push_back(maxVal);
+  const double ptMin = ptBins.front();
+  const double ptMax = ptBins.back();
+  const double funcMax = func->GetMaximum(ptMin, ptMax);
+  if (!(funcMax > 0.0) || !std::isfinite(funcMax)) {
+    throw std::runtime_error("Invalid global maximum for " + funcName);
   }
 
   std::vector<std::filesystem::path> inputs;
@@ -226,13 +223,13 @@ void ReweightAbsorptionTrees(
 
   std::cout << "[Info] Reweight " << inputs.size()
             << " absorption tree files with " << funcName
-            << " using bin-wise accept-reject inside pT bins";
+            << " using global accept-reject in pT range";
   for (double edge : ptBins) std::cout << ' ' << edge;
-  std::cout
+  std::cout << " (global max=" << funcMax << ")"
             << " into " << outDir << '\n';
   for (size_t i = 0; i < inputs.size(); ++i) {
     const auto &path = inputs[i];
     const auto outPath = outDir / (path.stem().string() + "_BlastWave_0_80_reweighted.root");
-    ReweightOneFile(path, outPath, func.get(), ptBins, funcMaxByBin, treeName, seed + static_cast<unsigned int>(i * 1009));
+    ReweightOneFile(path, outPath, func.get(), ptBins, funcMax, treeName, seed + static_cast<unsigned int>(i * 1009));
   }
 }

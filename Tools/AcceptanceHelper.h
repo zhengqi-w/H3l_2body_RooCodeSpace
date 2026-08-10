@@ -200,11 +200,13 @@ TH1D* MergeSlotHists(const std::vector<std::unique_ptr<SlotType>> &slots,
 // Core flexible API. Depending on which binning arguments are provided, it performs:
 // 1) ptBins1D only                        -> acc vs pt
 // 2) ctBins1D only                        -> acc vs ct
-// 3) ptBins1D + ctBinsPerPt (size match)  -> acc vs ct in each pt bin
+// 3) ptBins1D + ctBinsPerPt (size match)  -> acc vs ct in each generated outer bin
 // 4) centBins1D + ptBinsPerCent (size match) -> acc vs pt in each centrality bin
 //
 // Columns:
-//   genPtCol:     generator-level |pt|
+//   genPtCol:     generator-level outer coordinate (|pt|, or generated decay
+//                 radius for rad-ct). It selects the outer bin for both the
+//                 generated denominator and matched reconstructed numerator.
 //   genCtCol:     generator-level ct
 //   evselCol:     event selection (1 passes). If missing, treated as all pass
 //   recoCol:      reconstruction flag (1 passes). If missing, treated as all pass
@@ -226,7 +228,8 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
     const std::string &recoCol    = "fIsReco",
     const std::string &genPtCol   = "fAbsGenPt",
     const std::string &genCtCol   = "fGenCt",
-    const std::string &genMatterCol = "fGenPt")
+    const std::string &genMatterCol = "fGenPt",
+    const bool constrainDenominatorToOuterBin = true)
 {
     EnsureImplicitMT();
     AcceptanceResult res;
@@ -526,7 +529,10 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         return res;
     }
 
-    // Scenario 3: acc vs ct per pt-bin (ptBins1D + ctBinsPerPt)
+    // Scenario 3: acc vs ct per generated outer bin. By default the generated
+    // denominator and reconstructed numerator are both restricted to the outer
+    // pt/rad bin. For rad-ct closure tests, the denominator can be filled from
+    // the full generated sample while the numerator remains rad-bin selected.
     if (!ptBins1D.empty() && !ctBinsPerPt.empty() && ctBinsPerPt.size() == ptBins1D.size() - 1 && ctBins1D.empty() && centBins1D.empty() && ptBinsPerCent.empty()) {
         const int nPt = static_cast<int>(ptBins1D.size()) - 1;
         res.evsel_ct_per_pt.assign(nPt, nullptr);
@@ -590,7 +596,7 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
         df_ready.ForeachSlot(
             [&](unsigned slot, double genPt, double genCt, int evselFlag, int recoFlag, int recoMCCollisionFlag, int basicFlag, int fundamentalFlag, double genMatter) {
                 const int ptIdx = FindBin(ptBins1D, genPt);
-                if (ptIdx < 0)
+                if (constrainDenominatorToOuterBin && ptIdx < 0)
                     return;
                 auto &slotHist = acquire_slot(slot);
                 const bool passFundamental = fundamentalFlag != 0;
@@ -599,13 +605,17 @@ inline AcceptanceResult ComputeAcceptanceFlexible(
                 const bool passReco = passFundamental && passBasic && (recoFlag != 0);
                 const bool isMatter = genMatter > 0.0;
                 if (passEvsel) {
-                    slotHist.evsel_ct_both[ptIdx]->Fill(genCt);
-                    if (isMatter)
-                        slotHist.evsel_ct_matter[ptIdx]->Fill(genCt);
-                    else
-                        slotHist.evsel_ct_antimatter[ptIdx]->Fill(genCt);
+                    const int firstDenIdx = constrainDenominatorToOuterBin ? ptIdx : 0;
+                    const int lastDenIdx = constrainDenominatorToOuterBin ? ptIdx + 1 : nPt;
+                    for (int denIdx = firstDenIdx; denIdx < lastDenIdx; ++denIdx) {
+                        slotHist.evsel_ct_both[denIdx]->Fill(genCt);
+                        if (isMatter)
+                            slotHist.evsel_ct_matter[denIdx]->Fill(genCt);
+                        else
+                            slotHist.evsel_ct_antimatter[denIdx]->Fill(genCt);
+                    }
                 }
-                if (passReco) {
+                if (passReco && ptIdx >= 0) {
                     slotHist.reco_ct_both[ptIdx]->Fill(genCt);
                     if (isMatter)
                         slotHist.reco_ct_matter[ptIdx]->Fill(genCt);

@@ -36,7 +36,8 @@
     "wp_files": {
       "bdt_spectrum": "WorkingPoint_SpectrumTest.txt",
       "pt_ct": "WorkingPoint_Crosssection_V0s.txt",
-      "ct_single": "WorkingPoint_CtSingle.txt"
+      "ct_single": "WorkingPoint_CtSingle.txt",
+      "rad_ct": "WorkingPoint_RadCt.txt"
     },
     "tree_names": {
       "data": "O2hypcands",
@@ -90,7 +91,16 @@
         [1, 2.6, 4.6, 8, 15, 35]
       ],
       "ct_bins_single": [1, 3, 5, 7, 9, 11, 13, 15, 17, 21, 27, 33],
-      "pt_bins_single": [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8]
+      "pt_bins_single": [2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 8],
+      "rad_bins": [0.8, 1.5, 2.5, 4, 6, 10, 20],
+      "ct_bins_by_rad": [
+        [1, 2, 3],
+        [1, 2, 3, 4, 5],
+        [1, 2, 3, 4, 5, 6, 8],
+        [1, 2, 3, 4, 5, 6, 8, 10, 14],
+        [2, 3, 4, 5, 6, 8, 10, 14, 20],
+        [3, 5, 6, 8, 10, 14, 20, 30, 40]
+      ]
     },
     "event_hist": {
       "n_events_hist": "hyper-reco-task/hCentFT0C"
@@ -98,6 +108,7 @@
   },
   "execution": {
     "enable": true,
+    "mc_closure_test": false,
     "combine_period": false,
     "training_mode": "ct_single",
     "wp_mode": "ct_single",
@@ -287,6 +298,12 @@
         "additional_data_selection": "",
         "centrality_selection": "",
         "add_absorption_correction": true
+      },
+      "rad_ct": {
+        "dimensions": ["rad", "ct"],
+        "additional_data_selection": "",
+        "centrality_selection": "",
+        "add_absorption_correction": false
       }
     },
     "corrections": {
